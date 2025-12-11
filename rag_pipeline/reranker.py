@@ -9,7 +9,7 @@ from colbert.infra import ColBERTConfig
 from colbert.modeling.checkpoint import Checkpoint
 from colbert.modeling.colbert import colbert_score
 
-from .rag_pipeline.state import AgentState, ensure_state_shapes, get_query_text
+from .state import AgentState, ensure_state_shapes, get_query_text
 
 
 
