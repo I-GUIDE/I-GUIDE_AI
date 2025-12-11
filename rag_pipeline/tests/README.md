@@ -1,10 +1,10 @@
 # RAG Pipeline Tests
 
-This directory contains tests for validating the complete RAG (Retrieval-Augmented Generation) pipeline.
+This directory contains full pipeline end-to-end tests for validating the complete RAG (Retrieval-Augmented Generation) pipeline with real functionality.
 
-## 🧪 Test Files
+## 🧪 Full Pipeline Test Files
 
-### Core Pipeline Tests (Run These First)
+### Core Pipeline Tests
 
 #### `test_full_pipeline.py` ⭐
 **Complete end-to-end pipeline test with detailed step-by-step output**
@@ -23,23 +23,6 @@ PYTHONPATH=. python rag_pipeline/tests/test_full_pipeline.py "custom query"
 - Step 4: Full LLM prompt
 - Step 5: AnvilGPT generation
 - Step 6: Final answer with citations
-
----
-
-#### `test_state_uniformity.py` ⭐
-**Validates that all search modules maintain uniform state structure**
-
-Ensures keyword, semantic, and spatial search all produce compatible `EvidenceEntry` structures for generation.
-
-```bash
-PYTHONPATH=. python rag_pipeline/tests/test_state_uniformity.py
-```
-
-**Verifies:**
-- All evidence entries follow `EvidenceEntry` schema
-- Document payloads are uniform across sources
-- Generation module processes mixed sources seamlessly
-- State structure is preserved throughout pipeline
 
 ---
 
@@ -64,65 +47,57 @@ PYTHONPATH=. python rag_pipeline/tests/local_rag_test.py --skip-checks  # Skip c
 
 ---
 
-### Service-Specific Debug Tests
+#### `test_e2e_llm_router.py` ⭐
+**Full pipeline test with LLM router**
 
-#### `test_neo4j_direct.py`
-**Direct Neo4j connectivity test (for debugging)**
-
-Tests Neo4j graph database connection independently.
+Tests the complete RAG pipeline with LLM-based routing decisions and real search backends.
 
 ```bash
-PYTHONPATH=. python rag_pipeline/tests/test_neo4j_direct.py
+PYTHONPATH=. python rag_pipeline/tests/test_e2e_llm_router.py
+PYTHONPATH=. python rag_pipeline/tests/test_e2e_llm_router.py "custom query"
 ```
 
 **Tests:**
-- Neo4j driver connection
-- Database node count
-- Sample node queries
-- Configuration validation
-
-**Note:** Use this to debug Neo4j connectivity issues separately from the full pipeline.
+- LLM router decision making
+- Real search backend execution (keyword, semantic, spatial, Neo4j)
+- Complete pipeline flow with generation
+- Multi-module result merging
 
 ---
 
-#### `test_spatial_direct.py`
-**Direct spatial search connectivity test**
+#### `test_state_uniformity.py` ⭐
+**Validates that all search modules maintain uniform state structure**
 
-Tests Google Maps API and OpenSearch spatial fields independently.
+Ensures keyword, semantic, and spatial search all produce compatible `EvidenceEntry` structures for generation.
 
 ```bash
-PYTHONPATH=. python rag_pipeline/tests/test_spatial_direct.py
+PYTHONPATH=. python rag_pipeline/tests/test_state_uniformity.py
+```
+
+**Verifies:**
+- All evidence entries follow `EvidenceEntry` schema
+- Document payloads are uniform across sources
+- Generation module processes mixed sources seamlessly
+- State structure is preserved throughout pipeline
+
+---
+
+#### `test_spatial_routing_e2e.py` ⭐
+**Full pipeline test for spatial search path**
+
+Tests the complete spatial routing → retrieval → generation flow with real APIs.
+
+```bash
+PYTHONPATH=. python rag_pipeline/tests/test_spatial_routing_e2e.py
+pytest rag_pipeline/tests/test_spatial_routing_e2e.py -v
 ```
 
 **Tests:**
-- Google Maps geocoding API
-- OpenSearch spatial metadata fields
-- Document count with spatial bounding boxes
-- Sample spatial document retrieval
-
----
-
-### Unit/Integration Tests (Pytest)
-
-#### `test_e2e_rag.py`
-**End-to-end unit tests with mocked data**
-
-Pytest-based unit tests that use mocked retrievers and LLM responses.
-
-```bash
-pytest rag_pipeline/tests/test_e2e_rag.py -v
-```
-
----
-
-#### `test_integration_rag.py`
-**Integration tests with mocked services**
-
-Pytest-based integration tests with stubbed external services.
-
-```bash
-pytest rag_pipeline/tests/test_integration_rag.py -v
-```
+- Spatial routing decisions
+- Real Google Maps API geocoding
+- Real OpenSearch spatial queries
+- Real AnvilGPT generation
+- Complete end-to-end spatial path
 
 ---
 
@@ -133,23 +108,14 @@ pytest rag_pipeline/tests/test_integration_rag.py -v
 # Full pipeline with all steps
 PYTHONPATH=. python rag_pipeline/tests/test_full_pipeline.py
 
+# Full pipeline with connectivity checks
+PYTHONPATH=. python rag_pipeline/tests/local_rag_test.py
+
+# Full pipeline with LLM router
+PYTHONPATH=. python rag_pipeline/tests/test_e2e_llm_router.py
+
 # Verify state uniformity across search modules
 PYTHONPATH=. python rag_pipeline/tests/test_state_uniformity.py
-```
-
-### Debug Specific Services
-```bash
-# Debug Neo4j connectivity
-PYTHONPATH=. python rag_pipeline/tests/test_neo4j_direct.py
-
-# Debug spatial search
-PYTHONPATH=. python rag_pipeline/tests/test_spatial_direct.py
-```
-
-### Run Unit Tests
-```bash
-# Run all pytest tests
-pytest rag_pipeline/tests/ -v
 ```
 
 ---
@@ -189,11 +155,12 @@ GOOGLE_MAPS_API_KEY=***
 | Component | Test Coverage |
 |-----------|---------------|
 | Memory Module | ✅ test_full_pipeline.py |
-| Keyword Search | ✅ All tests |
-| Semantic Search | ✅ All tests |
-| Spatial Search | ✅ test_spatial_direct.py, test_state_uniformity.py |
-| Neo4j Search | ⚠️ test_neo4j_direct.py (driver issues) |
-| LLM Generation | ✅ test_full_pipeline.py, local_rag_test.py |
+| Keyword Search | ✅ All pipeline tests |
+| Semantic Search | ✅ All pipeline tests |
+| Spatial Search | ✅ test_spatial_routing_e2e.py, test_state_uniformity.py |
+| Neo4j Search | ✅ test_e2e_llm_router.py |
+| LLM Router | ✅ test_e2e_llm_router.py |
+| LLM Generation | ✅ All pipeline tests |
 | State Uniformity | ✅ test_state_uniformity.py |
 | Citations | ✅ All pipeline tests |
 
@@ -201,25 +168,16 @@ GOOGLE_MAPS_API_KEY=***
 
 ## 🐛 Troubleshooting
 
-### Neo4j Connection Issues
-If `test_neo4j_direct.py` fails with segmentation fault (exit code 139), this indicates a Python driver compatibility issue. The Neo4j configuration is correct, but the Python driver may need reinstallation or version update:
-
-```bash
-pip uninstall neo4j
-pip install neo4j==5.14.0
-```
-
-### Spatial Search No Results
-If spatial search returns no results:
-1. Check `GOOGLE_MAPS_API_KEY` is set
-2. Verify OpenSearch documents have `spatial-bounding-box-geojson` field
-3. Run `test_spatial_direct.py` to see spatial document count
-
 ### LLM Generation Timeouts
 If generation times out:
 1. Verify `ANVILGPT_URL` and `ANVILGPT_KEY` are correct
 2. Check `ANVILGPT_MODEL` matches available models
 3. Test connectivity separately with curl
+
+### Spatial Search No Results
+If spatial search returns no results:
+1. Check `GOOGLE_MAPS_API_KEY` is set
+2. Verify OpenSearch documents have `spatial-bounding-box-geojson` field
 
 ---
 
@@ -239,8 +197,4 @@ If generation times out:
 
 🎉 RAG PIPELINE TEST COMPLETED
 ```
-
-
-
-
 
