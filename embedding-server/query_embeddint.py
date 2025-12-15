@@ -10,7 +10,7 @@ load_dotenv()
 # Configuration
 opensearch_host = os.getenv('OPENSEARCH_NODE')   # Replace with your OpenSearch host
 index_name = os.getenv('OPENSEARCH_INDEX') 
-flask_url = 'http://127.0.0.1:5000/get_embedding'  # Flask endpoint URL for embeddings
+flask_url = os.getenv('FLASK_EMBEDDING_URL', 'http://127.0.0.1:5000/get_embedding')  # Flask endpoint URL for embeddings
 
 # Use environment variables for credentials if available
 username = os.getenv('OPENSEARCH_USERNAME') 

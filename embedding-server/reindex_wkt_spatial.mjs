@@ -15,7 +15,7 @@ const WKT_GEOSHAPE_FIELDS = ['spatial-geometry', 'spatial-bounding-box'];
 const WKT_GEOPOINT_FIELDS = ['spatial-centroid'];
 
 const client = new Client({
-  node: 'https://149.165.155.195:9200' || 'http://localhost:9200',
+  node: process.env.OPENSEARCH_NODE || 'http://localhost:9200',
   auth: {
     username: process.env.OPENSEARCH_USERNAME || 'admin',
     password: process.env.OPENSEARCH_PASSWORD || 'admin',

@@ -3,6 +3,7 @@ boto3
 fiona
 flask
 flask-cors
+gunicorn
 httpx
 nbformat
 neo4j
