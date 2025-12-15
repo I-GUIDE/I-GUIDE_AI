@@ -1,0 +1,112 @@
+# Git
+.git
+.gitignore
+.gitattributes
+.github
+
+# Environment files (contain secrets)
+.env
+.env.local
+.env.*.local
+*.env
+embedding-server/.env
+rag_pipeline/.env
+rag_pipeline/.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg
+.venv/
+venv/
+ENV/
+env/
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+.npm
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+*.tmp
+
+# Logs
+*.log
+wkt_errors.log
+*.log.*
+
+# Test files and results
+tests/
+test_*.py
+*_test.py
+test_rag_pipeline.py
+run_llm_test.py
+e2e_test_results_*.json
+rag_loop_results_*.json
+
+# Documentation (keep README.md)
+*.md
+!README.md
+
+# Docker
+docker-compose.override.yml
+.dockerignore
+
+# Build artifacts
+*.tar
+*.tar.gz
+*.zip
+*.rar
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
+
+# Tools and scripts (not needed in containers)
+tools/
+run_integration_check.py
+
+# Results and data files
+*.json
+!package.json
+!package-lock.json
+
+# Coverage reports
+.coverage
+.coverage.*
+htmlcov/
+
+# Jupyter notebooks (if any)
+*.ipynb
+.ipynb_checkpoints/
