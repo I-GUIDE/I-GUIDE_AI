@@ -43,3 +43,16 @@ rag_loop_results_*.json
 ._*
 .Spotlight-V100
 .Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.bak
