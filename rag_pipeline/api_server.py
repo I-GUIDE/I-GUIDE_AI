@@ -17,8 +17,7 @@ CORS(app)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
-def _format_elements(retrieved_documents):
+\n+def _format_elements(retrieved_documents):
     """
     Convert internal evidence entries into the simplified element payload expected by the UI.
     """
@@ -68,12 +67,17 @@ def query():
     
     Returns:
     {
-        "answer": "final answer text",
-        "message_id": "uuid",
-        "elements": [...],
-        "count": 8,
-        "retrievalSteps": [...],
-        "reactHistory": [...]
+        "answer": {
+            "final_composed_answer": "...",
+            "citations": [...],
+            "confidence_score": 0.95
+        },
+        "evidence": {
+            "retrieved_documents": [...],
+            "sources": {...}
+        },
+        "query_information": {...},
+        "trace_observability": {...}
     }
     """
     try:
