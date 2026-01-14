@@ -3,6 +3,7 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 import os
 import logging
+from uuid import uuid4
 
 from .pipeline import run_pipeline
 
@@ -15,6 +16,32 @@ CORS(app)
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _format_elements(retrieved_documents):
+    """
+    Convert internal evidence entries into the simplified element payload expected by the UI.
+    """
+    elements = []
+    for entry in retrieved_documents:
+        document = (entry or {}).get("document") or {}
+        metadata = (entry or {}).get("metadata") or {}
+
+        elements.append(
+            {
+                "_id": document.get("doc_id") or metadata.get("hit_id"),
+                "_score": entry.get("score"),
+                "contributor": document.get("contributor"),
+                "contents": document.get("contents"),
+                "resource-type": document.get("resource-type") or document.get("element_type"),
+                "title": document.get("title"),
+                "authors": document.get("authors") or [],
+                "tags": document.get("tags") or [],
+                "thumbnail-image": document.get("thumbnail-image") or document.get("thumbnail_image"),
+            }
+        )
+    return elements
+
 
 @app.route('/health', methods=['GET'])
 def health():
@@ -41,17 +68,12 @@ def query():
     
     Returns:
     {
-        "answer": {
-            "final_composed_answer": "...",
-            "citations": [...],
-            "confidence_score": 0.95
-        },
-        "evidence": {
-            "retrieved_documents": [...],
-            "sources": {...}
-        },
-        "query_information": {...},
-        "trace_observability": {...}
+        "answer": "final answer text",
+        "message_id": "uuid",
+        "elements": [...],
+        "count": 8,
+        "retrievalSteps": [...],
+        "reactHistory": [...]
     }
     """
     try:
@@ -77,18 +99,25 @@ def query():
             extra_state=data.get('extra_state', {})
         )
         
-        # Extract and format the response
+        evidence = result.get("evidence", {}) or {}
+        retrieved_documents = evidence.get("retrieved_documents", []) or []
+        elements = _format_elements(retrieved_documents)
+        trace = result.get("trace_observability", {}) or {}
+        planner = result.get("planner_reasoning", {}) or {}
+
         response = {
-            "answer": result.get("answer", {}),
-            "evidence": {
-                "retrieved_documents": result.get("evidence", {}).get("retrieved_documents", []),
-                "sources": result.get("evidence", {}).get("sources", {})
-            },
-            "query_information": result.get("query_information", {}),
-            "trace_observability": result.get("trace_observability", {})
+            "answer": (
+                (result.get("answer") or {}).get("final_composed_answer")
+                or "No answer"
+            ),
+            "message_id": str(uuid4()),
+            "elements": elements,
+            "count": len(elements),
+            "retrievalSteps": trace.get("retrieval_routing_decisions") or [],
+            "reactHistory": planner.get("react_history") or trace.get("react_history") or [],
         }
         
-        logger.info(f"Query processed successfully. Retrieved {len(response['evidence']['retrieved_documents'])} documents.")
+        logger.info(f"Query processed successfully. Retrieved {len(elements)} documents.")
         return jsonify(response), 200
         
     except ValueError as e:

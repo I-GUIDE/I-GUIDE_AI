@@ -141,7 +141,7 @@ def run_generation(state: MutableMapping[str, Any]) -> AgentState:
 
     answer["final_composed_answer"] = text
     answer["citations"] = citations
-    answer["confidence_score"] = 0.7
+    answer["confidence_score"] = 0.7 
     return state  # type: ignore[return-value]
 
 
