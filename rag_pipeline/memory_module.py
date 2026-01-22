@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 MEMORY_INDEX = os.getenv("OPENSEARCH_MEMORY_INDEX", "chat_memory")
 EMBEDDING_MODEL = os.getenv("MEMORY_EMBEDDER_MODEL", "all-MiniLM-L6-v2")
-DEFAULT_STATE_PARAMS: Dict[str, Any] = {"top_k": 8, "max_context_tokens": 6000}
+DEFAULT_STATE_PARAMS: Dict[str, Any] = {"top_k": 100, "max_context_tokens": 6000}
 
 _OPENSEARCH_CLIENT: Optional[OpenSearch] = None
 _EMBEDDER: Optional[Any] = None
