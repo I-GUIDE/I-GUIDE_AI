@@ -17,7 +17,7 @@ CORS(app)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-\n+def _format_elements(retrieved_documents):
+def _format_elements(retrieved_documents):
     """
     Convert internal evidence entries into the simplified element payload expected by the UI.
     """
