@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, List, MutableMapping
 
+from .opengeodata_search import retrieve_opengeodata
 from .search_keyword import retrieve_keyword
 from .search_neo4j import retrieve_neo4j
 from .semantic_search import retrieve_semantic
@@ -72,6 +73,20 @@ def run_retrieval(state: MutableMapping[str, Any]) -> AgentState:
             limit=limit,
         )
         _record_decision(decisions, "spatial", f"hits:{len(spatial_hits)} appended:{len(appended)}")
+
+    if session_ctx.get("use_opengeodata"):
+        opengeo_hits = retrieve_opengeodata(state)
+        appended = merge_retrieval(
+            state,
+            source="opengeodata",
+            hits=opengeo_hits,
+            limit=limit,
+        )
+        _record_decision(
+            decisions,
+            "opengeodata",
+            f"hits:{len(opengeo_hits)} appended:{len(appended)}",
+        )
 
     trace = state.setdefault("trace_observability", {})
     trace["retrieval_summary"] = summarize_evidence(state["evidence"])
