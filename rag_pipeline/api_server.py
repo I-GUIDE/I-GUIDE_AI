@@ -94,7 +94,7 @@ def query():
             user_input=user_input,
             memory_id=data.get('memory_id'),
             params=data.get('params', {
-                "top_k": 8,
+                "top_k": 100,
                 "max_context_tokens": 6000,
                 "enable_llm_reranker": True
             }),

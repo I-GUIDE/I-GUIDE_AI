@@ -9,6 +9,7 @@ import os
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
+import logging
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 import requests
@@ -47,7 +48,12 @@ class NLQueryError(Exception):
     pass
 
 
-_API_BASE_ENV_VARS: Sequence[str] = ("OPENAI_API_BASE", "ANVILGPT_URL", "API_BASE")
+_API_BASE_ENV_VARS: Sequence[str] = (
+    "OPENAI_API_BASE",
+    "OPENAI_BASE_URL",
+    "ANVILGPT_URL",
+    "API_BASE",
+)
 _API_KEY_ENV_VARS: Sequence[str] = ("OPENAI_API_KEY", "OPENAI_KEY", "ANVILGPT_KEY", "API_KEY")
 _DEFAULT_PROVIDERS: Dict[str, Any] = {
     "stac": ["https://planetarycomputer.microsoft.com/api/stac/v1"],
@@ -62,8 +68,8 @@ def _hydrate_api_credentials_from_env_files() -> None:
     if not dotenv_values:
         return
     env_candidates = [
-        Path(__file__).resolve().with_name(".env"),
         Path(__file__).resolve().parents[1] / ".env",
+        Path(__file__).resolve().with_name(".env"),
         Path(__file__).resolve().parents[1] / "opengeodata_prototype" / ".env",
     ]
     target_keys = tuple(set(_API_BASE_ENV_VARS + _API_KEY_ENV_VARS))
@@ -784,6 +790,13 @@ def get_opengeodata_results(
 
     try:
         data = run_opengeodata(**payload)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "OpenGeoData NL query: %s bbox:%s timer:%s",
+                data.get("query"),
+                data.get("bbox"),
+                data.get("timer"),
+            )
     except OpenGeoDataError as exc:
         logger.error("OpenGeoData processing failed: %s", exc)
         return []
@@ -795,7 +808,10 @@ def get_opengeodata_results(
         logger.warning("OpenGeoData returned invalid payload.")
         return []
 
-    return _normalize_assets(data)
+    hits = _normalize_assets(data)
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("OpenGeoData hits: %s", [hit["_source"].get("title") for hit in hits])
+    return hits
 
 
 def retrieve_opengeodata(state: MutableMapping[str, Any]) -> List[Dict[str, Any]]:
