@@ -88,11 +88,13 @@ def run_retrieval(state: MutableMapping[str, Any]) -> AgentState:
     opengeo_hits = retrieve_opengeodata(state)
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("OpenGeoData hits (pre-limit): %s", [hit.get("_source", {}).get("title") for hit in opengeo_hits])
+    # Don't apply limit to opengeodata - always include results to ensure they appear in frontend
+    # The limit will be applied later during reranking/final selection
     appended = merge_retrieval(
         state,
         source="opengeodata",
         hits=opengeo_hits,
-        limit=limit,
+        limit=None,  # No limit - always include opengeodata results
     )
     _record_decision(
         decisions,
