@@ -177,7 +177,11 @@ def search_stac(
     collections: Optional[List[str]] = None,
     limit: int = 10,
 ) -> List[GeoAsset]:
-    from pystac_client import Client  # Imported lazily for optional dependency
+    try:
+        from pystac_client import Client  # Imported lazily for optional dependency
+    except ImportError:
+        logger.warning("pystac_client not installed. STAC search will be skipped. Install with: pip install pystac-client")
+        return []
 
     client = Client.open(endpoint)
     params: Dict[str, Any] = {"max_items": limit}
@@ -353,7 +357,14 @@ def search_cmr_collections(
     sess = _session()
     params: Dict[str, Any] = {"page_size": limit, "include_has_granules": "true"}
     if q:
-        params["keyword"] = q
+        # CMR supports multiple search strategies - try both keyword and text search
+        # Fix common typos: "lancover" -> "landcover", "land cover"
+        query_normalized = q.lower().strip()
+        if "lancover" in query_normalized:
+            query_normalized = query_normalized.replace("lancover", "landcover")
+        params["keyword"] = query_normalized
+        # Also try as text search for better matching
+        params["text"] = query_normalized
     if bbox:
         params["bounding_box"] = ",".join(map(str, bbox))
     if time_range:
@@ -598,15 +609,24 @@ def run_opengeodata(
 ) -> Dict[str, Any]:
     try:
         if nl:
-            q, bb, tt = get_q_bbox_timer_openai(
-                nl["user_query"],
-                current_date=nl["current_date"],
-                api_base=nl.get("api_base"),
-                api_key=nl.get("api_key"),
-                model=nl["model"],
-                default_bbox=tuple(nl.get("default_bbox")) if nl.get("default_bbox") else None,
-                default_timer=tuple(nl.get("default_timer")) if nl.get("default_timer") else None,
-            )
+            try:
+                q, bb, tt = get_q_bbox_timer_openai(
+                    nl["user_query"],
+                    current_date=nl["current_date"],
+                    api_base=nl.get("api_base"),
+                    api_key=nl.get("api_key"),
+                    model=nl["model"],
+                    default_bbox=tuple(nl.get("default_bbox")) if nl.get("default_bbox") else None,
+                    default_timer=tuple(nl.get("default_timer")) if nl.get("default_timer") else None,
+                )
+            except NLQueryError as nl_exc:
+                # Fall back to using the query directly without NL parsing
+                q = nl.get("user_query") or query or ""
+                bb = _valid_bbox(nl.get("default_bbox") or bbox) if (nl.get("default_bbox") or bbox) else None
+                tt: Optional[Tuple[Optional[str], Optional[str]]] = None
+                timer_to_use = nl.get("default_timer") or timer
+                if timer_to_use and len(timer_to_use) >= 2:
+                    tt = (_iso_date(timer_to_use[0]), _iso_date(timer_to_use[1]))
         else:
             q = query or ""
             bb = _valid_bbox(bbox) if bbox else None
@@ -615,13 +635,14 @@ def run_opengeodata(
                 tt = (_iso_date(timer[0]), _iso_date(timer[1]))
         assets = discover(q, bb, tt, limit=limit, providers=providers)
         assets = sorted(assets, key=lambda a: -score(a, q.lower().split(), bb, tt))[:limit]
-        return {
+        result = {
             "query": q,
             "bbox": list(bb) if bb else None,
             "timer": [tt[0], tt[1]] if tt else [None, None],
             "count": len(assets),
             "assets": [_asset_to_dict(asset) for asset in assets],
         }
+        return result
     except NLQueryError as exc:
         raise OpenGeoDataError(str(exc))
     except Exception as exc:
@@ -747,8 +768,10 @@ def _score_for_rank(rank: int) -> float:
 def _normalize_assets(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
     assets = (raw or {}).get("assets") or []
     hits: List[Dict[str, Any]] = []
+    skipped_count = 0
     for idx, asset in enumerate(assets):
         if not isinstance(asset, Mapping):
+            skipped_count += 1
             continue
         asset_id = str(asset.get("id") or f"opengeodata-{idx}")
         metadata = {
@@ -828,6 +851,7 @@ def retrieve_opengeodata(state: MutableMapping[str, Any]) -> List[Dict[str, Any]
         limit = 8
 
     session_ctx = state.get("session_context") or {}
+
     return get_opengeodata_results(query, limit=limit, session_ctx=session_ctx)
 
 

@@ -22,9 +22,16 @@ def _format_elements(retrieved_documents):
     Convert internal evidence entries into the simplified element payload expected by the UI.
     """
     elements = []
+    opengeodata_count = 0
     for entry in retrieved_documents:
         document = (entry or {}).get("document") or {}
         metadata = (entry or {}).get("metadata") or {}
+        source = entry.get("source", "unknown")
+        resource_type = document.get("resource-type") or document.get("element_type")
+        
+        # Track opengeodata results
+        if source == "opengeodata" or resource_type == "opengeodata":
+            opengeodata_count += 1
 
         elements.append(
             {
@@ -32,13 +39,16 @@ def _format_elements(retrieved_documents):
                 "_score": entry.get("score"),
                 "contributor": document.get("contributor"),
                 "contents": document.get("contents"),
-                "resource-type": document.get("resource-type") or document.get("element_type"),
+                "resource-type": resource_type,
                 "title": document.get("title"),
                 "authors": document.get("authors") or [],
                 "tags": document.get("tags") or [],
                 "thumbnail-image": document.get("thumbnail-image") or document.get("thumbnail_image"),
+                "source": source,  # Include source field to identify opengeodata results
             }
         )
+    if opengeodata_count > 0:
+        logger.info(f"Formatted {opengeodata_count} opengeodata results in {len(elements)} total elements")
     return elements
 
 

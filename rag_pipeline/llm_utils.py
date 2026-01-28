@@ -85,7 +85,44 @@ def call_llm(prompt: str) -> str:
         
         # Extract the response content
         if "choices" in data and len(data["choices"]) > 0:
-            content = data["choices"][0]["message"]["content"]
+            choice = data["choices"][0]
+            message = choice.get("message", {})
+            content = message.get("content")
+            
+            # Handle reasoning mode: if content is None but reasoning_content exists, use that
+            if content is None:
+                reasoning_content = message.get("reasoning_content")
+                if reasoning_content:
+                    logger.warning(
+                        f"AnvilGPT returned None content but reasoning_content exists "
+                        f"(finish_reason: {choice.get('finish_reason')}). Using reasoning_content."
+                    )
+                    content = reasoning_content
+                else:
+                    # Check provider_specific_fields as fallback
+                    provider_fields = message.get("provider_specific_fields", {})
+                    reasoning_content = provider_fields.get("reasoning_content")
+                    if reasoning_content:
+                        logger.warning(
+                            f"AnvilGPT returned None content but reasoning_content in provider_specific_fields "
+                            f"(finish_reason: {choice.get('finish_reason')}). Using reasoning_content."
+                        )
+                        content = reasoning_content
+            
+            if content is None:
+                finish_reason = choice.get("finish_reason", "unknown")
+                raise RuntimeError(
+                    f"⚠️ AnvilGPT returned empty content (finish_reason: {finish_reason}). "
+                    f"Response may have been truncated. Full response: {str(data)[:500]}"
+                )
+            
+            finish_reason = choice.get("finish_reason")
+            if finish_reason == "length":
+                logger.warning(
+                    f"⚠️ AnvilGPT response was truncated (hit token limit). "
+                    f"Received {len(content)} characters."
+                )
+            
             logger.debug(f"AnvilGPT response received: {len(content)} characters")
             return content
         else:
