@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import logging
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+from .llm_utils import call_llm
 
 import requests
 from requests.adapters import HTTPAdapter, Retry
@@ -56,9 +57,9 @@ _API_BASE_ENV_VARS: Sequence[str] = (
 )
 _API_KEY_ENV_VARS: Sequence[str] = ("OPENAI_API_KEY", "OPENAI_KEY", "ANVILGPT_KEY", "API_KEY")
 _DEFAULT_PROVIDERS: Dict[str, Any] = {
-    "stac": ["https://planetarycomputer.microsoft.com/api/stac/v1"],
+    #"stac": ["https://planetarycomputer.microsoft.com/api/stac/v1"],
     "records": [],
-    "ckan": [("https://api.gsa.gov/technology/datagov/v3/action", None)],
+    #"ckan": [("https://api.gsa.gov/technology/datagov/v3/action", None)],
     "cmr": True,
 }
 _DEFAULT_NL_MODEL = "gpt-oss:120b"
@@ -177,6 +178,7 @@ def search_stac(
     collections: Optional[List[str]] = None,
     limit: int = 10,
 ) -> List[GeoAsset]:
+    logger.info(f"STAC search called with: endpoint='{endpoint}', q='{q}', bbox={bbox}, time_range={time_range}, limit={limit}")
     try:
         from pystac_client import Client  # Imported lazily for optional dependency
     except ImportError:
@@ -260,6 +262,7 @@ def search_ogc_records(
     time_range: Optional[Tuple[Optional[str], Optional[str]]] = None,
     limit: int = 10,
 ) -> List[GeoAsset]:
+    logger.info(f"OGC Records search called with: endpoint='{base}', q='{q}', bbox={bbox}, time_range={time_range}, limit={limit}")
     sess = _session()
     payload: Dict[str, Any] = {"limit": limit}
     if q:
@@ -314,6 +317,7 @@ def search_ogc_records(
 
 
 def search_ckan(base: str, api_key: Optional[str] = None, q: str = "", limit: int = 10) -> List[GeoAsset]:
+    logger.info(f"CKAN search called with: endpoint='{base}', q='{q}', limit={limit}")
     sess = _session()
     params = {"q": q, "rows": limit}
     headers = {"X-Api-Key": api_key} if api_key else {}
@@ -354,17 +358,19 @@ def search_cmr_collections(
     time_range: Optional[Tuple[Optional[str], Optional[str]]] = None,
     limit: int = 10,
 ) -> List[GeoAsset]:
+    logger.info(f"CMR search_cmr_collections called with: q='{q}', bbox={bbox}, time_range={time_range}, limit={limit}")
     sess = _session()
     params: Dict[str, Any] = {"page_size": limit, "include_has_granules": "true"}
     if q:
-        # CMR supports multiple search strategies - try both keyword and text search
-        # Fix common typos: "lancover" -> "landcover", "land cover"
-        query_normalized = q.lower().strip()
-        if "lancover" in query_normalized:
-            query_normalized = query_normalized.replace("lancover", "landcover")
-        params["keyword"] = query_normalized
-        # Also try as text search for better matching
-        params["text"] = query_normalized
+        params["keyword"] = q
+        # # CMR supports multiple search strategies - try both keyword and text search
+        # # Fix common typos: "lancover" -> "landcover", "land cover"
+        # query_normalized = q.lower().strip()
+        # if "lancover" in query_normalized:
+        #     query_normalized = query_normalized.replace("lancover", "landcover")
+        # params["keyword"] = query_normalized
+        # # Also try as text search for better matching
+        # params["text"] = query_normalized
     if bbox:
         params["bounding_box"] = ",".join(map(str, bbox))
     if time_range:
@@ -418,27 +424,50 @@ def discover(
     providers: Optional[Dict[str, Any]] = None,
 ) -> List[GeoAsset]:
     providers = providers or dict(_DEFAULT_PROVIDERS)
+    logger.info(f"OpenGeoData discover() called: query='{query}', limit={limit}, providers={list(providers.keys())}")
     results: List[GeoAsset] = []
+    
+    stac_count = 0
     for endpoint in providers.get("stac", []):
         try:
-            results += search_stac(endpoint, q=query, bbox=bbox, time_range=time_range, limit=limit)
+            stac_results = search_stac(endpoint, q=query, bbox=bbox, time_range=time_range, limit=limit)
+            stac_count += len(stac_results)
+            results += stac_results
+            logger.info(f"OpenGeoData STAC provider '{endpoint}' returned {len(stac_results)} results")
         except Exception:
             logger.exception("STAC search failed for %s", endpoint)
+    
+    records_count = 0
     for endpoint in providers.get("records", []):
         try:
-            results += search_ogc_records(endpoint, q=query, bbox=bbox, time_range=time_range, limit=limit)
+            records_results = search_ogc_records(endpoint, q=query, bbox=bbox, time_range=time_range, limit=limit)
+            records_count += len(records_results)
+            results += records_results
+            logger.info(f"OpenGeoData OGC Records provider '{endpoint}' returned {len(records_results)} results")
         except Exception:
             logger.exception("OGC Records search failed for %s", endpoint)
+    
+    ckan_count = 0
     for base, api_key in providers.get("ckan", []):
         try:
-            results += search_ckan(base, api_key=api_key, q=query, limit=limit)
+            ckan_results = search_ckan(base, api_key=api_key, q=query, limit=limit)
+            ckan_count += len(ckan_results)
+            results += ckan_results
+            logger.info(f"OpenGeoData CKAN provider '{base}' returned {len(ckan_results)} results")
         except Exception:
             logger.exception("CKAN search failed for %s", base)
+    
+    cmr_count = 0
     if providers.get("cmr"):
         try:
-            results += search_cmr_collections(query, bbox=bbox, time_range=time_range, limit=limit)
+            cmr_results = search_cmr_collections(query, bbox=bbox, time_range=time_range, limit=limit)
+            cmr_count = len(cmr_results)
+            results += cmr_results
+            logger.info(f"OpenGeoData CMR provider returned {cmr_count} results")
         except Exception:
             logger.exception("CMR search failed")
+    
+    logger.info(f"OpenGeoData discover() completed: total results={len(results)} (STAC:{stac_count}, Records:{records_count}, CKAN:{ckan_count}, CMR:{cmr_count})")
 
     max_results = limit * (
         bool(providers.get("stac"))
@@ -504,91 +533,56 @@ def get_q_bbox_timer_openai(
     user_query: str,
     *,
     current_date: str,
-    api_base: Optional[str] = None,
-    api_key: Optional[str] = None,
-    model: str,
-    timeout: int = 20,
-    default_bbox: Optional[Tuple[float, float, float, float]] = None,
-    default_timer: Optional[Tuple[Optional[str], Optional[str]]] = None,
-    max_retries: int = 2,
-) -> Tuple[str, Optional[Tuple[float, float, float, float]], Optional[Tuple[Optional[str], Optional[str]]]]:
-    api_key = api_key or _get_env_value(_API_KEY_ENV_VARS)
-    if not api_key:
-        raise NLQueryError("Missing API key.")
-    api_base = api_base or _get_env_value(_API_BASE_ENV_VARS)
-    if not api_base:
-        raise NLQueryError("Missing API base.")
+    api_base: Optional[str] = None,  # Ignored, uses llm_utils
+    api_key: Optional[str] = None,    # Ignored, uses llm_utils
+    model: Optional[str] = None,      # Ignored, uses llm_utils
+    timeout: int = 20,                # Ignored
+    default_bbox: Optional[Tuple[float,float,float,float]] = None,
+    default_timer: Optional[Tuple[Optional[str],Optional[str]]] = None,
+    max_retries: int = 2              # Ignored
+) -> Tuple[str, Optional[Tuple[float,float,float,float]], Optional[Tuple[Optional[str],Optional[str]]]]:
+    """Use same LLM as generation to parse NL query into (q, bbox, timer)."""
+    
+    prompt = f"""You are a geospatial query normalizer. Today is {current_date}.
 
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    system_prompt = (
-        "You are a geospatial query normalizer.\n"
-        'Output JSON exactly: {"q":"...","bbox":[minlon,minlat,maxlon,maxlat]|null,"timer":[start_or_null,end_or_null]}\n'
-        f"Use today={current_date}. Remove locations/dates from q and put them into bbox/timer.\n"
-    )
-    json_schema = {
-        "name": "GeoQuery",
-        "schema": {
-            "type": "object",
-            "properties": {
-                "q": {"type": "string"},
-                "bbox": {
-                    "type": ["array", "null"],
-                    "items": {"type": "number"},
-                    "minItems": 4,
-                    "maxItems": 4,
-                },
-                "timer": {
-                    "type": ["array", "null"],
-                    "items": {"type": ["string", "null"]},
-                    "minItems": 2,
-                    "maxItems": 2,
-                },
-            },
-            "required": ["q", "bbox", "timer"],
-            "additionalProperties": False,
-        },
-    }
-    messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_query}]
-    strict_body = {
-        "model": model,
-        "messages": messages,
-        "temperature": 0,
-        "response_format": {"type": "json_schema", "json_schema": json_schema},
-    }
-    fallback_body = {
-        "model": model,
-        "messages": messages + [{"role": "system", "content": "Respond ONLY with the JSON schema above."}],
-        "temperature": 0,
-    }
+Given a user query, extract:
+- q: keyword query (no locations, no dates)
+- bbox: [minlon, minlat, maxlon, maxlat] if location mentioned, else null
+- timer: [start_date, end_date] if time mentioned, else [null, null]
 
-    last_error: Optional[Exception] = None
-    for attempt in range(max_retries + 1):
-        body = strict_body if attempt == 0 else fallback_body
-        try:
-            response = requests.post(_completion_url(api_base), headers=headers, json=body, timeout=timeout)
-            response.raise_for_status()
-            payload = response.json()
-            content = payload["choices"][0]["message"]["content"]
-            data = json.loads(content)
-            q = str(data.get("q", "")).strip()
-            if not q:
-                raise NLQueryError("Empty q.")
-            bbox = _valid_bbox(data.get("bbox"))
-            timer_raw = data.get("timer")
-            timer: Optional[Tuple[Optional[str], Optional[str]]] = None
-            if isinstance(timer_raw, list) and len(timer_raw) >= 2:
-                start = _iso_date(timer_raw[0])
-                end = _iso_date(timer_raw[1])
-                timer = (start, end)
-            if bbox is None:
-                bbox = default_bbox
-            if (timer is None or (timer[0] is None and timer[1] is None)) and default_timer:
-                timer = default_timer
-            return q, bbox, timer
-        except Exception as exc:
-            last_error = exc
-            time.sleep(0.4)
-    raise NLQueryError(f"NL parse failed: {last_error}")
+Examples:
+- "dams in illinois" → {{"q": "dams", "bbox": [-91.5, 37.0, -87.5, 42.5], "timer": [null, null]}}
+- "recent landcover" → {{"q": "landcover", "bbox": null, "timer": ["2020-01-01", "2025-11-06"]}}
+
+User query: {user_query}
+
+Respond with ONLY JSON: {{"q":"...","bbox":[...]|null,"timer":[...]}}"""
+
+    try:
+        response = call_llm(prompt)
+        data = json.loads(response)
+        
+        q = str(data.get("q", "")).strip()
+        if not q:
+            raise ValueError("Empty q")
+        
+        bbox = _valid_bbox(data.get("bbox"))
+        timer_raw = data.get("timer")
+        timer: Optional[Tuple[Optional[str], Optional[str]]] = None
+        if isinstance(timer_raw, list) and len(timer_raw) >= 2:
+            s = _iso_date(timer_raw[0])
+            e = _iso_date(timer_raw[1])
+            timer = (s, e)
+        
+        if bbox is None:
+            bbox = default_bbox
+        if (timer is None or (timer[0] is None and timer[1] is None)) and default_timer:
+            timer = default_timer
+        
+        return q, bbox, timer
+        
+    except Exception as e:
+        raise NLQueryError(f"NL parse failed: {e}")
 
 
 def _asset_to_dict(asset: GeoAsset) -> Dict[str, Any]:
@@ -607,9 +601,11 @@ def run_opengeodata(
     providers: Optional[Dict[str, Any]] = None,
     nl: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    logger.info("OpenGeoData run_opengeodata() called")
     try:
         if nl:
             try:
+                logger.info("OpenGeoData NL parsing enabled; processing NL query.")
                 q, bb, tt = get_q_bbox_timer_openai(
                     nl["user_query"],
                     current_date=nl["current_date"],
@@ -619,7 +615,17 @@ def run_opengeodata(
                     default_bbox=tuple(nl.get("default_bbox")) if nl.get("default_bbox") else None,
                     default_timer=tuple(nl.get("default_timer")) if nl.get("default_timer") else None,
                 )
+                logger.info(
+                    "OpenGeoData NL augmented query: %s bbox:%s timer:%s",
+                    q,
+                    bb,
+                    tt,
+                )
+                logger.info(f"OpenGeoData will call discover() with: query='{q}', bbox={bb}, timer={tt}")
             except NLQueryError as nl_exc:
+                logger.warning(f"OpenGeoData NL parsing failed: {nl_exc}. Falling back to direct query.")
+                logger.info(f"OpenGeoData fallback: nl dict keys={list(nl.keys())}, nl.get('default_bbox')={nl.get('default_bbox')}, nl.get('default_timer')={nl.get('default_timer')}")
+    
                 # Fall back to using the query directly without NL parsing
                 q = nl.get("user_query") or query or ""
                 bb = _valid_bbox(nl.get("default_bbox") or bbox) if (nl.get("default_bbox") or bbox) else None
@@ -628,6 +634,7 @@ def run_opengeodata(
                 if timer_to_use and len(timer_to_use) >= 2:
                     tt = (_iso_date(timer_to_use[0]), _iso_date(timer_to_use[1]))
         else:
+            logger.info("OpenGeoData NL parsing not used; proceeding with direct query.")
             q = query or ""
             bb = _valid_bbox(bbox) if bbox else None
             tt: Optional[Tuple[Optional[str], Optional[str]]] = None
@@ -772,6 +779,7 @@ def _normalize_assets(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
     for idx, asset in enumerate(assets):
         if not isinstance(asset, Mapping):
             skipped_count += 1
+            logger.warning(f"OpenGeoData: Skipping asset at index {idx} - not a Mapping, type: {type(asset).__name__}")
             continue
         asset_id = str(asset.get("id") or f"opengeodata-{idx}")
         metadata = {
@@ -796,6 +804,9 @@ def _normalize_assets(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "_source": metadata,
             }
         )
+    if skipped_count > 0:
+        logger.warning(f"OpenGeoData: Skipped {skipped_count} invalid assets out of {len(assets)} total")
+
     return hits
 
 
@@ -807,12 +818,15 @@ def get_opengeodata_results(
 ) -> List[Dict[str, Any]]:
     query = (query or "").strip()
     if not query:
+        logger.info("OpenGeoData get_opengeodata_results: empty query, returning empty list")
         return []
 
     payload = _payload_from_context(query, limit=limit, session_ctx=session_ctx)
+    logger.info(f"OpenGeoData get_opengeodata_results: calling run_opengeodata with payload keys={list(payload.keys())}")
 
     try:
         data = run_opengeodata(**payload)
+        logger.info(f"OpenGeoData run_opengeodata succeeded: found {data.get('count', 0)} assets")
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "OpenGeoData NL query: %s bbox:%s timer:%s",
@@ -832,6 +846,7 @@ def get_opengeodata_results(
         return []
 
     hits = _normalize_assets(data)
+    logger.info(f"OpenGeoData normalized {len(hits)} hits from {data.get('count', 0)} assets")
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("OpenGeoData hits: %s", [hit["_source"].get("title") for hit in hits])
     return hits
@@ -841,7 +856,7 @@ def retrieve_opengeodata(state: MutableMapping[str, Any]) -> List[Dict[str, Any]
     ensure_state_shapes(state)
     query = get_query_text(state)
     if not query:
-        logger.debug("OpenGeoData retriever skipped: empty query.")
+        logger.info("OpenGeoData retriever skipped: empty query.")
         return []
 
     params = state.get("params") or {}
@@ -851,8 +866,11 @@ def retrieve_opengeodata(state: MutableMapping[str, Any]) -> List[Dict[str, Any]
         limit = 8
 
     session_ctx = state.get("session_context") or {}
+    logger.info(f"OpenGeoData retrieval started: query='{query}', limit={limit}")
 
-    return get_opengeodata_results(query, limit=limit, session_ctx=session_ctx)
+    results = get_opengeodata_results(query, limit=limit, session_ctx=session_ctx)
+    logger.info(f"OpenGeoData retrieval completed: found {len(results)} results")
+    return results
 
 
 def run_opengeodata_search(

@@ -2,7 +2,7 @@
 embedding-server/.env
 rag_pipeline/.env
 rag_pipeline/.env.local
-
+opengeodata_prototype/.env
 # Python
 __pycache__/
 *.py[cod]
