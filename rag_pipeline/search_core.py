@@ -37,10 +37,17 @@ def run_retrieval(state: MutableMapping[str, Any]) -> AgentState:
     limit = _limit_for(state)
     query = get_query_text(state)
     decisions: List[RoutingDecision] = []
+    
+    logger.info(f"=== Starting retrieval for query: '{query}' (top_k={limit}) ===")
 
     keyword_hits = retrieve_keyword(state)
-    if logger.isEnabledFor(logging.DEBUG):
-        logger.debug("Keyword hits: %s", [hit.get("_source", {}).get("title") for hit in keyword_hits])
+    keyword_titles = [hit.get("_source", {}).get("title", "No title") for hit in keyword_hits]
+    logger.info(f"📚 KEYWORD search returned {len(keyword_hits)} documents:")
+    for i, title in enumerate(keyword_titles[:10], 1):
+        logger.info(f"  {i}. {title}")
+    if len(keyword_titles) > 10:
+        logger.info(f"  ... and {len(keyword_titles) - 10} more")
+    
     appended = merge_retrieval(
         state,
         source="keyword",
@@ -50,8 +57,13 @@ def run_retrieval(state: MutableMapping[str, Any]) -> AgentState:
     _record_decision(decisions, "keyword", f"hits:{len(keyword_hits)} appended:{len(appended)}")
 
     semantic_hits = retrieve_semantic(state)
-    if logger.isEnabledFor(logging.DEBUG):
-        logger.debug("Semantic hits: %s", [hit.get("_source", {}).get("title") for hit in semantic_hits])
+    semantic_titles = [hit.get("_source", {}).get("title", "No title") for hit in semantic_hits]
+    logger.info(f"🔍 SEMANTIC search returned {len(semantic_hits)} documents:")
+    for i, title in enumerate(semantic_titles[:10], 1):
+        logger.info(f"  {i}. {title}")
+    if len(semantic_titles) > 10:
+        logger.info(f"  ... and {len(semantic_titles) - 10} more")
+    
     appended = merge_retrieval(
         state,
         source="semantic",
@@ -63,8 +75,13 @@ def run_retrieval(state: MutableMapping[str, Any]) -> AgentState:
     session_ctx = state.get("session_context") or {}
     if "graph" in query.lower() or session_ctx.get("use_neo4j"):
         neo_hits = retrieve_neo4j(state)
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Neo4j hits: %s", [hit.get("_source", {}).get("title") for hit in neo_hits])
+        neo_titles = [hit.get("_source", {}).get("title", "No title") for hit in neo_hits]
+        logger.info(f"🕸️ NEO4J search returned {len(neo_hits)} documents:")
+        for i, title in enumerate(neo_titles[:10], 1):
+            logger.info(f"  {i}. {title}")
+        if len(neo_titles) > 10:
+            logger.info(f"  ... and {len(neo_titles) - 10} more")
+        
         appended = merge_retrieval(
             state,
             source="neo4j",
@@ -75,8 +92,13 @@ def run_retrieval(state: MutableMapping[str, Any]) -> AgentState:
 
     if session_ctx.get("use_spatial"):
         spatial_hits = retrieve_spatial(state)
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Spatial hits: %s", [hit.get("_source", {}).get("title") for hit in spatial_hits])
+        spatial_titles = [hit.get("_source", {}).get("title", "No title") for hit in spatial_hits]
+        logger.info(f"🗺️ SPATIAL search returned {len(spatial_hits)} documents:")
+        for i, title in enumerate(spatial_titles[:10], 1):
+            logger.info(f"  {i}. {title}")
+        if len(spatial_titles) > 10:
+            logger.info(f"  ... and {len(spatial_titles) - 10} more")
+        
         appended = merge_retrieval(
             state,
             source="spatial",
@@ -86,8 +108,13 @@ def run_retrieval(state: MutableMapping[str, Any]) -> AgentState:
         _record_decision(decisions, "spatial", f"hits:{len(spatial_hits)} appended:{len(appended)}")
 
     opengeo_hits = retrieve_opengeodata(state)
-    if logger.isEnabledFor(logging.DEBUG):
-        logger.debug("OpenGeoData hits (pre-limit): %s", [hit.get("_source", {}).get("title") for hit in opengeo_hits])
+    opengeo_titles = [hit.get("_source", {}).get("title", "No title") for hit in opengeo_hits]
+    logger.info(f"🌍 OPENGEODATA search returned {len(opengeo_hits)} documents:")
+    for i, title in enumerate(opengeo_titles[:10], 1):
+        logger.info(f"  {i}. {title}")
+    if len(opengeo_titles) > 10:
+        logger.info(f"  ... and {len(opengeo_titles) - 10} more")
+    
     # Don't apply limit to opengeodata - always include results to ensure they appear in frontend
     # The limit will be applied later during reranking/final selection
     appended = merge_retrieval(
@@ -96,11 +123,16 @@ def run_retrieval(state: MutableMapping[str, Any]) -> AgentState:
         hits=opengeo_hits,
         limit=None,  # No limit - always include opengeodata results
     )
+    logger.info(f"OpenGeoData: {len(appended)} documents appended to evidence")
     _record_decision(
         decisions,
         "opengeodata",
         f"hits:{len(opengeo_hits)} appended:{len(appended)}",
     )
+
+    # Summary log
+    total_evidence = len(state.get("evidence", {}).get("retrieved_documents", []))
+    logger.info(f"=== Retrieval complete: {total_evidence} total documents in evidence ===")
 
     trace = state.setdefault("trace_observability", {})
     trace["retrieval_summary"] = summarize_evidence(state["evidence"])
