@@ -1,4 +1,5 @@
 import datetime as _dt
+import json
 import pandas as pd
 import geopandas as gpd
 
@@ -15,7 +16,9 @@ def load_chicago_community_areas() -> gpd.GeoDataFrame:
         "https://raw.githubusercontent.com/RandomFractals/ChicagoCrimes/refs/heads/"
         "master/data/chicago-community-areas.geojson"
     )
-    return gpd.read_file(url)
+    gdf = gpd.read_file(url)
+    # Return GeoJSON as dict to keep FastAPI JSON serialization happy.
+    return json.loads(gdf.to_json())
 
 
 @mcp_tool
@@ -36,7 +39,16 @@ def load_chicago_crime_data() -> gpd.GeoDataFrame:
     gdf = gpd.GeoDataFrame(
         df, geometry=gpd.points_from_xy(df.longitude, df.latitude), crs="EPSG:4326"
     )
-    return gdf
+    # Return GeoJSON as dict to keep FastAPI JSON serialization happy.
+    # Convert datetime columns to ISO strings to avoid Timestamp JSON issues.
+    safe_gdf = gdf.copy()
+    datetime_cols = safe_gdf.select_dtypes(include=["datetime64[ns]", "datetimetz"]).columns
+    for col in datetime_cols:
+        safe_gdf[col] = safe_gdf[col].astype("datetime64[ns]").dt.strftime("%Y-%m-%dT%H:%M:%S")
+    # Replace NaN/inf values with None for JSON compliance.
+    safe_gdf = safe_gdf.replace([float("inf"), float("-inf")], None)
+    safe_gdf = safe_gdf.where(safe_gdf.notna(), None)
+    return json.loads(safe_gdf.to_json())
 
 
 @mcp_tool
