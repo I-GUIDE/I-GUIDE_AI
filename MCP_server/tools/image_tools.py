@@ -29,8 +29,14 @@ def describe_image(
     file: UploadFile = File(...),
     prompt_text: str = "Describe what is in this image."
 ) -> str:
-    """
-    Describe the contents of an image using the configured vision model.
+    """Describe the contents of an image using the configured vision model.
+    
+    Args:
+        file: The image file to analyze (uploaded file)
+        prompt_text: Custom prompt for the vision model (default: "Describe what is in this image.")
+    
+    Returns:
+        Text description of the image contents
     """
     image_bytes = file.file.read()
     file.file.close()
@@ -80,8 +86,14 @@ def describe_map(
         "Format the response in markdown format."
     )
 ) -> str:
-    """
-    Describe a map image with focus on area, problem, and provided information.
+    """Describe a map image with focus on area, problem, and provided information.
+    
+    Args:
+        file: The map image file to analyze (uploaded file)
+        prompt_text: Custom prompt focusing on area, problem, and information (default provided)
+    
+    Returns:
+        Markdown-formatted description of the map
     """
     image_bytes = file.file.read()
     file.file.close()

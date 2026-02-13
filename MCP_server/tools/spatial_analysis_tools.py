@@ -1,28 +1,61 @@
+"""Spatial analysis tools for Chicago geospatial data.
+
+These tools perform spatial operations on cached data to avoid
+passing large GeoDataFrames through the MCP protocol.
+"""
+
+from typing import Dict, Any
 import geopandas as gpd
 import matplotlib.pyplot as plt
+import io
+import base64
 
 from ddgs import DDGS
 
 from server import mcp_tool
 
+# Import the cache from data_tools
+from data_tools import _dataframe_cache
+
 
 @mcp_tool
-def spatial_join_and_count(
-    gdf_polygons: gpd.GeoDataFrame, gdf_points: gpd.GeoDataFrame
-) -> gpd.GeoDataFrame:
+def count_crimes_per_community(crime_type: str = None) -> Dict[str, Any]:
     """
-    Performs a spatial join, counting how many points from one GeoDataFrame fall within the polygons of another.
-    For example, it can count the number of thefts (points) in each community area (polygons).
+    Performs a spatial join to count crimes in each Chicago community area.
+    
     Args:
-        gdf_polygons: The GeoDataFrame with polygons (e.g., community areas).
-        gdf_points: The GeoDataFrame with points to be counted (e.g., crimes).
+        crime_type: Optional crime type to filter (e.g., "THEFT", "BATTERY"). 
+                   If None, counts all crimes.
+    
     Returns:
-        The polygon GeoDataFrame with a new 'crime_count' column.
+        dict: Summary with:
+            - total_communities: Number of community areas
+            - crime_counts: Dictionary mapping community name to crime count
+            - top_communities: Top 10 communities by crime count
+            - filtered_by: Crime type if filtered
     """
+    if 'chicago_community_areas' not in _dataframe_cache:
+        return {"error": "Community areas not loaded. Call load_chicago_community_areas() first."}
+    
+    if 'chicago_crime_data' not in _dataframe_cache:
+        return {"error": "Crime data not loaded. Call load_chicago_crime_data() first."}
+    
+    gdf_polygons = _dataframe_cache['chicago_community_areas']
+    gdf_points = _dataframe_cache['chicago_crime_data']
+    
+    # Filter by crime type if specified
+    if crime_type and "primary_type" in gdf_points.columns:
+        gdf_points = gdf_points[gdf_points["primary_type"].str.upper() == crime_type.upper()]
+    
+    # Perform spatial join
     gdf_points = gdf_points.to_crs(gdf_polygons.crs)
     joined_gdf = gpd.sjoin(gdf_polygons, gdf_points, how="left", predicate="contains")
+    
+    # Count points per community
     point_counts = joined_gdf.groupby("community").size()
     point_counts.name = "crime_count"
+    
+    # Merge back to polygons
     result_gdf = (
         gdf_polygons.merge(
             point_counts, left_on="community", right_index=True, how="left"
@@ -31,29 +64,69 @@ def spatial_join_and_count(
         .copy()
     )
     result_gdf["crime_count"] = result_gdf["crime_count"].astype(int)
-    return result_gdf
+    
+    # Cache result for plotting
+    _dataframe_cache['crime_counts_by_community'] = result_gdf
+    
+    # Create summary
+    crime_dict = dict(zip(result_gdf["community"], result_gdf["crime_count"]))
+    sorted_communities = sorted(crime_dict.items(), key=lambda x: x[1], reverse=True)
+    
+    summary = {
+        "total_communities": len(result_gdf),
+        "total_crimes": int(result_gdf["crime_count"].sum()),
+        "crime_counts": crime_dict,
+        "top_communities": [
+            {"name": name, "count": int(count)} 
+            for name, count in sorted_communities[:10]
+        ],
+        "_note": "Results cached. Use generate_crime_map() to visualize.",
+        "_cache_key": "crime_counts_by_community"
+    }
+    
+    if crime_type:
+        summary["filtered_by"] = crime_type.upper()
+    
+    return summary
 
 
 @mcp_tool
-def plot_choropleth_map(gdf: gpd.GeoDataFrame, column: str, title: str) -> None:
+def generate_crime_map(title: str = "Crime Counts by Community Area") -> str:
     """
-    Generates and displays a choropleth map, where polygons are colored based on a numeric value.
-    This is excellent for visualizing data like crime rates across different areas.
+    Generates a choropleth map of crime counts per community area.
+    Returns the map as a base64-encoded PNG image.
+    
     Args:
-        gdf: The GeoDataFrame containing the geographic data and the values to plot.
-        column: The name of the column to use for coloring the polygons.
-        title: The title to display above the map.
+        title: Title for the map.
+    
+    Returns:
+        str: Base64-encoded PNG image data (can be displayed in notebooks/apps).
     """
+    if 'crime_counts_by_community' not in _dataframe_cache:
+        return "Error: No crime count data available. Call count_crimes_per_community() first."
+    
+    gdf = _dataframe_cache['crime_counts_by_community']
+    
+    # Create the plot
     fig, ax = plt.subplots(1, 1, figsize=(12, 12))
     gdf.plot(
-        column=column,
+        column="crime_count",
         ax=ax,
         legend=True,
         legend_kwds={"label": "Number of Crimes", "orientation": "horizontal"},
+        cmap="YlOrRd"
     )
     ax.set_title(title, fontdict={"fontsize": "16", "fontweight": "3"})
     ax.set_axis_off()
-    plt.show()
+    
+    # Save to base64
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight', dpi=150)
+    buf.seek(0)
+    img_base64 = base64.b64encode(buf.read()).decode('utf-8')
+    plt.close(fig)
+    
+    return f"data:image/png;base64,{img_base64}"
 
 
 @mcp_tool

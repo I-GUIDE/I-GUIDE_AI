@@ -3,8 +3,10 @@ boto3
 fiona
 flask
 flask-cors
+geopandas
 gunicorn
 httpx
+mcp[cli]
 nbformat
 neo4j
 openai
@@ -15,6 +17,7 @@ rasterio
 requests
 sentence-transformers
 shapely
+smolagents
 spacy
 torch
 transformers

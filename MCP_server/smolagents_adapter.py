@@ -25,9 +25,14 @@ def _load_tools_modules(tools_dir: str) -> Iterable[ModuleType]:
         spec = importlib.util.spec_from_file_location(filename[:-3], module_path)
         if spec is None or spec.loader is None:
             continue
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        yield module
+        try:
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            yield module
+        except Exception as e:
+            # Skip modules that fail to load (e.g., missing dependencies)
+            print(f"Warning: Failed to load {filename}: {e}")
+            continue
 
 
 def _iter_mcp_tools(tools_dir: str) -> Iterable[Callable]:
