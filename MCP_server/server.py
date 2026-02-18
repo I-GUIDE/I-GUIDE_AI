@@ -137,7 +137,7 @@ def register_tool_with_mcp(func: Callable):
             # Return error as string so MCP client can see it
             error_msg = f"Tool execution error: {type(e).__name__}: {str(e)}"
             print(f"❌ {tool_name} failed: {error_msg}")
-            return {"error": error_msg, "tool": tool_name}
+            raise # Return error as string so MCP client can see it
     
     # Set metadata BEFORE decorating (FastMCP uses function name for registration)
     tool_wrapper.__name__ = tool_name
