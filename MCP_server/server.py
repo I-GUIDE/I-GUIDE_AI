@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from mcp.server import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from dotenv import load_dotenv
 
 # Load .env from root folder
@@ -23,10 +24,21 @@ env_path = Path(__file__).parent.parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
 # Create MCP server instance using FastMCP
+# mcp = FastMCP(
+#     name="I-GUIDE Tools",
+#     json_response=True,
+# )
 mcp = FastMCP(
     name="I-GUIDE Tools",
     json_response=True,
+    host="0.0.0.0",
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=["149.165.147.219:*"],
+        allowed_origins=["http://149.165.147.219:*"],
+    ),
 )
+app = mcp.streamable_http_app()
 
 # Registry to store tool functions
 _tool_registry: dict[str, Callable] = {}
@@ -170,4 +182,7 @@ if __name__ == "__main__":
     print("\n🛑 Starting stdio server...\n")
     
     # Use stdio transport (works better with MCP Inspector)
-    mcp.run(transport="stdio")
+    #mcp.run(transport="stdio")
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
