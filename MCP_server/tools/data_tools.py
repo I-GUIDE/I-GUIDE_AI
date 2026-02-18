@@ -41,8 +41,13 @@ def load_chicago_community_areas() -> Dict[str, Any]:
     # Cache for local use
     _dataframe_cache['chicago_community_areas'] = gdf
     
-    # Return compact summary instead of full GeoJSON
-    full_geojson = json.loads(gdf.to_json())
+    # Return compact summary without full GeoJSON to avoid huge payloads
+    sample_cols = [c for c in ["community", "area_num_1"] if c in gdf.columns]
+    sample_rows = (
+        gdf[sample_cols].head(3).to_dict(orient="records")
+        if sample_cols
+        else gdf.head(3).drop(columns="geometry", errors="ignore").to_dict(orient="records")
+    )
     
     return {
         "type": "FeatureCollection",
@@ -51,7 +56,7 @@ def load_chicago_community_areas() -> Dict[str, Any]:
         "bounds": gdf.total_bounds.tolist(),
         "crs": str(gdf.crs),
         "community_names": gdf["community"].tolist() if "community" in gdf.columns else [],
-        "sample_features": full_geojson["features"][:3],  # Only first 3 as examples
+        "sample_rows": sample_rows,
         "_note": "Full data cached. Use spatial analysis tools to work with complete dataset.",
         "_cache_key": "chicago_community_areas"
     }
@@ -99,7 +104,17 @@ def load_chicago_crime_data() -> Dict[str, Any]:
     safe_gdf = safe_gdf.replace([float("inf"), float("-inf")], None)
     safe_gdf = safe_gdf.where(safe_gdf.notna(), None)
     
-    full_geojson = json.loads(safe_gdf.to_json())
+    # Return compact sample rows without full GeoJSON to avoid huge payloads
+    sample_cols = [
+        c
+        for c in ["id", "date", "primary_type", "description", "location_description", "arrest"]
+        if c in safe_gdf.columns
+    ]
+    sample_rows = (
+        safe_gdf[sample_cols].head(5).to_dict(orient="records")
+        if sample_cols
+        else safe_gdf.head(5).drop(columns="geometry", errors="ignore").to_dict(orient="records")
+    )
     
     # Get crime type distribution
     crime_types = {}
@@ -124,7 +139,7 @@ def load_chicago_crime_data() -> Dict[str, Any]:
         "crs": str(gdf.crs),
         "crime_types": crime_types,
         "date_range": date_range,
-        "sample_features": full_geojson["features"][:5],  # Only first 5 as examples
+        "sample_rows": sample_rows,
         "_note": "Full data cached. Use spatial analysis tools to work with complete dataset.",
         "_cache_key": "chicago_crime_data"
     }
