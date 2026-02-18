@@ -14,8 +14,8 @@ from ddgs import DDGS
 
 from server import mcp_tool
 
-# Import the cache from data_tools
-from data_tools import _dataframe_cache
+# Import the cache from data_tools (module loaded without a package)
+from tools.data_tools import _dataframe_cache
 
 
 @mcp_tool
