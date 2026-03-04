@@ -8,6 +8,7 @@ __all__ = [
     "rag_tool_json",
     "make_langchain_rag_tool",
     "make_langchain_granular_tools",
+    "make_langchain_mcp_tools",
     "build_agent_executor",
     "run_agent_query",
 ]
@@ -17,6 +18,7 @@ _EXPORT_MAP = {
     "rag_tool_json": (".langchain_tool", "rag_tool_json"),
     "make_langchain_rag_tool": (".langchain_tool", "make_langchain_rag_tool"),
     "make_langchain_granular_tools": (".langchain_granular_tools", "make_langchain_granular_tools"),
+    "make_langchain_mcp_tools": (".langchain_mcp_tools", "make_langchain_mcp_tools"),
     "build_agent_executor": (".langchain_agent_executor", "build_agent_executor"),
     "run_agent_query": (".langchain_agent_executor", "run_agent_query"),
 }
