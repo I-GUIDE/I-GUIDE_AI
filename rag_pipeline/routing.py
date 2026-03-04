@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, MutableMapping
 
 from .generation import run_generation
 from .reranker_llm import rerank_evidence_with_llm
 from .search_core import run_retrieval
 from .state import AgentState, ensure_state_shapes
+
+logger = logging.getLogger(__name__)
 
 
 def rag_pipeline(state: MutableMapping[str, Any]) -> AgentState:
@@ -16,7 +19,10 @@ def rag_pipeline(state: MutableMapping[str, Any]) -> AgentState:
     state = run_retrieval(state)
     params = state.get("params") or {}
     if params.get("enable_llm_reranker", True):
-        state = rerank_evidence_with_llm(state, top_k=params.get("top_k"))
+        try:
+            state = rerank_evidence_with_llm(state, top_k=params.get("top_k"))
+        except Exception as exc:
+            logger.warning("LLM reranker failed; continuing without reranking: %s", exc)
     state = run_generation(state)
     return state  # type: ignore[return-value]
 

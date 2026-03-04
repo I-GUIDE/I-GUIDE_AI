@@ -21,3 +21,4 @@ smolagents
 spacy
 torch
 transformers
+langchain-core

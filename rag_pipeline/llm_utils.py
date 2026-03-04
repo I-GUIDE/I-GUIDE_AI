@@ -11,6 +11,16 @@ logger = logging.getLogger(__name__)
 _llm_callable: Optional[Callable[[str], str]] = None
 
 
+def _completion_url() -> str:
+    base = (os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
+    lowered = base.lower()
+    if lowered.endswith("/chat/completions"):
+        return base
+    if lowered.endswith("/v1"):
+        return f"{base}/chat/completions"
+    return f"{base}/v1/chat/completions"
+
+
 def register_llm_callable(func: Callable[[str], str]) -> None:
     """
     Allow applications to register a synchronous LLM callable.
@@ -22,12 +32,12 @@ def register_llm_callable(func: Callable[[str], str]) -> None:
 
 def call_llm(prompt: str) -> str:
     """
-    Send a prompt to AnvilGPT and return the model's text response.
+    Send a prompt to an OpenAI-compatible chat completions endpoint and return text.
     
     Uses environment variables:
-    - ANVILGPT_URL: The API endpoint (e.g., https://anvilgpt.rcac.purdue.edu/api/chat/completions)
-    - ANVILGPT_KEY: The API key (Bearer token)
-    - ANVILGPT_MODEL: The model name (default: gpt-oss:120b)
+    - OPENAI_KEY: The API key
+    - OPENAI_BASE_URL: Optional base URL (default: https://api.openai.com/v1)
+    - OPENAI_CHAT_MODEL / OPENAI_MODEL: Model name (default: gpt-4o-mini)
     
     Returns the generated text response from the model.
     Raises RuntimeError on configuration or API errors.
@@ -44,17 +54,21 @@ def call_llm(prompt: str) -> str:
             logger.error("LLM call failed: %s", exc)
             return "I could not compose an answer due to a generation error."
     
-    # Production path: direct AnvilGPT call
-    url = os.getenv("ANVILGPT_URL")
-    key = os.getenv("ANVILGPT_KEY")
+    # Production path: OpenAI-compatible call
+    url = _completion_url()
+    key = os.getenv("OPENAI_KEY")
     
     if not url or not key:
         raise RuntimeError(
-            "❌ Missing ANVILGPT_URL or ANVILGPT_KEY environment variable. "
-            "Please set these in your .env.local file."
+            "❌ Missing OPENAI_KEY environment variable. "
+            "Please set it in your .env file."
         )
     
-    model = os.getenv("ANVILGPT_MODEL", "gpt-oss:120b")
+    model = (
+        os.getenv("OPENAI_CHAT_MODEL")
+        or os.getenv("OPENAI_MODEL")
+        or "gpt-4o-mini"
+    )
     
     headers = {
         "Authorization": f"Bearer {key}",
@@ -68,23 +82,26 @@ def call_llm(prompt: str) -> str:
     }
     
     try:
-        logger.debug(f"Calling AnvilGPT at {url} with model {model}")
+        logger.debug(f"Calling LLM at {url} with model {model}")
         response = requests.post(url, headers=headers, json=body, timeout=60)
         
         if response.status_code == 403:
-            raise RuntimeError("🚫 403 Forbidden: Invalid or expired AnvilGPT key or endpoint.")
+            raise RuntimeError("🚫 403 Forbidden: Invalid or expired API key or endpoint.")
         
         if response.status_code == 401:
-            raise RuntimeError("🚫 401 Unauthorized: Invalid AnvilGPT API key.")
+            raise RuntimeError("🚫 401 Unauthorized: Invalid API key.")
         
         if response.status_code != 200:
             error_text = response.text[:200]
             raise RuntimeError(f"⚠️ HTTP {response.status_code}: {error_text}")
         
         data = response.json()
+        if data is None:
+            logger.error("LLM endpoint returned HTTP 200 with null JSON body.")
+            return "I could not compose an answer due to an empty LLM response."
         
-        # Extract the response content
-        if "choices" in data and len(data["choices"]) > 0:
+        # OpenAI-compatible shape
+        if isinstance(data, dict) and "choices" in data and len(data["choices"]) > 0:
             choice = data["choices"][0]
             message = choice.get("message", {})
             content = message.get("content")
@@ -123,10 +140,20 @@ def call_llm(prompt: str) -> str:
                     f"Received {len(content)} characters."
                 )
             
-            logger.debug(f"AnvilGPT response received: {len(content)} characters")
+            logger.debug(f"LLM response received: {len(content)} characters")
             return content
-        else:
-            raise RuntimeError(f"⚠️ Unexpected response format from AnvilGPT: {data}")
+
+        # Ollama-style shape fallback: {"message": {"content": "..."}}
+        if isinstance(data, dict):
+            message = data.get("message")
+            if isinstance(message, dict):
+                content = message.get("content")
+                if isinstance(content, str) and content.strip():
+                    logger.debug("AnvilGPT response received via ollama-style payload.")
+                    return content
+
+        logger.error("Unexpected response format from LLM endpoint: %s", str(data)[:500])
+        return "I could not compose an answer due to an unexpected LLM response format."
     
     except requests.RequestException as exc:
         logger.error(f"LLM request failed: {exc}")

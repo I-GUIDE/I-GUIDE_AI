@@ -62,7 +62,7 @@ _DEFAULT_PROVIDERS: Dict[str, Any] = {
     #"ckan": [("https://api.gsa.gov/technology/datagov/v3/action", None)],
     "cmr": True,
 }
-_DEFAULT_NL_MODEL = "gpt-oss:120b"
+_DEFAULT_NL_MODEL = "gpt-4o-mini"
 
 
 def _hydrate_api_credentials_from_env_files() -> None:
