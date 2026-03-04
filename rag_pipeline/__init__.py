@@ -1,2 +1,33 @@
 from dotenv import load_dotenv
 load_dotenv(dotenv_path=".env.local", override=True)
+
+from importlib import import_module
+
+__all__ = [
+    "rag_tool",
+    "rag_tool_json",
+    "make_langchain_rag_tool",
+    "make_langchain_granular_tools",
+    "build_agent_executor",
+    "run_agent_query",
+]
+
+_EXPORT_MAP = {
+    "rag_tool": (".langchain_tool", "rag_tool"),
+    "rag_tool_json": (".langchain_tool", "rag_tool_json"),
+    "make_langchain_rag_tool": (".langchain_tool", "make_langchain_rag_tool"),
+    "make_langchain_granular_tools": (".langchain_granular_tools", "make_langchain_granular_tools"),
+    "build_agent_executor": (".langchain_agent_executor", "build_agent_executor"),
+    "run_agent_query": (".langchain_agent_executor", "run_agent_query"),
+}
+
+
+def __getattr__(name: str):
+    target = _EXPORT_MAP.get(name)
+    if target is None:
+        raise AttributeError(f"module 'rag_pipeline' has no attribute '{name}'")
+    module_name, attr_name = target
+    module = import_module(module_name, package=__name__)
+    value = getattr(module, attr_name)
+    globals()[name] = value
+    return value
