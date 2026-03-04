@@ -2,21 +2,30 @@ from opensearchpy import OpenSearch
 import os
 import requests
 import json
+import sys
 from dotenv import load_dotenv
 load_dotenv()
-# Configuration
-# opensearch_host = os.getenv('OPENSEARCH_NODE')   # Replace with your OpenSearch host
-# index_name = os.getenv('OPENSEARCH_INDEX') 
-opensearch_host = 'https://149.165.155.195:9200'
-flask_url = 'http://127.0.0.1:5000/get_embedding'  # Flask endpoint URL for embeddings
-index_name = 'i_guide_spatial_embedding'
+
+# Configuration - use environment variables
+opensearch_host = os.getenv('OPENSEARCH_NODE')
+flask_url = os.getenv('FLASK_EMBEDDING_URL', 'http://127.0.0.1:5000/get_embedding')
+index_name = os.getenv('OPENSEARCH_INDEX')
+
+# Validate required environment variables
+if not opensearch_host:
+    print("Error: OPENSEARCH_NODE environment variable is required")
+    sys.exit(1)
+if not index_name:
+    print("Error: OPENSEARCH_INDEX environment variable is required")
+    sys.exit(1)
+
 # Use environment variables for credentials if available
 username = os.getenv('OPENSEARCH_USERNAME') 
 password = os.getenv('OPENSEARCH_PASSWORD') 
 
 # OpenSearch client with authentication
 opensearch_client = OpenSearch(
-    ['https://149.165.155.195:9200'],
+    [opensearch_host],
     http_auth=(username, password),
     use_ssl=False,
     verify_certs=False

@@ -1,0 +1,107 @@
+version: '3.8'
+
+services:
+  embedding-server:
+    build:
+      context: .
+      dockerfile: embedding-server/Dockerfile
+    container_name: embedding-server
+    ports:
+      - "5000:5000"
+    environment:
+      - OPENSEARCH_NODE=${OPENSEARCH_NODE}
+      - OPENSEARCH_INDEX=${OPENSEARCH_INDEX}
+      - OPENSEARCH_USERNAME=${OPENSEARCH_USERNAME}
+      - OPENSEARCH_PASSWORD=${OPENSEARCH_PASSWORD}
+      - FLASK_EMBEDDING_URL=${FLASK_EMBEDDING_URL:-http://embedding-server:5000}
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:5000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - iguide-network
+
+  metadata-extraction-server:
+    build:
+      context: .
+      dockerfile: metadata-extraction-server/Dockerfile
+    container_name: metadata-extraction-server
+    ports:
+      - "5001:5001"
+    environment:
+      - MINIO_ACCESS_KEY_ID=${MINIO_ACCESS_KEY_ID}
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - OPENSEARCH_NODE=${OPENSEARCH_NODE}
+      - OPENSEARCH_INDEX=${OPENSEARCH_INDEX}
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:5001/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - iguide-network
+
+  rag-pipeline:
+    build:
+      context: .
+      dockerfile: rag_pipeline/Dockerfile
+    container_name: rag-pipeline
+    ports:
+      - "5002:5002"
+    environment:
+      # OpenSearch Configuration
+      - OPENSEARCH_NODE=${OPENSEARCH_NODE}
+      - OPENSEARCH_INDEX=${OPENSEARCH_INDEX}
+      - OPENSEARCH_USERNAME=${OPENSEARCH_USERNAME}
+      - OPENSEARCH_PASSWORD=${OPENSEARCH_PASSWORD}
+      - OPENSEARCH_MEMORY_INDEX=${OPENSEARCH_MEMORY_INDEX:-chat_memory}
+      # Embedding Service
+      - FLASK_EMBEDDING_URL=http://embedding-server:5000
+      # LLM Configuration
+      - ANVILGPT_URL=${ANVILGPT_URL}
+      - ANVILGPT_KEY=${ANVILGPT_KEY}
+      - ANVILGPT_MODEL=${ANVILGPT_MODEL:-gpt-oss:120b}
+      # Neo4j Configuration
+      - NEO4J_CONNECTION_STRING=${NEO4J_CONNECTION_STRING}
+      - NEO4J_URI=${NEO4J_URI}
+      - NEO4J_USER=${NEO4J_USER}
+      - NEO4J_USERNAME=${NEO4J_USERNAME}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+      - NEO4J_DB=${NEO4J_DB:-neo4j}
+      # Feature Flags
+      - SPATIAL_BACKEND_ENABLED=${SPATIAL_BACKEND_ENABLED:-1}
+      - SEMANTIC_BACKEND_ENABLED=${SEMANTIC_BACKEND_ENABLED:-1}
+      - USE_LLM_ROUTER=${USE_LLM_ROUTER:-1}
+      # Memory Configuration
+      - MEMORY_EMBEDDER_MODEL=${MEMORY_EMBEDDER_MODEL:-all-MiniLM-L6-v2}
+      - MEMORY_CONTEXT_THRESHOLD=${MEMORY_CONTEXT_THRESHOLD:-0.35}
+      # Logging
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - PORT=5002
+    env_file:
+      - .env
+    restart: unless-stopped
+    depends_on:
+      embedding-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:5002/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - iguide-network
+
+networks:
+  iguide-network:
+    driver: bridge
