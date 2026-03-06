@@ -12,7 +12,7 @@ _llm_callable: Optional[Callable[[str], str]] = None
 
 
 def _completion_url() -> str:
-    base = (os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
+    base = (os.getenv("VLLM_PROXY") or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
     lowered = base.lower()
     if lowered.endswith("/chat/completions"):
         return base
@@ -35,9 +35,10 @@ def call_llm(prompt: str) -> str:
     Send a prompt to an OpenAI-compatible chat completions endpoint and return text.
     
     Uses environment variables:
-    - OPENAI_KEY: The API key
-    - OPENAI_BASE_URL: Optional base URL (default: https://api.openai.com/v1)
-    - OPENAI_CHAT_MODEL / OPENAI_MODEL: Model name (default: gpt-4o-mini)
+    - VLLM_API_KEY: Preferred API key
+    - VLLM_PROXY: Preferred base/completions URL
+    - VLLM_MODEL: Preferred model
+    - OPENAI_KEY / OPENAI_BASE_URL / OPENAI_CHAT_MODEL / OPENAI_MODEL as fallback
     
     Returns the generated text response from the model.
     Raises RuntimeError on configuration or API errors.
@@ -56,18 +57,19 @@ def call_llm(prompt: str) -> str:
     
     # Production path: OpenAI-compatible call
     url = _completion_url()
-    key = os.getenv("OPENAI_KEY")
+    key = os.getenv("VLLM_API_KEY") or os.getenv("OPENAI_KEY")
     
     if not url or not key:
         raise RuntimeError(
-            "❌ Missing OPENAI_KEY environment variable. "
+            "❌ Missing VLLM_API_KEY (or OPENAI_KEY) environment variable. "
             "Please set it in your .env file."
         )
     
     model = (
-        os.getenv("OPENAI_CHAT_MODEL")
+        os.getenv("VLLM_MODEL")
+        or os.getenv("OPENAI_CHAT_MODEL")
         or os.getenv("OPENAI_MODEL")
-        or "gpt-4o-mini"
+        or "Qwen/Qwen3.5-9B"
     )
     
     headers = {
