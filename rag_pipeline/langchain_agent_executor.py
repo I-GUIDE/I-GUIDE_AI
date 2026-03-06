@@ -105,10 +105,10 @@ def _build_default_llm() -> Any:
     """
     Build a default chat model for LangChain agents.
 
-    Uses (OpenAI-first):
-    - OPENAI_KEY
-    - OPENAI_BASE_URL (optional; defaults to OpenAI public endpoint)
-    - OPENAI_CHAT_MODEL / OPENAI_MODEL (default: gpt-4o-mini)
+    Uses (vLLM-first):
+    - VLLM_API_KEY (fallback: OPENAI_KEY)
+    - VLLM_PROXY (fallback: OPENAI_BASE_URL)
+    - VLLM_MODEL (fallback: OPENAI_CHAT_MODEL / OPENAI_MODEL / Qwen/Qwen3.5-9B)
     """
     try:
         from langchain_openai import ChatOpenAI
@@ -117,16 +117,17 @@ def _build_default_llm() -> Any:
             "Missing dependency `langchain-openai`. Install it to use the default LLM builder."
         ) from exc
 
-    api_key = os.getenv("OPENAI_KEY")
+    api_key = os.getenv("VLLM_API_KEY") or os.getenv("OPENAI_KEY")
     if not api_key:
-        raise RuntimeError("OPENAI_KEY is required to build the default LangChain LLM.")
+        raise RuntimeError("VLLM_API_KEY (or OPENAI_KEY) is required to build the default LangChain LLM.")
 
     model = (
-        os.getenv("OPENAI_CHAT_MODEL")
+        os.getenv("VLLM_MODEL")
+        or os.getenv("OPENAI_CHAT_MODEL")
         or os.getenv("OPENAI_MODEL")
-        or "gpt-4o-mini"
+        or "Qwen/Qwen3.5-9B"
     )
-    base_url = _normalize_openai_base_url(os.getenv("OPENAI_BASE_URL"))
+    base_url = _normalize_openai_base_url(os.getenv("VLLM_PROXY") or os.getenv("OPENAI_BASE_URL"))
 
     kwargs = {"model": model, "temperature": 0.0, "api_key": api_key}
     if base_url:

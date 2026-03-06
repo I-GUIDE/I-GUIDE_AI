@@ -50,19 +50,20 @@ class NLQueryError(Exception):
 
 
 _API_BASE_ENV_VARS: Sequence[str] = (
+    "VLLM_PROXY",
     "OPENAI_API_BASE",
     "OPENAI_BASE_URL",
     "ANVILGPT_URL",
     "API_BASE",
 )
-_API_KEY_ENV_VARS: Sequence[str] = ("OPENAI_API_KEY", "OPENAI_KEY", "ANVILGPT_KEY", "API_KEY")
+_API_KEY_ENV_VARS: Sequence[str] = ("VLLM_API_KEY", "OPENAI_API_KEY", "OPENAI_KEY", "ANVILGPT_KEY", "API_KEY")
 _DEFAULT_PROVIDERS: Dict[str, Any] = {
     #"stac": ["https://planetarycomputer.microsoft.com/api/stac/v1"],
     "records": [],
     #"ckan": [("https://api.gsa.gov/technology/datagov/v3/action", None)],
     "cmr": True,
 }
-_DEFAULT_NL_MODEL = "gpt-4o-mini"
+_DEFAULT_NL_MODEL = "Qwen/Qwen3.5-9B"
 
 
 def _hydrate_api_credentials_from_env_files() -> None:
@@ -694,6 +695,7 @@ def _build_nl_block(
         "model",
         og_config.get("nl_model")
         or os.getenv("OPENGEODATA_NL_MODEL")
+        or os.getenv("VLLM_MODEL")
         or os.getenv("OPENAI_MODEL")
         or _DEFAULT_NL_MODEL,
     )
