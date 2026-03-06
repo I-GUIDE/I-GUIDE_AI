@@ -69,3 +69,26 @@ python3 minio_webhook.py
 ---
 
 For more details, see the code
+
+## Example commands for running the agent:
+
+```sh
+python -m rag_pipeline.langchain_agent_executor \
+  "Generate the code for a RAG grader" \
+  --tool-strategy granular \
+  --include-mcp-tools
+```
+
+  ```sh
+  python -m rag_pipeline.langchain_agent_executor \
+  "What's the risk of aging dams" \     
+  --tool-strategy full_pipeline \
+  --include-mcp-tools
+  ``
+
+  ```sh
+  python -m rag_pipeline.langchain_agent_executor \                                     
+  "Analyze: What's the community in Chicago with most theft" \
+  --tool-strategy full_pipeline \
+  --include-mcp-tools
+  ```
