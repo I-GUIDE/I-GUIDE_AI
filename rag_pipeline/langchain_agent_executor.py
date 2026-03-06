@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -45,6 +46,22 @@ ANALYSIS_HINTS = {
     "statistical",
     "hotspot",
 }
+CODE_HINTS = {
+    "code",
+    "python",
+    "script",
+    "function",
+    "class",
+    "implement",
+    "implementation",
+    "api",
+    "endpoint",
+    "refactor",
+    "debug",
+    "fix",
+    "unit test",
+    "sql",
+}
 DISCOVERY_HINTS = {
     "what is",
     "overview",
@@ -59,6 +76,36 @@ DISCOVERY_HINTS = {
     "find",
     "discover",
 }
+
+SEARCH_AGENT_PROMPT = (
+    "You are SearchAgent.\n"
+    "Goal: gather relevant evidence using tools.\n"
+    "Rules:\n"
+    "1. Prefer tool calls over assumptions.\n"
+    "2. Return concise evidence with doc_ids from tool outputs.\n"
+    "3. Do not fabricate citations or sources.\n"
+    "4. If evidence is insufficient, explicitly say so."
+)
+
+ANALYSIS_AGENT_PROMPT = (
+    "You are AnalysisAgent.\n"
+    "Goal: synthesize a final answer from provided evidence.\n"
+    "Rules:\n"
+    "1. Use only evidence provided in the conversation context.\n"
+    "2. Cite only doc_ids that appear in the evidence.\n"
+    "3. If evidence is insufficient, state uncertainty clearly.\n"
+    "4. Never invent titles, sources, or citation ids."
+)
+
+CODE_AGENT_PROMPT = (
+    "You are CodeAgent.\n"
+    "Goal: produce practical code and implementation guidance.\n"
+    "Rules:\n"
+    "1. Use the `search_agent_evidence` tool to fetch domain-specific references before finalizing technical details.\n"
+    "2. Ground domain facts and citations only on tool evidence.\n"
+    "3. Output runnable code snippets when possible.\n"
+    "4. If evidence is insufficient, say what is missing."
+)
 
 
 def _load_env() -> None:
@@ -156,9 +203,13 @@ def _collect_tools(
 def _classify_intent(query: str) -> Dict[str, Any]:
     text = (query or "").strip().lower()
     analysis_hits = sorted([kw for kw in ANALYSIS_HINTS if kw in text])
+    code_hits = sorted([kw for kw in CODE_HINTS if kw in text])
     discovery_hits = sorted([kw for kw in DISCOVERY_HINTS if kw in text])
 
-    if analysis_hits and discovery_hits:
+    if code_hits:
+        intent = "code_task"
+        reason = "matched_code_hints"
+    elif analysis_hits and discovery_hits:
         intent = "hybrid"
         reason = "matched_analysis_and_discovery_hints"
     elif analysis_hits:
@@ -171,6 +222,7 @@ def _classify_intent(query: str) -> Dict[str, Any]:
         "intent": intent,
         "reason": reason,
         "analysis_hits": analysis_hits,
+        "code_hits": code_hits,
         "discovery_hits": discovery_hits,
     }
 
@@ -181,6 +233,9 @@ def _select_allowed_tools(intent: str, available_tool_names: Sequence[str]) -> L
 
     if intent == "analysis_task":
         selected = [name for name in ANALYSIS_TOOL_NAMES if name in available]
+    elif intent == "code_task":
+        preferred = DISCOVERY_TOOL_NAMES | RAG_COMPONENT_TOOL_NAMES
+        selected = [name for name in available_tool_names if name in preferred]
     elif intent == "general_discovery":
         preferred = DISCOVERY_TOOL_NAMES | RAG_COMPONENT_TOOL_NAMES
         selected = [name for name in available_tool_names if name in preferred]
@@ -207,6 +262,7 @@ def _build_route_trace(
         "forced_intent": forced_intent,
         "reason": classification["reason"],
         "analysis_hits": classification["analysis_hits"],
+        "code_hits": classification["code_hits"],
         "discovery_hits": classification["discovery_hits"],
         "available_tools": list(available_tool_names),
         "allowed_tools": allowed,
@@ -218,20 +274,25 @@ def build_agent_executor(
     llm: Optional[Any] = None,
     verbose: bool = False,
     return_intermediate_steps: bool = True,
-    tool_strategy: str = "full_pipeline",
+    tool_strategy: str = "granular",
     include_mcp_tools: bool = False,
     mcp_modules: Optional[List[str]] = None,
     allowed_tool_names: Optional[List[str]] = None,
     preloaded_tools: Optional[List[Any]] = None,
+    system_prompt_override: Optional[str] = None,
+    agent_name: str = "rag_agent",
 ) -> Any:
     """
     Create a concrete LangChain AgentExecutor wired with the repository's RAG tool.
     """
-    tools = preloaded_tools or _collect_tools(
-        tool_strategy=tool_strategy,
-        include_mcp_tools=include_mcp_tools,
-        mcp_modules=mcp_modules,
-    )
+    if preloaded_tools is not None:
+        tools = preloaded_tools
+    else:
+        tools = _collect_tools(
+            tool_strategy=tool_strategy,
+            include_mcp_tools=include_mcp_tools,
+            mcp_modules=mcp_modules,
+        )
     if allowed_tool_names:
         allowed = set(allowed_tool_names)
         filtered = [tool for tool in tools if getattr(tool, "name", "") in allowed]
@@ -239,7 +300,7 @@ def build_agent_executor(
             tools = filtered
     active_llm = llm or _build_default_llm()
 
-    system_prompt = (
+    system_prompt = system_prompt_override or (
         "You are a retrieval-grounded assistant.\n"
         "Guardrails:\n"
         "1. Use only tool outputs as evidence; don't hallucinate citations.\n"
@@ -282,8 +343,72 @@ def build_agent_executor(
             tools=tools,
             system_prompt=system_prompt,
             debug=verbose,
-            name="rag_agent",
+            name=agent_name,
         )
+
+
+def build_search_agent_executor(
+    *,
+    llm: Optional[Any] = None,
+    verbose: bool = False,
+    return_intermediate_steps: bool = True,
+    tool_strategy: str = "granular",
+    include_mcp_tools: bool = False,
+    mcp_modules: Optional[List[str]] = None,
+    allowed_tool_names: Optional[List[str]] = None,
+    preloaded_tools: Optional[List[Any]] = None,
+) -> Any:
+    return build_agent_executor(
+        llm=llm,
+        verbose=verbose,
+        return_intermediate_steps=return_intermediate_steps,
+        tool_strategy=tool_strategy,
+        include_mcp_tools=include_mcp_tools,
+        mcp_modules=mcp_modules,
+        allowed_tool_names=allowed_tool_names,
+        preloaded_tools=preloaded_tools,
+        system_prompt_override=SEARCH_AGENT_PROMPT,
+        agent_name="search_agent",
+    )
+
+
+def build_analysis_agent_executor(
+    *,
+    llm: Optional[Any] = None,
+    verbose: bool = False,
+    return_intermediate_steps: bool = True,
+) -> Any:
+    return build_agent_executor(
+        llm=llm,
+        verbose=verbose,
+        return_intermediate_steps=return_intermediate_steps,
+        tool_strategy="granular",
+        include_mcp_tools=False,
+        mcp_modules=None,
+        preloaded_tools=[],
+        system_prompt_override=ANALYSIS_AGENT_PROMPT,
+        agent_name="analysis_agent",
+    )
+
+
+def build_code_agent_executor(
+    *,
+    llm: Optional[Any] = None,
+    verbose: bool = False,
+    return_intermediate_steps: bool = True,
+    tools: Optional[List[Any]] = None,
+) -> Any:
+    return build_agent_executor(
+        llm=llm,
+        verbose=verbose,
+        return_intermediate_steps=return_intermediate_steps,
+        tool_strategy="granular",
+        include_mcp_tools=False,
+        mcp_modules=None,
+        preloaded_tools=tools or [],
+        system_prompt_override=CODE_AGENT_PROMPT,
+        agent_name="code_agent",
+    )
 
 
 def _messages_payload(query: str, chat_history: Optional[List[Any]]) -> dict:
@@ -299,6 +424,26 @@ def _messages_payload(query: str, chat_history: Optional[List[Any]]) -> dict:
     return {"messages": messages}
 
 
+def _invoke_agent_with_payload_fallback(
+    executor: Any,
+    *,
+    query: str,
+    chat_history: Optional[List[Any]],
+) -> Any:
+    messages_payload = _messages_payload(query, chat_history)
+    legacy_payload = {"input": query, "chat_history": chat_history or []}
+    try:
+        return executor.invoke(messages_payload)
+    except Exception as exc:
+        text = str(exc).lower()
+        payload_shape_error = (
+            "input" in text and "messages" in text
+        ) or ("invalid" in text and "messages" in text) or ("missing" in text and "messages" in text)
+        if payload_shape_error:
+            return executor.invoke(legacy_payload)
+        raise
+
+
 def _is_empty_model_response_error(exc: Exception) -> bool:
     text = str(exc).lower()
     return (
@@ -309,6 +454,9 @@ def _is_empty_model_response_error(exc: Exception) -> bool:
 def _extract_final_answer(result: Any) -> Optional[str]:
     if not isinstance(result, dict):
         return None
+    answer = result.get("final_answer")
+    if isinstance(answer, str) and answer.strip():
+        return answer.strip()
 
     # Direct fallback path
     if result.get("fallback") == "direct_rag_tool":
@@ -331,35 +479,199 @@ def _extract_final_answer(result: Any) -> Optional[str]:
     return None
 
 
-def _print_tool_trace(result: Any) -> None:
+def _extract_search_artifacts(result: Any) -> Dict[str, Any]:
+    artifacts: Dict[str, Any] = {"tool_calls": [], "tool_results": [], "raw_messages": []}
     if not isinstance(result, dict):
-        return
+        return artifacts
     messages = result.get("messages")
     if not isinstance(messages, list):
-        return
+        return artifacts
 
-    printed = False
-    print("\nTool trace:")
     for msg in messages:
+        content = getattr(msg, "content", None)
+        if isinstance(content, str) and content.strip():
+            artifacts["raw_messages"].append(content.strip())
+        elif isinstance(msg, dict):
+            text = msg.get("content")
+            if isinstance(text, str) and text.strip():
+                artifacts["raw_messages"].append(text.strip())
+
         tool_calls = getattr(msg, "tool_calls", None)
-        if isinstance(tool_calls, list) and tool_calls:
+        if isinstance(tool_calls, list):
             for call in tool_calls:
-                name = call.get("name", "unknown_tool")
-                args = call.get("args", {})
-                print(f"- CALL {name} args={args}")
-                printed = True
-            continue
+                artifacts["tool_calls"].append(
+                    {
+                        "name": call.get("name", "unknown_tool"),
+                        "args": call.get("args", {}),
+                    }
+                )
 
         name = getattr(msg, "name", None)
         tool_call_id = getattr(msg, "tool_call_id", None)
-        content = getattr(msg, "content", None)
         if name and tool_call_id:
             text = content if isinstance(content, str) else str(content)
-            snippet = text if len(text) <= 240 else f"{text[:240]}..."
-            print(f"- RESULT {name} ({tool_call_id}): {snippet}")
-            printed = True
+            artifacts["tool_results"].append(
+                {
+                    "name": name,
+                    "tool_call_id": tool_call_id,
+                    "content": text,
+                }
+            )
+    return artifacts
 
-    if not printed:
+
+def _build_search_evidence_payload(
+    query: str,
+    search_response: Any,
+    route_trace: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    search_summary = _extract_final_answer(search_response) or ""
+    search_artifacts = _extract_search_artifacts(search_response)
+    return {
+        "user_query": query,
+        "route_trace": route_trace,
+        "search_agent_summary": search_summary,
+        "search_agent_tool_calls": search_artifacts["tool_calls"],
+        "search_agent_tool_results": search_artifacts["tool_results"],
+    }
+
+
+def _make_search_agent_evidence_tool(
+    *,
+    llm: Optional[Any],
+    verbose: bool,
+    return_intermediate_steps: bool,
+    tool_strategy: str,
+    include_mcp_tools: bool,
+    mcp_modules: Optional[List[str]],
+    smart_tool_routing: bool,
+    forced_intent: Optional[str],
+    search_invocations: List[Dict[str, Any]],
+) -> Any:
+    try:
+        from langchain_core.tools import StructuredTool
+    except Exception as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError(
+            "LangChain is not installed. Add `langchain-core` (or langchain) to dependencies."
+        ) from exc
+
+    def search_agent_evidence(query: str) -> str:
+        all_tools = _collect_tools(
+            tool_strategy=tool_strategy,
+            include_mcp_tools=include_mcp_tools,
+            mcp_modules=mcp_modules,
+        )
+        route_trace: Optional[Dict[str, Any]] = None
+        allowed_tool_names: Optional[List[str]] = None
+        if smart_tool_routing:
+            available_names = [getattr(tool, "name", "") for tool in all_tools if getattr(tool, "name", "")]
+            route_trace = _build_route_trace(query, available_names, forced_intent=forced_intent)
+            allowed_tool_names = route_trace.get("allowed_tools") or None
+
+        search_executor = build_search_agent_executor(
+            llm=llm,
+            verbose=verbose,
+            return_intermediate_steps=return_intermediate_steps,
+            tool_strategy=tool_strategy,
+            include_mcp_tools=include_mcp_tools,
+            mcp_modules=mcp_modules,
+            allowed_tool_names=allowed_tool_names,
+            preloaded_tools=all_tools,
+        )
+        search_response = _invoke_agent_with_payload_fallback(
+            search_executor,
+            query=query,
+            chat_history=None,
+        )
+        evidence = _build_search_evidence_payload(query, search_response, route_trace)
+        search_invocations.append(
+            {
+                "query": query,
+                "route_trace": route_trace,
+                "search_result": search_response,
+                "evidence": evidence,
+            }
+        )
+        return json.dumps(evidence, ensure_ascii=True, default=str)
+
+    return StructuredTool.from_function(
+        func=search_agent_evidence,
+        name="search_agent_evidence",
+        description=(
+            "Call SearchAgent to retrieve domain-specific evidence and references. "
+            "Use before generating code that relies on external facts."
+        ),
+    )
+
+
+def _print_tool_trace(result: Any) -> None:
+    if not isinstance(result, dict):
+        return
+
+    def _print_messages(agent_name: str, payload: Any) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        messages = payload.get("messages")
+        if not isinstance(messages, list):
+            return False
+
+        printed_local = False
+        print(f"- AGENT {agent_name} INVOKE")
+        for msg in messages:
+            tool_calls = getattr(msg, "tool_calls", None)
+            if isinstance(tool_calls, list) and tool_calls:
+                for call in tool_calls:
+                    name = call.get("name", "unknown_tool")
+                    args = call.get("args", {})
+                    print(f"  - CALL {name} args={args}")
+                    printed_local = True
+                continue
+
+            name = getattr(msg, "name", None)
+            tool_call_id = getattr(msg, "tool_call_id", None)
+            content = getattr(msg, "content", None)
+            if name and tool_call_id:
+                text = content if isinstance(content, str) else str(content)
+                snippet = text if len(text) <= 240 else f"{text[:240]}..."
+                print(f"  - RESULT {name} ({tool_call_id}): {snippet}")
+                printed_local = True
+
+        if not printed_local:
+            print("  - (no tool calls)")
+        return True
+
+    print("\nTool trace:")
+    has_two_agent_result = isinstance(result.get("search_result"), dict) or isinstance(result.get("analysis_result"), dict)
+    if has_two_agent_result:
+        printed_any = False
+        printed_any = _print_messages("SearchAgent", result.get("search_result")) or printed_any
+        printed_any = _print_messages("AnalysisAgent", result.get("analysis_result")) or printed_any
+        if not printed_any:
+            print("- (no agent trace)")
+        return
+
+    if isinstance(result.get("code_result"), dict):
+        printed_any = False
+        printed_any = _print_messages("CodeAgent", result.get("code_result")) or printed_any
+        for idx, item in enumerate(result.get("code_agent_search_invocations") or [], start=1):
+            route = item.get("route_trace") if isinstance(item, dict) else None
+            intent = route.get("intent") if isinstance(route, dict) else None
+            search_payload = item.get("search_result") if isinstance(item, dict) else None
+            if _print_messages(f"SearchAgent (via CodeAgent #{idx})", search_payload):
+                if intent:
+                    print(f"  - ROUTE intent={intent}")
+                printed_any = True
+            else:
+                print(f"- AGENT SearchAgent (via CodeAgent #{idx}) INVOKE")
+                if intent:
+                    print(f"  - ROUTE intent={intent}")
+                print("  - (no tool calls)")
+                printed_any = True
+        if not printed_any:
+            print("- (no agent trace)")
+        return
+
+    if not _print_messages("Agent", result):
         print("- (no tool calls)")
 
 
@@ -373,6 +685,7 @@ def _print_route_trace(result: Any) -> None:
     print(f"- intent: {route.get('intent')}")
     print(f"- reason: {route.get('reason')}")
     print(f"- analysis_hits: {route.get('analysis_hits')}")
+    print(f"- code_hits: {route.get('code_hits')}")
     print(f"- discovery_hits: {route.get('discovery_hits')}")
     print(f"- allowed_tools: {route.get('allowed_tools')}")
 
@@ -384,7 +697,7 @@ def run_agent_query(
     llm: Optional[Any] = None,
     verbose: bool = False,
     return_intermediate_steps: bool = True,
-    tool_strategy: str = "full_pipeline",
+    tool_strategy: str = "granular",
     include_mcp_tools: bool = False,
     mcp_modules: Optional[List[str]] = None,
     smart_tool_routing: bool = True,
@@ -405,7 +718,7 @@ def run_agent_query(
         route_trace = _build_route_trace(query, available_names, forced_intent=forced_intent)
         allowed_tool_names = route_trace.get("allowed_tools") or None
 
-    executor = build_agent_executor(
+    search_executor = build_search_agent_executor(
         llm=llm,
         verbose=verbose,
         return_intermediate_steps=return_intermediate_steps,
@@ -415,24 +728,13 @@ def run_agent_query(
         allowed_tool_names=allowed_tool_names,
         preloaded_tools=all_tools,
     )
-    messages_payload = _messages_payload(query, chat_history)
-    legacy_payload = {"input": query, "chat_history": chat_history or []}
     try:
-        response = executor.invoke(messages_payload)
-        if route_trace and isinstance(response, dict):
-            response["route_trace"] = route_trace
-        return response
+        search_response = _invoke_agent_with_payload_fallback(
+            search_executor,
+            query=query,
+            chat_history=chat_history,
+        )
     except Exception as exc:
-        text = str(exc).lower()
-        # Only retry with legacy payload for likely input-shape compatibility issues.
-        payload_shape_error = (
-            "input" in text and "messages" in text
-        ) or ("invalid" in text and "messages" in text) or ("missing" in text and "messages" in text)
-        if payload_shape_error:
-            response = executor.invoke(legacy_payload)
-            if route_trace and isinstance(response, dict):
-                response["route_trace"] = route_trace
-            return response
         # Anvil/OpenAI-compatible gateways occasionally return HTTP 200 with null payloads.
         # Fall back to direct pipeline execution in full_pipeline mode.
         if tool_strategy == "full_pipeline" and _is_empty_model_response_error(exc):
@@ -447,16 +749,102 @@ def run_agent_query(
             return response
         raise
 
+    analysis_context = _build_search_evidence_payload(query, search_response, route_trace)
+    analysis_query = (
+        "User query:\n"
+        f"{query}\n\n"
+        "Search evidence bundle (JSON):\n"
+        f"{json.dumps(analysis_context, ensure_ascii=True, default=str)}\n\n"
+        "Produce the final answer grounded only in this evidence."
+    )
+    analysis_executor = build_analysis_agent_executor(
+        llm=llm,
+        verbose=verbose,
+        return_intermediate_steps=return_intermediate_steps,
+    )
+    analysis_response = _invoke_agent_with_payload_fallback(
+        analysis_executor,
+        query=analysis_query,
+        chat_history=None,
+    )
+
+    response: Dict[str, Any] = {
+        "search_result": search_response,
+        "analysis_result": analysis_response,
+    }
+    final_answer = _extract_final_answer(analysis_response)
+    if final_answer:
+        response["final_answer"] = final_answer
+    if route_trace:
+        response["route_trace"] = route_trace
+    return response
+
+
+def run_code_agent_query(
+    query: str,
+    *,
+    chat_history: Optional[List[Any]] = None,
+    llm: Optional[Any] = None,
+    verbose: bool = False,
+    return_intermediate_steps: bool = True,
+    tool_strategy: str = "granular",
+    include_mcp_tools: bool = False,
+    mcp_modules: Optional[List[str]] = None,
+    smart_tool_routing: bool = True,
+    forced_intent: Optional[str] = None,
+) -> dict:
+    """
+    Run one query through CodeAgent, with SearchAgent available as a tool.
+    """
+    search_invocations: List[Dict[str, Any]] = []
+    search_tool = _make_search_agent_evidence_tool(
+        llm=llm,
+        verbose=verbose,
+        return_intermediate_steps=return_intermediate_steps,
+        tool_strategy=tool_strategy,
+        include_mcp_tools=include_mcp_tools,
+        mcp_modules=mcp_modules,
+        smart_tool_routing=smart_tool_routing,
+        forced_intent=forced_intent,
+        search_invocations=search_invocations,
+    )
+    code_executor = build_code_agent_executor(
+        llm=llm,
+        verbose=verbose,
+        return_intermediate_steps=return_intermediate_steps,
+        tools=[search_tool],
+    )
+    code_response = _invoke_agent_with_payload_fallback(
+        code_executor,
+        query=query,
+        chat_history=chat_history,
+    )
+
+    response: Dict[str, Any] = {
+        "code_result": code_response,
+        "code_agent_search_invocations": search_invocations,
+    }
+    final_answer = _extract_final_answer(code_response)
+    if final_answer:
+        response["final_answer"] = final_answer
+    return response
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the LangChain RAG agent once.")
     parser.add_argument("query", help="User query for the agent.")
     parser.add_argument("--verbose", action="store_true", help="Enable AgentExecutor verbose logs.")
     parser.add_argument(
+        "--agent-mode",
+        default="analysis",
+        choices=["analysis", "code"],
+        help="Agent pipeline mode: analysis (SearchAgent -> AnalysisAgent) or code (CodeAgent with SearchAgent tool).",
+    )
+    parser.add_argument(
         "--tool-strategy",
-        default="full_pipeline",
+        default="granular",
         choices=["full_pipeline", "granular"],
-        help="Tool mode: full_pipeline keeps parity; granular exposes keyword/semantic/neo4j/spatial/opengeodata tools.",
+        help="Tool mode: granular uses keyword/semantic/neo4j/spatial/opengeodata tools; full_pipeline uses rag_tool.",
     )
     parser.add_argument(
         "--include-mcp-tools",
@@ -476,13 +864,14 @@ def main() -> None:
     parser.add_argument(
         "--force-intent",
         default=None,
-        choices=["general_discovery", "analysis_task", "hybrid"],
+        choices=["general_discovery", "analysis_task", "code_task", "hybrid"],
         help="Force routing intent instead of automatic classification.",
     )
     args = parser.parse_args()
     selected_mcp_modules = [item.strip() for item in args.mcp_modules.split(",") if item.strip()]
 
-    result = run_agent_query(
+    runner = run_code_agent_query if args.agent_mode == "code" else run_agent_query
+    result = runner(
         args.query,
         verbose=args.verbose,
         tool_strategy=args.tool_strategy,

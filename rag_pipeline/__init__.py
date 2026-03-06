@@ -10,7 +10,9 @@ __all__ = [
     "make_langchain_granular_tools",
     "make_langchain_mcp_tools",
     "build_agent_executor",
+    "build_code_agent_executor",
     "run_agent_query",
+    "run_code_agent_query",
 ]
 
 _EXPORT_MAP = {
@@ -20,7 +22,9 @@ _EXPORT_MAP = {
     "make_langchain_granular_tools": (".langchain_granular_tools", "make_langchain_granular_tools"),
     "make_langchain_mcp_tools": (".langchain_mcp_tools", "make_langchain_mcp_tools"),
     "build_agent_executor": (".langchain_agent_executor", "build_agent_executor"),
+    "build_code_agent_executor": (".langchain_agent_executor", "build_code_agent_executor"),
     "run_agent_query": (".langchain_agent_executor", "run_agent_query"),
+    "run_code_agent_query": (".langchain_agent_executor", "run_code_agent_query"),
 }
 
 
