@@ -27,6 +27,17 @@ def _normalize_hits(hits: List[Dict[str, Any]], source: str) -> List[Dict[str, A
             continue
         normalized.append(
             {
+                "_id": doc_id,
+                "_score": hit.get("_score", 0.0),
+                "_source": {
+                    "contributor": doc.get("contributor"),
+                    "contents": doc.get("contents"),
+                    "resource-type": doc.get("resource-type") or doc.get("element_type") or "resource",
+                    "title": doc.get("title") or "Untitled",
+                    "authors": doc.get("authors") or [],
+                    "tags": doc.get("tags") or [],
+                    "thumbnail-image": doc.get("thumbnail-image") or doc.get("thumbnail_image"),
+                },
                 "doc_id": doc_id,
                 "source": source,
                 "score": hit.get("_score", 0.0),

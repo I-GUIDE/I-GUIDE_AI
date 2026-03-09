@@ -40,8 +40,18 @@ def normalize_source_fields(source: Dict[str, Any], fallback_id: str) -> Dict[st
     source.setdefault("doc_id", fallback_id)
     source.setdefault("title", source.get("name") or "No Title")
     source.setdefault("contents", source.get("abstract") or source.get("description") or "No Content")
+    if "resource-type" not in source and "element_type" in source:
+        source["resource-type"] = source["element_type"]
     if "element_type" not in source and "resource-type" in source:
         source["element_type"] = source["resource-type"]
+    if "thumbnail-image" not in source and "thumbnail_image" in source:
+        source["thumbnail-image"] = source["thumbnail_image"]
+    if "thumbnail_image" not in source and "thumbnail-image" in source:
+        source["thumbnail_image"] = source["thumbnail-image"]
+    if not isinstance(source.get("authors"), list):
+        source["authors"] = []
+    if not isinstance(source.get("tags"), list):
+        source["tags"] = []
 
     return source
 

@@ -81,10 +81,19 @@ SEARCH_AGENT_PROMPT = (
     "You are SearchAgent.\n"
     "Goal: gather relevant evidence using tools.\n"
     "Rules:\n"
-    "1. Prefer tool calls over assumptions.\n"
-    "2. Return concise evidence with doc_ids from tool outputs.\n"
-    "3. Do not fabricate citations or sources.\n"
-    "4. If evidence is insufficient, explicitly say so."
+    "1. Operate in ReAct style internally: Think -> choose tool -> observe -> iterate.\n"
+    "2. Prefer tool calls over assumptions.\n"
+    "3. Return concise evidence with doc_ids from tool outputs.\n"
+    "4. Do not fabricate citations or sources.\n"
+    "5. If evidence is insufficient, explicitly say so.\n\n"
+    "Search method selection guide:\n"
+    "- Use `keyword_search` for broad lexical matching and straightforward topic lookups.\n"
+    "- Use `semantic_search` for conceptual/meaning-based questions and paraphrased intents.\n"
+    "- Use `neo4j_search` when user asks popularity/trend/graph-like relations (e.g., most viewed, top clicked, most popular).\n"
+    "- Use `spatial_search` for location/proximity/coordinate/bounding-box requests.\n"
+    "- Use `opengeodata_search` for geospatial/open-data resource discovery and federated opengeodata lookup.\n"
+    "- For ambiguous queries, start with `semantic_search` or `keyword_search`, then refine with a second tool.\n"
+    "- Do not call the same tool repeatedly with near-identical queries unless new evidence justifies it."
 )
 
 ANALYSIS_AGENT_PROMPT = (
@@ -520,6 +529,86 @@ def _extract_search_artifacts(result: Any) -> Dict[str, Any]:
     return artifacts
 
 
+def _parse_tool_payload(content: str) -> Optional[Dict[str, Any]]:
+    try:
+        parsed = json.loads(content)
+    except Exception:
+        return None
+    if isinstance(parsed, dict):
+        return parsed
+    return None
+
+
+def _build_react_history(search_result: Any) -> List[Dict[str, Any]]:
+    artifacts = _extract_search_artifacts(search_result)
+    tool_calls = artifacts.get("tool_calls") or []
+    tool_results = artifacts.get("tool_results") or []
+    history: List[Dict[str, Any]] = []
+
+    for idx, call in enumerate(tool_calls):
+        tool_name = str(call.get("name") or "unknown_tool")
+        call_args = call.get("args") if isinstance(call, dict) else {}
+        query = ""
+        if isinstance(call_args, dict):
+            query = str(call_args.get("query") or "").strip()
+        observation = "No tool result captured."
+        if idx < len(tool_results):
+            result_entry = tool_results[idx]
+            result_text = str(result_entry.get("content") or "")
+            payload = _parse_tool_payload(result_text)
+            if payload is not None:
+                count = payload.get("count")
+                source = payload.get("source")
+                docs = payload.get("documents") if isinstance(payload.get("documents"), list) else []
+                top_title = ""
+                if docs:
+                    first = docs[0]
+                    if isinstance(first, dict):
+                        top_title = str(first.get("title") or "").strip()
+                observation = f"source={source}, count={count}, top_title={top_title or 'N/A'}"
+            else:
+                snippet = result_text if len(result_text) <= 200 else f"{result_text[:200]}..."
+                observation = snippet
+
+        history.append(
+            {
+                "step": idx + 1,
+                "thought": f"Need additional evidence; selecting {tool_name}.",
+                "action": f'{tool_name}(query="{query}")' if query else tool_name,
+                "observation": observation,
+            }
+        )
+    return history
+
+
+def _build_retrieval_steps(search_result: Any) -> List[Dict[str, Any]]:
+    artifacts = _extract_search_artifacts(search_result)
+    tool_calls = artifacts.get("tool_calls") or []
+    tool_results = artifacts.get("tool_results") or []
+    steps: List[Dict[str, Any]] = []
+
+    for idx, call in enumerate(tool_calls):
+        call_args = call.get("args") if isinstance(call, dict) else {}
+        query = str(call_args.get("query") or "").strip() if isinstance(call_args, dict) else ""
+        payload: Dict[str, Any] = {}
+        if idx < len(tool_results):
+            result_text = str((tool_results[idx] or {}).get("content") or "")
+            maybe_payload = _parse_tool_payload(result_text)
+            if maybe_payload:
+                payload = maybe_payload
+        docs = payload.get("documents") if isinstance(payload.get("documents"), list) else []
+        steps.append(
+            {
+                "tool": str(call.get("name") or "unknown_tool"),
+                "search_query": query,
+                "source": payload.get("source"),
+                "count": payload.get("count", len(docs)),
+                "citation_ids": payload.get("citation_ids") if isinstance(payload.get("citation_ids"), list) else [],
+            }
+        )
+    return steps
+
+
 def _build_search_evidence_payload(
     query: str,
     search_response: Any,
@@ -771,6 +860,8 @@ def run_agent_query(
     response: Dict[str, Any] = {
         "search_result": search_response,
         "analysis_result": analysis_response,
+        "retrievalSteps": _build_retrieval_steps(search_response),
+        "reactHistory": _build_react_history(search_response),
     }
     final_answer = _extract_final_answer(analysis_response)
     if final_answer:
@@ -778,6 +869,37 @@ def run_agent_query(
     if route_trace:
         response["route_trace"] = route_trace
     return response
+
+
+def run_react_agent_query(
+    query: str,
+    *,
+    chat_history: Optional[List[Any]] = None,
+    llm: Optional[Any] = None,
+    verbose: bool = False,
+    return_intermediate_steps: bool = True,
+    tool_strategy: str = "granular",
+    include_mcp_tools: bool = False,
+    mcp_modules: Optional[List[str]] = None,
+    smart_tool_routing: bool = True,
+    forced_intent: Optional[str] = None,
+) -> dict:
+    """
+    ReAct-first search orchestration using LangChain tool-calling.
+    Returns final answer plus retrieval/reasoning traces derived from tool call history.
+    """
+    return run_agent_query(
+        query,
+        chat_history=chat_history,
+        llm=llm,
+        verbose=verbose,
+        return_intermediate_steps=return_intermediate_steps,
+        tool_strategy=tool_strategy,
+        include_mcp_tools=include_mcp_tools,
+        mcp_modules=mcp_modules,
+        smart_tool_routing=smart_tool_routing,
+        forced_intent=forced_intent,
+    )
 
 
 def run_code_agent_query(
@@ -837,8 +959,8 @@ def main() -> None:
     parser.add_argument(
         "--agent-mode",
         default="analysis",
-        choices=["analysis", "code"],
-        help="Agent pipeline mode: analysis (SearchAgent -> AnalysisAgent) or code (CodeAgent with SearchAgent tool).",
+        choices=["analysis", "react", "code"],
+        help="Agent pipeline mode: analysis (SearchAgent -> AnalysisAgent), react (ReAct-style SearchAgent -> AnalysisAgent), or code (CodeAgent with SearchAgent tool).",
     )
     parser.add_argument(
         "--tool-strategy",
@@ -870,7 +992,12 @@ def main() -> None:
     args = parser.parse_args()
     selected_mcp_modules = [item.strip() for item in args.mcp_modules.split(",") if item.strip()]
 
-    runner = run_code_agent_query if args.agent_mode == "code" else run_agent_query
+    if args.agent_mode == "code":
+        runner = run_code_agent_query
+    elif args.agent_mode == "react":
+        runner = run_react_agent_query
+    else:
+        runner = run_agent_query
     result = runner(
         args.query,
         verbose=args.verbose,

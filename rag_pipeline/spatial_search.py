@@ -25,11 +25,25 @@ CORS(app)
 
 try:
     import spacy
-
-    nlp = spacy.load("en_core_web_sm")
 except Exception as exc:  # pragma: no cover - optional dependency
-    logger.warning("Failed to load Spacy model 'en_core_web_sm': %s", exc)
+    logger.info("spaCy is unavailable; spatial entity extraction will be disabled: %s", exc)
     nlp = None
+else:
+    try:
+        nlp = spacy.load("en_core_web_sm")
+    except Exception as exc:  # pragma: no cover - optional dependency
+        logger.info(
+            "spaCy model 'en_core_web_sm' not found; using lightweight fallback pipeline. "
+            "Install the model for better location extraction. Details: %s",
+            exc,
+        )
+        try:
+            nlp = spacy.blank("en")
+            if "sentencizer" not in nlp.pipe_names:
+                nlp.add_pipe("sentencizer")
+        except Exception as fallback_exc:
+            logger.info("Failed to initialize fallback spaCy pipeline: %s", fallback_exc)
+            nlp = None
 
 
 @lru_cache(maxsize=1)

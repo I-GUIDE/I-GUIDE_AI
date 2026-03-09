@@ -12,6 +12,7 @@ __all__ = [
     "build_agent_executor",
     "build_code_agent_executor",
     "run_agent_query",
+    "run_react_agent_query",
     "run_code_agent_query",
 ]
 
@@ -24,6 +25,7 @@ _EXPORT_MAP = {
     "build_agent_executor": (".langchain_agent_executor", "build_agent_executor"),
     "build_code_agent_executor": (".langchain_agent_executor", "build_code_agent_executor"),
     "run_agent_query": (".langchain_agent_executor", "run_agent_query"),
+    "run_react_agent_query": (".langchain_agent_executor", "run_react_agent_query"),
     "run_code_agent_query": (".langchain_agent_executor", "run_code_agent_query"),
 }
 
