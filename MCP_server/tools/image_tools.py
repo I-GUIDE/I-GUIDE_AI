@@ -26,7 +26,19 @@ def encode_bytes(image_bytes: bytes) -> str:
     return base64.b64encode(image_bytes).decode("utf-8")
 
 # --- MCP Tools ---
-@mcp_tool
+@mcp_tool(
+    tool_description=(
+        "Describe the contents of an image using the configured vision model.\n\n"
+        "Example usage:\n"
+        '# Basic usage (uses default prompt):\n'
+        'curl -X POST "http://149.165.147.219:8000/api/tool/describe_image" '
+        '-F "file=@image.jpg"\n\n'
+        '# With custom prompt_text:\n'
+        'curl -X POST "http://149.165.147.219:8000/api/tool/describe_image" '
+        '-F "file=@image.jpg" '
+        '-F "prompt_text=What objects, people, or activities are visible in this image?"'
+    )
+)
 def describe_image(
     file: Union[Dict[str, str], UploadFile],
     prompt_text: str = "Describe what is in this image."
@@ -103,10 +115,15 @@ def describe_image(
 
 @mcp_tool(
     tool_description=(
-        "Describe a map image with focus on area, problem, and provided information.\n\n"
+         "Describe a map image with focus on area, problem, and provided information.\n\n"
         "Example usage:\n"
-        'curl -X POST "http://149.165.147.219:8000/tool/describe_map" '
-        '-F "file=@tgis_a_2343063_f0007_c.jpg"'
+        '# Basic usage (uses default prompt):\n'
+        'curl -X POST "http://149.165.147.219:8000/api/tool/describe_map" '
+        '-F "file=@tgis_a_2343063_f0007_c.jpg"\n\n'
+        '# With custom prompt_text:\n'
+        'curl -X POST "http://149.165.147.219:8000/api/tool/describe_map" '
+        '-F "file=@tgis_a_2343063_f0007_c.jpg" '
+        '-F "prompt_text=Focus on identifying water bodies, urban areas, and transportation networks."'
     )
 )
 def describe_map(
