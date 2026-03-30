@@ -281,6 +281,7 @@ def build_agent_executor(
     preloaded_tools: Optional[List[Any]] = None,
     system_prompt_override: Optional[str] = None,
     agent_name: str = "rag_agent",
+    memory: Optional[Any] = None,  # Added memory parameter
 ) -> Any:
     """
     Create a concrete LangChain AgentExecutor wired with the repository's RAG tool.
@@ -314,6 +315,7 @@ def build_agent_executor(
     try:
         from langchain.agents import AgentExecutor, create_tool_calling_agent
         from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+        from langchain.memory import ConversationBufferMemory  # Added import
 
         prompt = ChatPromptTemplate.from_messages(
             [
@@ -324,26 +326,31 @@ def build_agent_executor(
             ]
         )
         agent = create_tool_calling_agent(active_llm, tools, prompt)
+        memory_obj = memory or ConversationBufferMemory(memory_key="chat_history", return_messages=True)
         return AgentExecutor(
             agent=agent,
             tools=tools,
             verbose=verbose,
             return_intermediate_steps=return_intermediate_steps,
+            memory=memory_obj,  # Added memory
         )
     except Exception:
         # Current API path (langchain>=1.x)
         try:
             from langchain.agents import create_agent
+            from langchain.memory import ConversationBufferMemory  # Added import
         except Exception as exc:  # pragma: no cover - optional dependency
             raise RuntimeError(
                 "Missing compatible LangChain dependencies. Install `langchain`, `langchain-core`, and `langchain-openai`."
             ) from exc
+        memory_obj = memory or ConversationBufferMemory(memory_key="chat_history", return_messages=True)
         return create_agent(
             model=active_llm,
             tools=tools,
             system_prompt=system_prompt,
             debug=verbose,
             name=agent_name,
+            memory=memory_obj,  # Added memory
         )
 
 
@@ -357,6 +364,7 @@ def build_search_agent_executor(
     mcp_modules: Optional[List[str]] = None,
     allowed_tool_names: Optional[List[str]] = None,
     preloaded_tools: Optional[List[Any]] = None,
+    memory: Optional[Any] = None,  # Added memory parameter
 ) -> Any:
     return build_agent_executor(
         llm=llm,
@@ -369,6 +377,7 @@ def build_search_agent_executor(
         preloaded_tools=preloaded_tools,
         system_prompt_override=SEARCH_AGENT_PROMPT,
         agent_name="search_agent",
+        memory=memory,  # Added memory
     )
 
 
@@ -377,6 +386,7 @@ def build_analysis_agent_executor(
     llm: Optional[Any] = None,
     verbose: bool = False,
     return_intermediate_steps: bool = True,
+    memory: Optional[Any] = None,  # Added memory parameter
 ) -> Any:
     return build_agent_executor(
         llm=llm,
@@ -388,6 +398,7 @@ def build_analysis_agent_executor(
         preloaded_tools=[],
         system_prompt_override=ANALYSIS_AGENT_PROMPT,
         agent_name="analysis_agent",
+        memory=memory,  # Added memory
     )
 
 
@@ -397,6 +408,7 @@ def build_code_agent_executor(
     verbose: bool = False,
     return_intermediate_steps: bool = True,
     tools: Optional[List[Any]] = None,
+    memory: Optional[Any] = None,  # Added memory parameter
 ) -> Any:
     return build_agent_executor(
         llm=llm,
@@ -408,6 +420,7 @@ def build_code_agent_executor(
         preloaded_tools=tools or [],
         system_prompt_override=CODE_AGENT_PROMPT,
         agent_name="code_agent",
+        memory=memory,  # Added memory
     )
 
 
@@ -547,6 +560,7 @@ def _make_search_agent_evidence_tool(
     smart_tool_routing: bool,
     forced_intent: Optional[str],
     search_invocations: List[Dict[str, Any]],
+    memory: Optional[Any] = None,  # Added memory parameter
 ) -> Any:
     try:
         from langchain_core.tools import StructuredTool
@@ -577,6 +591,7 @@ def _make_search_agent_evidence_tool(
             mcp_modules=mcp_modules,
             allowed_tool_names=allowed_tool_names,
             preloaded_tools=all_tools,
+            memory=memory,  # Added memory
         )
         search_response = _invoke_agent_with_payload_fallback(
             search_executor,
@@ -702,6 +717,7 @@ def run_agent_query(
     mcp_modules: Optional[List[str]] = None,
     smart_tool_routing: bool = True,
     forced_intent: Optional[str] = None,
+    memory: Optional[Any] = None,  # Added memory parameter
 ) -> dict:
     """
     Run one query through the LangChain agent executor.
@@ -727,6 +743,7 @@ def run_agent_query(
         mcp_modules=mcp_modules,
         allowed_tool_names=allowed_tool_names,
         preloaded_tools=all_tools,
+        memory=memory,  # Added memory
     )
     try:
         search_response = _invoke_agent_with_payload_fallback(
@@ -761,6 +778,7 @@ def run_agent_query(
         llm=llm,
         verbose=verbose,
         return_intermediate_steps=return_intermediate_steps,
+        memory=memory,  # Added memory
     )
     analysis_response = _invoke_agent_with_payload_fallback(
         analysis_executor,
@@ -792,6 +810,7 @@ def run_code_agent_query(
     mcp_modules: Optional[List[str]] = None,
     smart_tool_routing: bool = True,
     forced_intent: Optional[str] = None,
+    memory: Optional[Any] = None,  # Added memory parameter
 ) -> dict:
     """
     Run one query through CodeAgent, with SearchAgent available as a tool.
@@ -807,12 +826,14 @@ def run_code_agent_query(
         smart_tool_routing=smart_tool_routing,
         forced_intent=forced_intent,
         search_invocations=search_invocations,
+        memory=memory,  # Added memory
     )
     code_executor = build_code_agent_executor(
         llm=llm,
         verbose=verbose,
         return_intermediate_steps=return_intermediate_steps,
         tools=[search_tool],
+        memory=memory,  # Added memory
     )
     code_response = _invoke_agent_with_payload_fallback(
         code_executor,
