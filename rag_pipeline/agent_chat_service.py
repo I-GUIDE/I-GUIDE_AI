@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 from uuid import uuid4
 
@@ -87,6 +88,33 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
+def _normalize_file_paths(file_paths: Optional[Sequence[Any]]) -> List[str]:
+    if isinstance(file_paths, (str, bytes)):
+        file_paths = [file_paths]
+    normalized: List[str] = []
+    for value in file_paths or []:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        try:
+            normalized.append(str(Path(text).expanduser()))
+        except Exception:
+            normalized.append(text)
+    return normalized
+
+
+def _augment_user_input_with_files(user_input: str, file_paths: Sequence[str]) -> str:
+    if not file_paths:
+        return user_input
+    attachment_lines = "\n".join(f"- {path}" for path in file_paths)
+    return (
+        f"{user_input}\n\n"
+        "Attached files are available to the agent via local file tools. "
+        "Use the provided paths if file inspection is needed:\n"
+        f"{attachment_lines}"
+    )
+
+
 def run_agent_chat(
     *,
     user_input: str,
@@ -99,11 +127,13 @@ def run_agent_chat(
     mcp_modules: Optional[List[str]] = None,
     smart_tool_routing: bool = True,
     forced_intent: Optional[str] = None,
+    file_paths: Optional[Sequence[Any]] = None,
     verbose: bool = False,
 ) -> Dict[str, Any]:
     effective_memory_id = memory_id
     memory_doc: Optional[Mapping[str, Any]] = None
     memory_warning: Optional[str] = None
+    normalized_file_paths = _normalize_file_paths(file_paths)
 
     try:
         if effective_memory_id:
@@ -119,7 +149,7 @@ def run_agent_chat(
     chat_history = _build_chat_history(memory_doc, recent_k=recent_k)
 
     result = run_agent_query(
-        user_input,
+        _augment_user_input_with_files(user_input, normalized_file_paths),
         chat_history=chat_history,
         verbose=verbose,
         return_intermediate_steps=True,
@@ -152,6 +182,7 @@ def run_agent_chat(
         "message_id": message_id,
         "memory_id": effective_memory_id,
         "thread_id": result.get("thread_id") or thread_id,
+        "file_paths": normalized_file_paths,
         "route_trace": result.get("route_trace") or {},
         "agent_result": _json_safe(result),
     }

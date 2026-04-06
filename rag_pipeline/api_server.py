@@ -267,6 +267,7 @@ Request body:
     "mcp_modules": ["search_tools", "data_tools"],
     "smart_tool_routing": true,
     "forced_intent": null,
+    "file_paths": ["./data/crime.csv"],
     "verbose": false
 }
 """
@@ -288,6 +289,7 @@ Request body:
             mcp_modules=_parse_mcp_modules(data.get('mcp_modules')),
             smart_tool_routing=bool(data.get('smart_tool_routing', True)),
             forced_intent=data.get('forced_intent'),
+            file_paths=data.get('file_paths'),
             verbose=bool(data.get('verbose', False)),
         )
         return jsonify(response), 200

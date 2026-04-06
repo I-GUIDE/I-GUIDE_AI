@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Mapping, Optional
 
+from .langchain_file_tools import make_langchain_file_tools
 from .opengeodata_search import get_opengeodata_results
 from .search_keyword import get_keyword_search_results
 from .search_neo4j import get_neo4j_search_results
@@ -90,7 +91,7 @@ def make_langchain_granular_tools() -> List[Any]:
             "LangChain is not installed. Add `langchain-core` (or langchain) to dependencies."
         ) from exc
 
-    return [
+    tools = [
         StructuredTool.from_function(
             func=keyword_search_tool,
             name="keyword_search",
@@ -120,6 +121,8 @@ def make_langchain_granular_tools() -> List[Any]:
             ),
         ),
     ]
+    tools.extend(make_langchain_file_tools())
+    return tools
 
 
 __all__ = [
