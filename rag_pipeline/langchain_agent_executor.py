@@ -5,8 +5,10 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
+from uuid import uuid4
 
 from dotenv import load_dotenv
+from langgraph.checkpoint.memory import InMemorySaver
 
 from .langchain_granular_tools import make_langchain_granular_tools
 from .langchain_mcp_tools import make_langchain_mcp_tools
@@ -106,6 +108,8 @@ CODE_AGENT_PROMPT = (
     "3. Output runnable code snippets when possible.\n"
     "4. If evidence is insufficient, say what is missing."
 )
+
+DEFAULT_CHECKPOINTER = InMemorySaver()
 
 
 def _load_env() -> None:
@@ -281,7 +285,7 @@ def build_agent_executor(
     preloaded_tools: Optional[List[Any]] = None,
     system_prompt_override: Optional[str] = None,
     agent_name: str = "rag_agent",
-    memory: Optional[Any] = None,  # Added memory parameter
+    checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
 ) -> Any:
     """
     Create a concrete LangChain AgentExecutor wired with the repository's RAG tool.
@@ -315,7 +319,6 @@ def build_agent_executor(
     try:
         from langchain.agents import AgentExecutor, create_tool_calling_agent
         from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-        from langchain.memory import ConversationBufferMemory  # Added import
 
         prompt = ChatPromptTemplate.from_messages(
             [
@@ -326,31 +329,27 @@ def build_agent_executor(
             ]
         )
         agent = create_tool_calling_agent(active_llm, tools, prompt)
-        memory_obj = memory or ConversationBufferMemory(memory_key="chat_history", return_messages=True)
         return AgentExecutor(
             agent=agent,
             tools=tools,
             verbose=verbose,
             return_intermediate_steps=return_intermediate_steps,
-            memory=memory_obj,  # Added memory
         )
     except Exception:
         # Current API path (langchain>=1.x)
         try:
             from langchain.agents import create_agent
-            from langchain.memory import ConversationBufferMemory  # Added import
         except Exception as exc:  # pragma: no cover - optional dependency
             raise RuntimeError(
                 "Missing compatible LangChain dependencies. Install `langchain`, `langchain-core`, and `langchain-openai`."
             ) from exc
-        memory_obj = memory or ConversationBufferMemory(memory_key="chat_history", return_messages=True)
         return create_agent(
             model=active_llm,
             tools=tools,
             system_prompt=system_prompt,
+            checkpointer=checkpointer,
             debug=verbose,
             name=agent_name,
-            memory=memory_obj,  # Added memory
         )
 
 
@@ -364,7 +363,7 @@ def build_search_agent_executor(
     mcp_modules: Optional[List[str]] = None,
     allowed_tool_names: Optional[List[str]] = None,
     preloaded_tools: Optional[List[Any]] = None,
-    memory: Optional[Any] = None,  # Added memory parameter
+    checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
 ) -> Any:
     return build_agent_executor(
         llm=llm,
@@ -377,7 +376,7 @@ def build_search_agent_executor(
         preloaded_tools=preloaded_tools,
         system_prompt_override=SEARCH_AGENT_PROMPT,
         agent_name="search_agent",
-        memory=memory,  # Added memory
+        checkpointer=checkpointer,
     )
 
 
@@ -386,7 +385,7 @@ def build_analysis_agent_executor(
     llm: Optional[Any] = None,
     verbose: bool = False,
     return_intermediate_steps: bool = True,
-    memory: Optional[Any] = None,  # Added memory parameter
+    checkpointer: Optional[Any] = None,
 ) -> Any:
     return build_agent_executor(
         llm=llm,
@@ -398,7 +397,7 @@ def build_analysis_agent_executor(
         preloaded_tools=[],
         system_prompt_override=ANALYSIS_AGENT_PROMPT,
         agent_name="analysis_agent",
-        memory=memory,  # Added memory
+        checkpointer=checkpointer,
     )
 
 
@@ -408,7 +407,7 @@ def build_code_agent_executor(
     verbose: bool = False,
     return_intermediate_steps: bool = True,
     tools: Optional[List[Any]] = None,
-    memory: Optional[Any] = None,  # Added memory parameter
+    checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
 ) -> Any:
     return build_agent_executor(
         llm=llm,
@@ -420,7 +419,7 @@ def build_code_agent_executor(
         preloaded_tools=tools or [],
         system_prompt_override=CODE_AGENT_PROMPT,
         agent_name="code_agent",
-        memory=memory,  # Added memory
+        checkpointer=checkpointer,
     )
 
 
@@ -437,23 +436,42 @@ def _messages_payload(query: str, chat_history: Optional[List[Any]]) -> dict:
     return {"messages": messages}
 
 
+def _agent_config(thread_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not thread_id:
+        return None
+    return {"configurable": {"thread_id": thread_id}}
+
+
+def _resolve_thread_id(thread_id: Optional[str], checkpointer: Optional[Any]) -> Optional[str]:
+    if thread_id:
+        return thread_id
+    if checkpointer is None:
+        return None
+    return f"auto-thread-{uuid4()}"
+
+
 def _invoke_agent_with_payload_fallback(
     executor: Any,
     *,
     query: str,
     chat_history: Optional[List[Any]],
+    config: Optional[Dict[str, Any]] = None,
 ) -> Any:
     messages_payload = _messages_payload(query, chat_history)
     legacy_payload = {"input": query, "chat_history": chat_history or []}
     try:
-        return executor.invoke(messages_payload)
+        if config is None:
+            return executor.invoke(messages_payload)
+        return executor.invoke(messages_payload, config=config)
     except Exception as exc:
         text = str(exc).lower()
         payload_shape_error = (
             "input" in text and "messages" in text
         ) or ("invalid" in text and "messages" in text) or ("missing" in text and "messages" in text)
         if payload_shape_error:
-            return executor.invoke(legacy_payload)
+            if config is None:
+                return executor.invoke(legacy_payload)
+            return executor.invoke(legacy_payload, config=config)
         raise
 
 
@@ -560,7 +578,8 @@ def _make_search_agent_evidence_tool(
     smart_tool_routing: bool,
     forced_intent: Optional[str],
     search_invocations: List[Dict[str, Any]],
-    memory: Optional[Any] = None,  # Added memory parameter
+    thread_id: Optional[str] = None,
+    checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
 ) -> Any:
     try:
         from langchain_core.tools import StructuredTool
@@ -591,12 +610,13 @@ def _make_search_agent_evidence_tool(
             mcp_modules=mcp_modules,
             allowed_tool_names=allowed_tool_names,
             preloaded_tools=all_tools,
-            memory=memory,  # Added memory
+            checkpointer=checkpointer,
         )
         search_response = _invoke_agent_with_payload_fallback(
             search_executor,
             query=query,
             chat_history=None,
+            config=_agent_config(thread_id),
         )
         evidence = _build_search_evidence_payload(query, search_response, route_trace)
         search_invocations.append(
@@ -717,7 +737,8 @@ def run_agent_query(
     mcp_modules: Optional[List[str]] = None,
     smart_tool_routing: bool = True,
     forced_intent: Optional[str] = None,
-    memory: Optional[Any] = None,  # Added memory parameter
+    thread_id: Optional[str] = None,
+    checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
 ) -> dict:
     """
     Run one query through the LangChain agent executor.
@@ -727,6 +748,7 @@ def run_agent_query(
         include_mcp_tools=include_mcp_tools,
         mcp_modules=mcp_modules,
     )
+    effective_thread_id = _resolve_thread_id(thread_id, checkpointer)
     route_trace: Optional[Dict[str, Any]] = None
     allowed_tool_names: Optional[List[str]] = None
     if smart_tool_routing:
@@ -743,13 +765,14 @@ def run_agent_query(
         mcp_modules=mcp_modules,
         allowed_tool_names=allowed_tool_names,
         preloaded_tools=all_tools,
-        memory=memory,  # Added memory
+        checkpointer=checkpointer,
     )
     try:
         search_response = _invoke_agent_with_payload_fallback(
             search_executor,
             query=query,
             chat_history=chat_history,
+            config=_agent_config(effective_thread_id),
         )
     except Exception as exc:
         # Anvil/OpenAI-compatible gateways occasionally return HTTP 200 with null payloads.
@@ -778,7 +801,6 @@ def run_agent_query(
         llm=llm,
         verbose=verbose,
         return_intermediate_steps=return_intermediate_steps,
-        memory=memory,  # Added memory
     )
     analysis_response = _invoke_agent_with_payload_fallback(
         analysis_executor,
@@ -795,6 +817,8 @@ def run_agent_query(
         response["final_answer"] = final_answer
     if route_trace:
         response["route_trace"] = route_trace
+    if effective_thread_id:
+        response["thread_id"] = effective_thread_id
     return response
 
 
@@ -810,11 +834,13 @@ def run_code_agent_query(
     mcp_modules: Optional[List[str]] = None,
     smart_tool_routing: bool = True,
     forced_intent: Optional[str] = None,
-    memory: Optional[Any] = None,  # Added memory parameter
+    thread_id: Optional[str] = None,
+    checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
 ) -> dict:
     """
     Run one query through CodeAgent, with SearchAgent available as a tool.
     """
+    effective_thread_id = _resolve_thread_id(thread_id, checkpointer)
     search_invocations: List[Dict[str, Any]] = []
     search_tool = _make_search_agent_evidence_tool(
         llm=llm,
@@ -826,19 +852,21 @@ def run_code_agent_query(
         smart_tool_routing=smart_tool_routing,
         forced_intent=forced_intent,
         search_invocations=search_invocations,
-        memory=memory,  # Added memory
+        thread_id=effective_thread_id,
+        checkpointer=checkpointer,
     )
     code_executor = build_code_agent_executor(
         llm=llm,
         verbose=verbose,
         return_intermediate_steps=return_intermediate_steps,
         tools=[search_tool],
-        memory=memory,  # Added memory
+        checkpointer=checkpointer,
     )
     code_response = _invoke_agent_with_payload_fallback(
         code_executor,
         query=query,
         chat_history=chat_history,
+        config=_agent_config(effective_thread_id),
     )
 
     response: Dict[str, Any] = {
@@ -848,6 +876,8 @@ def run_code_agent_query(
     final_answer = _extract_final_answer(code_response)
     if final_answer:
         response["final_answer"] = final_answer
+    if effective_thread_id:
+        response["thread_id"] = effective_thread_id
     return response
 
 
@@ -855,6 +885,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run the LangChain RAG agent once.")
     parser.add_argument("query", help="User query for the agent.")
     parser.add_argument("--verbose", action="store_true", help="Enable AgentExecutor verbose logs.")
+    parser.add_argument(
+        "--thread-id",
+        default=None,
+        help="Conversation thread id used by the LangGraph checkpointer for short-term memory.",
+    )
     parser.add_argument(
         "--agent-mode",
         default="analysis",
@@ -895,6 +930,7 @@ def main() -> None:
     result = runner(
         args.query,
         verbose=args.verbose,
+        thread_id=args.thread_id,
         tool_strategy=args.tool_strategy,
         include_mcp_tools=args.include_mcp_tools,
         mcp_modules=selected_mcp_modules,
