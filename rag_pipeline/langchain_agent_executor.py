@@ -10,6 +10,7 @@ from uuid import uuid4
 from dotenv import load_dotenv
 from langgraph.checkpoint.memory import InMemorySaver
 
+from .langchain_file_tools import make_langchain_file_tools
 from .langchain_granular_tools import make_langchain_granular_tools
 from .langchain_mcp_tools import make_langchain_mcp_tools
 from .langchain_tool import make_langchain_rag_tool, rag_tool
@@ -32,6 +33,11 @@ RAG_COMPONENT_TOOL_NAMES = {
     "neo4j_search",
     "spatial_search",
     "opengeodata_search",
+}
+FILE_TOOL_NAMES = {
+    "read_text_file",
+    "inspect_file_for_analysis",
+    "write_text_file",
 }
 ANALYSIS_HINTS = {
     "analyze",
@@ -77,6 +83,23 @@ DISCOVERY_HINTS = {
     "notebooks",
     "find",
     "discover",
+    "file",
+    "csv",
+    "json",
+    "column",
+    "columns",
+    "attached",
+    "attachment",
+}
+FILE_ANALYSIS_HINTS = {
+    "inspect",
+    "attached file",
+    "attached files",
+    "attachment",
+    "attachments",
+    "main columns",
+    "column names",
+    "save a short summary",
 }
 
 SEARCH_AGENT_PROMPT = (
@@ -196,7 +219,7 @@ def _collect_tools(
     if strategy == "granular":
         tools = make_langchain_granular_tools()
     elif strategy == "full_pipeline":
-        tools = [make_langchain_rag_tool()]
+        tools = [make_langchain_rag_tool(), *make_langchain_file_tools()]
     else:
         raise ValueError("tool_strategy must be either 'full_pipeline' or 'granular'.")
     if include_mcp_tools:
@@ -209,8 +232,13 @@ def _classify_intent(query: str) -> Dict[str, Any]:
     analysis_hits = sorted([kw for kw in ANALYSIS_HINTS if kw in text])
     code_hits = sorted([kw for kw in CODE_HINTS if kw in text])
     discovery_hits = sorted([kw for kw in DISCOVERY_HINTS if kw in text])
+    file_analysis_hits = sorted([kw for kw in FILE_ANALYSIS_HINTS if kw in text])
+    has_attached_files = "attached files are available to the agent via local file tools" in text
 
-    if code_hits:
+    if has_attached_files and file_analysis_hits:
+        intent = "hybrid"
+        reason = "attached_file_analysis_request"
+    elif code_hits:
         intent = "code_task"
         reason = "matched_code_hints"
     elif analysis_hits and discovery_hits:
@@ -228,6 +256,8 @@ def _classify_intent(query: str) -> Dict[str, Any]:
         "analysis_hits": analysis_hits,
         "code_hits": code_hits,
         "discovery_hits": discovery_hits,
+        "file_analysis_hits": file_analysis_hits,
+        "has_attached_files": has_attached_files,
     }
 
 
@@ -238,14 +268,18 @@ def _select_allowed_tools(intent: str, available_tool_names: Sequence[str]) -> L
     if intent == "analysis_task":
         selected = [name for name in ANALYSIS_TOOL_NAMES if name in available]
     elif intent == "code_task":
-        preferred = DISCOVERY_TOOL_NAMES | RAG_COMPONENT_TOOL_NAMES
+        preferred = DISCOVERY_TOOL_NAMES | RAG_COMPONENT_TOOL_NAMES | FILE_TOOL_NAMES
         selected = [name for name in available_tool_names if name in preferred]
     elif intent == "general_discovery":
-        preferred = DISCOVERY_TOOL_NAMES | RAG_COMPONENT_TOOL_NAMES
+        preferred = DISCOVERY_TOOL_NAMES | RAG_COMPONENT_TOOL_NAMES | FILE_TOOL_NAMES
         selected = [name for name in available_tool_names if name in preferred]
     else:  # hybrid
-        preferred = DISCOVERY_TOOL_NAMES | RAG_COMPONENT_TOOL_NAMES | ANALYSIS_TOOL_NAMES
+        preferred = DISCOVERY_TOOL_NAMES | RAG_COMPONENT_TOOL_NAMES | ANALYSIS_TOOL_NAMES | FILE_TOOL_NAMES
         selected = [name for name in available_tool_names if name in preferred]
+
+    for file_tool_name in FILE_TOOL_NAMES:
+        if file_tool_name in available and file_tool_name not in selected:
+            selected.append(file_tool_name)
 
     if not selected:
         selected = list(available_tool_names)
