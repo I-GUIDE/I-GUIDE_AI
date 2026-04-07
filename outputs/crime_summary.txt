@@ -1,19 +1,24 @@
-The dataset contains information about crimes in Chicago for the year 2026. The main columns in the dataset are:
+The CSV file contains the following main columns:
 
-- **ID**: Unique identifier for each crime record.
-- **Case Number**: Case reference number.
-- **Date**: Date and time of the crime.
-- **Block**: Approximate address of the crime.
-- **IUCR**: Illinois Uniform Crime Reporting code.
-- **Primary Type**: Primary classification of the crime.
-- **Description**: Detailed description of the crime.
-- **Location Description**: Type of location where the crime occurred.
-- **Arrest**: Indicates if an arrest was made (true/false).
-- **Domestic**: Indicates if the crime was domestic-related (true/false).
-- **Beat, District, Ward, Community Area**: Administrative and geographic divisions.
-- **FBI Code**: FBI classification code.
-- **X Coordinate, Y Coordinate**: Spatial coordinates.
-- **Year**: Year of the crime.
-- **Updated On**: Last update timestamp.
-- **Latitude, Longitude**: Geographic coordinates.
-- **Location**: Combined latitude and longitude in POINT format.
+1. ID
+2. Case Number
+3. Date
+4. Block
+5. IUCR
+6. Primary Type
+7. Description
+8. Location Description
+9. Arrest
+10. Domestic
+11. Beat
+12. District
+13. Ward
+14. Community Area
+15. FBI Code
+16. X Coordinate
+17. Y Coordinate
+18. Year
+19. Updated On
+20. Latitude
+21. Longitude
+22. Location
