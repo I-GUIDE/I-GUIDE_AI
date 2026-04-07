@@ -1,13 +1,14 @@
 import os
 import logging
+import json
 from uuid import uuid4
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request, stream_with_context
 from flask_cors import CORS
 from flasgger import Swagger
 
-from .agent_chat_service import run_agent_chat
+from .agent_chat_service import run_agent_chat, stream_agent_chat_events
 from .pipeline import run_pipeline
 
 app = Flask(__name__)
@@ -95,6 +96,11 @@ def _parse_mcp_modules(value):
     if isinstance(value, str):
         return [item.strip() for item in value.split(",") if item.strip()]
     raise ValueError("mcp_modules must be a list of strings or a comma-separated string")
+
+
+def _sse_event(name, data):
+    payload = json.dumps(data or {}, ensure_ascii=True, default=str)
+    return f"event: {name}\ndata: {payload}\n\n"
 
 
 @app.route('/health', methods=['GET'])
@@ -298,6 +304,59 @@ Request body:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logger.error(f"Error processing agent chat: {str(e)}", exc_info=True)
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+@app.route('/agent/chat/stream', methods=['POST'])
+def agent_chat_stream():
+    try:
+        data = request.get_json() or {}
+        user_input = data.get('user_input')
+        if not user_input:
+            return jsonify({"error": "user_input is required"}), 400
+
+        logger.info(f"Streaming agent chat: {user_input[:100]}...")
+
+        @stream_with_context
+        def generate():
+            try:
+                for item in stream_agent_chat_events(
+                    user_input=user_input,
+                    thread_id=data.get('thread_id'),
+                    memory_id=data.get('memory_id'),
+                    conversation_name=data.get('conversation_name'),
+                    recent_k=data.get('recent_k'),
+                    tool_strategy=data.get('tool_strategy', 'granular'),
+                    include_mcp_tools=bool(data.get('include_mcp_tools', False)),
+                    mcp_modules=_parse_mcp_modules(data.get('mcp_modules')),
+                    smart_tool_routing=bool(data.get('smart_tool_routing', True)),
+                    forced_intent=data.get('forced_intent'),
+                    file_paths=data.get('file_paths'),
+                    verbose=bool(data.get('verbose', False)),
+                ):
+                    event_name = str(item.get("event") or "message")
+                    yield _sse_event(event_name, item.get("data") or {})
+            except ValueError as e:
+                logger.error(f"Agent chat stream validation error: {str(e)}")
+                yield _sse_event("error", {"message": str(e), "type": "validation_error"})
+            except Exception as e:
+                logger.error(f"Error streaming agent chat: {str(e)}", exc_info=True)
+                yield _sse_event("error", {"message": str(e), "type": "internal_error"})
+
+        return Response(
+            generate(),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
+    except ValueError as e:
+        logger.error(f"Agent chat stream validation error: {str(e)}")
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error(f"Error processing agent chat stream: {str(e)}", exc_info=True)
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 

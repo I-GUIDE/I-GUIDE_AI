@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Generator, List, Mapping, Optional, Sequence
 from uuid import uuid4
 
-from .langchain_agent_executor import run_agent_query
+from .langchain_agent_executor import run_agent_query, stream_agent_query_events
 from .memory_module import create_memory, get_or_create_memory, update_memory
 
 logger = logging.getLogger(__name__)
@@ -191,4 +191,122 @@ def run_agent_chat(
     return response
 
 
-__all__ = ["run_agent_chat"]
+def stream_agent_chat_events(
+    *,
+    user_input: str,
+    thread_id: Optional[str] = None,
+    memory_id: Optional[str] = None,
+    conversation_name: Optional[str] = None,
+    recent_k: Optional[int] = None,
+    tool_strategy: str = "granular",
+    include_mcp_tools: bool = False,
+    mcp_modules: Optional[List[str]] = None,
+    smart_tool_routing: bool = True,
+    forced_intent: Optional[str] = None,
+    file_paths: Optional[Sequence[Any]] = None,
+    verbose: bool = False,
+) -> Generator[Dict[str, Any], None, None]:
+    effective_memory_id = memory_id
+    memory_doc: Optional[Mapping[str, Any]] = None
+    memory_warning: Optional[str] = None
+    normalized_file_paths = _normalize_file_paths(file_paths)
+
+    yield {
+        "event": "status",
+        "data": {
+            "stage": "agent_chat_started",
+            "memory_id": effective_memory_id,
+            "thread_id": thread_id,
+            "file_paths": normalized_file_paths,
+        },
+    }
+
+    try:
+        if effective_memory_id:
+            memory_doc = get_or_create_memory(effective_memory_id)
+        else:
+            effective_memory_id = create_memory(conversation_name or "agent-chat")
+            memory_doc = get_or_create_memory(effective_memory_id)
+        yield {
+            "event": "memory_loaded",
+            "data": {
+                "memory_id": effective_memory_id,
+                "recent_k": recent_k,
+                "history_length": len((memory_doc or {}).get("chat_history") or []),
+            },
+        }
+    except Exception as exc:
+        logger.warning("Persistent agent chat memory unavailable: %s", exc)
+        memory_warning = f"persistent_memory_unavailable: {exc}"
+        effective_memory_id = memory_id
+        yield {
+            "event": "warning",
+            "data": {
+                "stage": "memory_load",
+                "message": memory_warning,
+            },
+        }
+
+    chat_history = _build_chat_history(memory_doc, recent_k=recent_k)
+    completed_response: Optional[Dict[str, Any]] = None
+    for event in stream_agent_query_events(
+        _augment_user_input_with_files(user_input, normalized_file_paths),
+        chat_history=chat_history,
+        verbose=verbose,
+        return_intermediate_steps=True,
+        tool_strategy=tool_strategy,
+        include_mcp_tools=include_mcp_tools,
+        mcp_modules=mcp_modules,
+        smart_tool_routing=smart_tool_routing,
+        forced_intent=forced_intent,
+        thread_id=thread_id,
+    ):
+        if event.get("event") == "completed" and isinstance(event.get("data"), Mapping):
+            completed_response = dict(event["data"])
+        yield event
+
+    answer = _extract_agent_answer(completed_response or {})
+    message_id = str(uuid4())
+    if effective_memory_id:
+        try:
+            update_memory(
+                effective_memory_id,
+                user_query=user_input,
+                message_id=message_id,
+                answer=answer,
+                elements=[],
+            )
+            yield {
+                "event": "memory_saved",
+                "data": {
+                    "memory_id": effective_memory_id,
+                    "message_id": message_id,
+                },
+            }
+        except Exception as exc:
+            logger.warning("Failed to persist agent chat turn for %s: %s", effective_memory_id, exc)
+            if memory_warning is None:
+                memory_warning = f"persistent_memory_update_failed: {exc}"
+            yield {
+                "event": "warning",
+                "data": {
+                    "stage": "memory_save",
+                    "message": memory_warning,
+                },
+            }
+
+    final_response: Dict[str, Any] = {
+        "answer": answer,
+        "message_id": message_id,
+        "memory_id": effective_memory_id,
+        "thread_id": (completed_response or {}).get("thread_id") or thread_id,
+        "file_paths": normalized_file_paths,
+        "route_trace": (completed_response or {}).get("route_trace") or {},
+        "agent_result": _json_safe(completed_response or {}),
+    }
+    if memory_warning:
+        final_response["warning"] = memory_warning
+    yield {"event": "response", "data": final_response}
+
+
+__all__ = ["run_agent_chat", "stream_agent_chat_events"]
