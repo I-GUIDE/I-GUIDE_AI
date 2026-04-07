@@ -1,0 +1,734 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agent Chat Stream Demo</title>
+  <style>
+    :root {
+      --bg: #f5f1e8;
+      --panel: #fffdf8;
+      --ink: #18222f;
+      --muted: #687384;
+      --line: #d7cfbf;
+      --accent: #0c7c59;
+      --accent-2: #d95d39;
+      --code: #efe7d7;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      background:
+        radial-gradient(circle at top right, rgba(217, 93, 57, 0.12), transparent 25%),
+        radial-gradient(circle at bottom left, rgba(12, 124, 89, 0.10), transparent 25%),
+        var(--bg);
+      color: var(--ink);
+    }
+
+    .page {
+      width: min(1200px, calc(100vw - 32px));
+      margin: 24px auto;
+      display: grid;
+      grid-template-columns: 380px 1fr;
+      gap: 18px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      box-shadow: 0 12px 40px rgba(24, 34, 47, 0.08);
+      overflow: hidden;
+    }
+
+    .panel-header {
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(255,255,255,0.9), rgba(239,231,215,0.6));
+    }
+
+    .panel-header h1,
+    .panel-header h2 {
+      margin: 0;
+      font-size: 1.1rem;
+      letter-spacing: 0.02em;
+    }
+
+    .panel-body {
+      padding: 16px 18px 18px;
+    }
+
+    .controls {
+      display: grid;
+      gap: 12px;
+    }
+
+    label {
+      display: grid;
+      gap: 6px;
+      font-size: 0.92rem;
+      color: var(--ink);
+    }
+
+    .inline {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    input,
+    textarea,
+    select,
+    button {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font: inherit;
+      color: var(--ink);
+      background: #fff;
+    }
+
+    textarea {
+      resize: vertical;
+      min-height: 88px;
+    }
+
+    .checkboxes {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .checkbox {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fff;
+      font-size: 0.92rem;
+    }
+
+    .checkbox input {
+      width: auto;
+      margin: 0;
+    }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+    }
+
+    button {
+      cursor: pointer;
+      font-weight: 600;
+    }
+
+    .primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .secondary {
+      background: transparent;
+      color: var(--accent-2);
+      border-color: var(--accent-2);
+    }
+
+    .output {
+      display: grid;
+      gap: 16px;
+    }
+
+    .statusbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      font-size: 0.88rem;
+      color: var(--muted);
+    }
+
+    .chip {
+      padding: 7px 10px;
+      border-radius: 999px;
+      background: var(--code);
+      border: 1px solid var(--line);
+    }
+
+    .answer {
+      white-space: pre-wrap;
+      line-height: 1.55;
+      min-height: 120px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+    }
+
+    .doc-list,
+    .event-list {
+      margin: 0;
+      padding-left: 18px;
+    }
+
+    .event-log {
+      max-height: 480px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+      padding: 12px 14px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.84rem;
+      line-height: 1.45;
+    }
+
+    .event-item {
+      margin-bottom: 10px;
+      padding-bottom: 10px;
+      border-bottom: 1px dashed var(--line);
+    }
+
+    .event-item:last-child {
+      border-bottom: none;
+      margin-bottom: 0;
+      padding-bottom: 0;
+    }
+
+    .event-name {
+      font-weight: 700;
+      color: var(--accent);
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .error {
+      color: #9f2f1f;
+    }
+
+    @media (max-width: 980px) {
+      .page {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <section class="panel">
+      <div class="panel-header">
+        <h1>Agent Chat Stream Demo</h1>
+      </div>
+      <div class="panel-body">
+        <form id="chat-form" class="controls">
+          <label>
+            Endpoint
+            <input id="endpoint" value="http://localhost:3500/agent/chat/stream">
+          </label>
+
+          <label>
+            Upload Endpoint
+            <input id="upload_endpoint" value="http://localhost:3500/agent/files/upload">
+          </label>
+
+          <label>
+            User Input
+            <textarea id="user_input">Inspect the attached CSV and tell me the main columns. Save a short summary to ./outputs/crime_summary.txt</textarea>
+          </label>
+
+          <div class="inline">
+            <label>
+              Memory ID
+              <input id="memory_id" value="demo-session-1">
+            </label>
+            <label>
+              Thread ID
+              <input id="thread_id" value="demo-thread-1">
+            </label>
+          </div>
+
+          <div class="inline">
+            <label>
+              Conversation Name
+              <input id="conversation_name" value="Agent chat demo">
+            </label>
+            <label>
+              Recent K
+              <input id="recent_k" type="number" min="0" value="8">
+            </label>
+          </div>
+
+          <div class="inline">
+            <label>
+              Tool Strategy
+              <select id="tool_strategy">
+                <option value="granular" selected>granular</option>
+                <option value="full_pipeline">full_pipeline</option>
+              </select>
+            </label>
+            <label>
+              Forced Intent
+              <select id="forced_intent">
+                <option value="">auto</option>
+                <option value="general_discovery">general_discovery</option>
+                <option value="analysis_task">analysis_task</option>
+                <option value="code_task">code_task</option>
+                <option value="hybrid">hybrid</option>
+              </select>
+            </label>
+          </div>
+
+          <label>
+            MCP Modules
+            <input id="mcp_modules" value="search_tools,data_tools">
+          </label>
+
+          <label>
+            Upload Files
+            <input id="upload_files" type="file" multiple>
+          </label>
+
+          <div class="actions">
+            <button class="secondary" type="button" id="upload-btn">Upload Selected Files</button>
+            <button class="secondary" type="button" id="clear-files-btn">Clear Attachments</button>
+          </div>
+
+          <div>
+            <strong>Attached Files</strong>
+            <ul class="doc-list" id="attached-files"></ul>
+          </div>
+
+          <div class="checkboxes">
+            <label class="checkbox">
+              <input id="include_mcp_tools" type="checkbox">
+              Include MCP Tools
+            </label>
+            <label class="checkbox">
+              <input id="smart_tool_routing" type="checkbox" checked>
+              Smart Tool Routing
+            </label>
+            <label class="checkbox">
+              <input id="verbose" type="checkbox">
+              Verbose
+            </label>
+          </div>
+
+          <div class="actions">
+            <button class="primary" type="submit">Start Stream</button>
+            <button class="secondary" type="button" id="stop-btn">Stop</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <h2>Response</h2>
+      </div>
+      <div class="panel-body output">
+        <div class="statusbar">
+          <span class="chip" id="status-chip">idle</span>
+          <span class="chip" id="memory-chip">memory: n/a</span>
+          <span class="chip" id="thread-chip">thread: n/a</span>
+        </div>
+
+        <div>
+          <strong>Final Answer</strong>
+          <div class="answer" id="answer">No answer yet.</div>
+        </div>
+
+        <div>
+          <strong>Document Reference IDs</strong>
+          <ul class="doc-list" id="doc-refs"></ul>
+        </div>
+
+        <div>
+          <strong>Downloadable Files</strong>
+          <ul class="doc-list" id="download-files"></ul>
+        </div>
+
+        <div>
+          <strong>Tool Trace</strong>
+          <div class="event-log" id="tool-trace"></div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const form = document.getElementById("chat-form");
+    const stopBtn = document.getElementById("stop-btn");
+    const answerEl = document.getElementById("answer");
+    const docRefsEl = document.getElementById("doc-refs");
+    const attachedFilesEl = document.getElementById("attached-files");
+    const downloadFilesEl = document.getElementById("download-files");
+    const toolTraceEl = document.getElementById("tool-trace");
+    const statusChip = document.getElementById("status-chip");
+    const memoryChip = document.getElementById("memory-chip");
+    const threadChip = document.getElementById("thread-chip");
+    const uploadBtn = document.getElementById("upload-btn");
+    const clearFilesBtn = document.getElementById("clear-files-btn");
+    const uploadInput = document.getElementById("upload_files");
+
+    let currentAbortController = null;
+    const docRefSet = new Set();
+    const downloadableFiles = new Map();
+    const attachedFiles = new Map();
+
+    function lineList(value) {
+      return String(value || "")
+        .split("\n")
+        .map((item) => item.trim())
+        .filter(Boolean);
+    }
+
+    function appendTrace(eventName, payload, isError = false) {
+      const wrapper = document.createElement("div");
+      wrapper.className = "event-item";
+
+      const header = document.createElement("div");
+      header.className = `event-name ${isError ? "error" : ""}`;
+      header.textContent = eventName;
+
+      const body = document.createElement("pre");
+      body.textContent = JSON.stringify(payload, null, 2);
+      body.style.margin = "6px 0 0";
+      body.style.whiteSpace = "pre-wrap";
+
+      wrapper.appendChild(header);
+      wrapper.appendChild(body);
+      toolTraceEl.prepend(wrapper);
+    }
+
+    function renderDocRefs() {
+      docRefsEl.innerHTML = "";
+      const refs = Array.from(docRefSet).sort();
+      if (!refs.length) {
+        const li = document.createElement("li");
+        li.className = "muted";
+        li.textContent = "No document references emitted.";
+        docRefsEl.appendChild(li);
+        return;
+      }
+      for (const ref of refs) {
+        const li = document.createElement("li");
+        li.textContent = ref;
+        docRefsEl.appendChild(li);
+      }
+    }
+
+    function renderAttachedFiles() {
+      attachedFilesEl.innerHTML = "";
+      const items = Array.from(attachedFiles.values());
+      if (!items.length) {
+        const li = document.createElement("li");
+        li.className = "muted";
+        li.textContent = "No uploaded files attached.";
+        attachedFilesEl.appendChild(li);
+        return;
+      }
+      for (const file of items) {
+        const li = document.createElement("li");
+        const label = file.filename ? `${file.filename} (${file.file_id})` : file.file_id;
+        li.textContent = label;
+        attachedFilesEl.appendChild(li);
+      }
+    }
+
+    function renderDownloadFiles() {
+      downloadFilesEl.innerHTML = "";
+      const items = Array.from(downloadableFiles.values());
+      if (!items.length) {
+        const li = document.createElement("li");
+        li.className = "muted";
+        li.textContent = "No downloadable files produced.";
+        downloadFilesEl.appendChild(li);
+        return;
+      }
+      for (const file of items) {
+        const li = document.createElement("li");
+        const link = document.createElement("a");
+        link.href = absoluteUrl(file.download_url);
+        link.textContent = file.filename || file.file_id || "download";
+        link.target = "_blank";
+        link.rel = "noreferrer";
+        li.appendChild(link);
+        if (file.file_id) {
+          li.appendChild(document.createTextNode(` (${file.file_id})`));
+        }
+        downloadFilesEl.appendChild(li);
+      }
+    }
+
+    function absoluteUrl(path) {
+      if (!path) return "#";
+      if (/^https?:\/\//i.test(path)) return path;
+      const endpoint = document.getElementById("endpoint").value.trim() || window.location.origin;
+      return new URL(path, endpoint).toString();
+    }
+
+    function maybeCollectRefs(value) {
+      if (!value) return;
+
+      if (Array.isArray(value)) {
+        value.forEach(maybeCollectRefs);
+        return;
+      }
+
+      if (typeof value === "string") {
+        try {
+          maybeCollectRefs(JSON.parse(value));
+          return;
+        } catch (_) {
+          return;
+        }
+      }
+
+      if (typeof value !== "object") return;
+
+      if (Array.isArray(value.citation_ids)) {
+        value.citation_ids.forEach((id) => docRefSet.add(String(id)));
+      }
+      if (typeof value.doc_id === "string" && value.doc_id) {
+        docRefSet.add(value.doc_id);
+      }
+      if (Array.isArray(value.documents)) {
+        value.documents.forEach((doc) => {
+          if (doc && typeof doc.doc_id === "string" && doc.doc_id) {
+            docRefSet.add(doc.doc_id);
+          }
+        });
+      }
+
+      Object.values(value).forEach(maybeCollectRefs);
+    }
+
+    function maybeCollectDownloads(value) {
+      if (!value) return;
+
+      if (Array.isArray(value)) {
+        value.forEach(maybeCollectDownloads);
+        return;
+      }
+
+      if (typeof value === "string") {
+        try {
+          maybeCollectDownloads(JSON.parse(value));
+          return;
+        } catch (_) {
+          return;
+        }
+      }
+
+      if (typeof value !== "object") return;
+
+      if (value.download_url && (value.file_id || value.filename)) {
+        const key = String(value.file_id || value.download_url);
+        downloadableFiles.set(key, {
+          file_id: value.file_id || "",
+          filename: value.filename || "download",
+          download_url: value.download_url
+        });
+      }
+
+      Object.values(value).forEach(maybeCollectDownloads);
+    }
+
+    function buildPayload() {
+      const recentKValue = document.getElementById("recent_k").value.trim();
+      return {
+        user_input: document.getElementById("user_input").value.trim(),
+        memory_id: document.getElementById("memory_id").value.trim() || null,
+        thread_id: document.getElementById("thread_id").value.trim() || null,
+        conversation_name: document.getElementById("conversation_name").value.trim() || null,
+        recent_k: recentKValue === "" ? null : Number(recentKValue),
+        tool_strategy: document.getElementById("tool_strategy").value,
+        include_mcp_tools: document.getElementById("include_mcp_tools").checked,
+        mcp_modules: lineList(document.getElementById("mcp_modules").value.replaceAll(",", "\n")),
+        smart_tool_routing: document.getElementById("smart_tool_routing").checked,
+        forced_intent: document.getElementById("forced_intent").value || null,
+        file_ids: Array.from(attachedFiles.keys()),
+        verbose: document.getElementById("verbose").checked
+      };
+    }
+
+    async function streamRequest(url, payload) {
+      currentAbortController = new AbortController();
+      statusChip.textContent = "connecting";
+      memoryChip.textContent = `memory: ${payload.memory_id || "auto"}`;
+      threadChip.textContent = `thread: ${payload.thread_id || "auto"}`;
+      answerEl.textContent = "Waiting for streamed events...";
+      docRefSet.clear();
+      downloadableFiles.clear();
+      renderDocRefs();
+      renderDownloadFiles();
+      toolTraceEl.innerHTML = "";
+
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: currentAbortController.signal
+      });
+
+      if (!response.ok || !response.body) {
+        const text = await response.text();
+        throw new Error(text || `Request failed with status ${response.status}`);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let boundary = buffer.indexOf("\n\n");
+        while (boundary !== -1) {
+          const rawEvent = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          handleSseBlock(rawEvent);
+          boundary = buffer.indexOf("\n\n");
+        }
+      }
+    }
+
+    function handleSseBlock(block) {
+      if (!block.trim()) return;
+      const lines = block.split("\n");
+      let eventName = "message";
+      const dataLines = [];
+
+      for (const line of lines) {
+        if (line.startsWith("event:")) {
+          eventName = line.slice(6).trim();
+        } else if (line.startsWith("data:")) {
+          dataLines.push(line.slice(5).trim());
+        }
+      }
+
+      let payload = {};
+      const rawData = dataLines.join("\n");
+      if (rawData) {
+        try {
+          payload = JSON.parse(rawData);
+        } catch (_) {
+          payload = { raw: rawData };
+        }
+      }
+
+      maybeCollectRefs(payload);
+      maybeCollectDownloads(payload);
+      renderDocRefs();
+      renderDownloadFiles();
+      appendTrace(eventName, payload, eventName === "error");
+
+      if (eventName === "status" && payload.stage) {
+        statusChip.textContent = payload.stage;
+      }
+      if (eventName === "memory_loaded" && payload.memory_id) {
+        memoryChip.textContent = `memory: ${payload.memory_id}`;
+      }
+      if (eventName === "route_trace" && payload.allowed_tools) {
+        statusChip.textContent = `route: ${payload.intent || "unknown"}`;
+      }
+      if (eventName === "final_answer") {
+        answerEl.textContent = payload.answer || JSON.stringify(payload, null, 2);
+      }
+      if (eventName === "response") {
+        answerEl.textContent = payload.answer || answerEl.textContent;
+        if (payload.thread_id) {
+          threadChip.textContent = `thread: ${payload.thread_id}`;
+        }
+        if (payload.memory_id) {
+          memoryChip.textContent = `memory: ${payload.memory_id}`;
+        }
+        statusChip.textContent = "completed";
+      }
+      if (eventName === "error") {
+        statusChip.textContent = "error";
+      }
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (currentAbortController) {
+        currentAbortController.abort();
+      }
+
+      try {
+        const payload = buildPayload();
+        const endpoint = document.getElementById("endpoint").value.trim();
+        await streamRequest(endpoint, payload);
+      } catch (error) {
+        statusChip.textContent = "error";
+        answerEl.textContent = String(error.message || error);
+        appendTrace("client_error", { message: String(error.message || error) }, true);
+      } finally {
+        currentAbortController = null;
+      }
+    });
+
+    stopBtn.addEventListener("click", () => {
+      if (currentAbortController) {
+        currentAbortController.abort();
+        currentAbortController = null;
+        statusChip.textContent = "stopped";
+      }
+    });
+
+    uploadBtn.addEventListener("click", async () => {
+      const files = Array.from(uploadInput.files || []);
+      if (!files.length) {
+        appendTrace("upload_error", { message: "No files selected." }, true);
+        return;
+      }
+
+      const formData = new FormData();
+      files.forEach((file) => formData.append("files", file));
+
+      try {
+        const response = await fetch(document.getElementById("upload_endpoint").value.trim(), {
+          method: "POST",
+          body: formData
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.error || `Upload failed with status ${response.status}`);
+        }
+        for (const file of payload.files || []) {
+          attachedFiles.set(String(file.file_id), file);
+          downloadableFiles.set(String(file.file_id), file);
+        }
+        renderAttachedFiles();
+        renderDownloadFiles();
+        appendTrace("upload_complete", payload);
+        uploadInput.value = "";
+      } catch (error) {
+        appendTrace("upload_error", { message: String(error.message || error) }, true);
+      }
+    });
+
+    clearFilesBtn.addEventListener("click", () => {
+      attachedFiles.clear();
+      renderAttachedFiles();
+    });
+
+    renderDocRefs();
+    renderAttachedFiles();
+    renderDownloadFiles();
+  </script>
+</body>
+</html>

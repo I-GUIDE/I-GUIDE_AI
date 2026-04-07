@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, Generator, List, Mapping, Optional, Sequence
 from uuid import uuid4
 
+from .agent_file_store import get_file_record
 from .langchain_agent_executor import run_agent_query, stream_agent_query_events
 from .memory_module import create_memory, get_or_create_memory, update_memory
 
@@ -115,6 +116,37 @@ def _augment_user_input_with_files(user_input: str, file_paths: Sequence[str]) -
     )
 
 
+def _normalize_file_ids(file_ids: Optional[Sequence[Any]]) -> List[str]:
+    if isinstance(file_ids, (str, bytes)):
+        file_ids = [file_ids]
+    normalized: List[str] = []
+    for value in file_ids or []:
+        text = str(value or "").strip()
+        if text:
+            normalized.append(text)
+    return normalized
+
+
+def _augment_user_input_with_file_ids(user_input: str, file_ids: Sequence[str]) -> str:
+    if not file_ids:
+        return user_input
+
+    lines: List[str] = []
+    for file_id in file_ids:
+        record = get_file_record(file_id)
+        if record:
+            lines.append(f"- {file_id} ({record.get('filename', 'unknown')})")
+        else:
+            lines.append(f"- {file_id}")
+    attachment_lines = "\n".join(lines)
+    return (
+        f"{user_input}\n\n"
+        "Uploaded files are available to the agent via local file tools. "
+        "Use these uploaded file ids when inspecting files, and use `write_output_file` for downloadable outputs:\n"
+        f"{attachment_lines}"
+    )
+
+
 def run_agent_chat(
     *,
     user_input: str,
@@ -128,12 +160,14 @@ def run_agent_chat(
     smart_tool_routing: bool = True,
     forced_intent: Optional[str] = None,
     file_paths: Optional[Sequence[Any]] = None,
+    file_ids: Optional[Sequence[Any]] = None,
     verbose: bool = False,
 ) -> Dict[str, Any]:
     effective_memory_id = memory_id
     memory_doc: Optional[Mapping[str, Any]] = None
     memory_warning: Optional[str] = None
     normalized_file_paths = _normalize_file_paths(file_paths)
+    normalized_file_ids = _normalize_file_ids(file_ids)
 
     try:
         if effective_memory_id:
@@ -147,9 +181,11 @@ def run_agent_chat(
         effective_memory_id = memory_id
 
     chat_history = _build_chat_history(memory_doc, recent_k=recent_k)
+    effective_input = _augment_user_input_with_files(user_input, normalized_file_paths)
+    effective_input = _augment_user_input_with_file_ids(effective_input, normalized_file_ids)
 
     result = run_agent_query(
-        _augment_user_input_with_files(user_input, normalized_file_paths),
+        effective_input,
         chat_history=chat_history,
         verbose=verbose,
         return_intermediate_steps=True,
@@ -183,6 +219,7 @@ def run_agent_chat(
         "memory_id": effective_memory_id,
         "thread_id": result.get("thread_id") or thread_id,
         "file_paths": normalized_file_paths,
+        "file_ids": normalized_file_ids,
         "route_trace": result.get("route_trace") or {},
         "agent_result": _json_safe(result),
     }
@@ -204,12 +241,14 @@ def stream_agent_chat_events(
     smart_tool_routing: bool = True,
     forced_intent: Optional[str] = None,
     file_paths: Optional[Sequence[Any]] = None,
+    file_ids: Optional[Sequence[Any]] = None,
     verbose: bool = False,
 ) -> Generator[Dict[str, Any], None, None]:
     effective_memory_id = memory_id
     memory_doc: Optional[Mapping[str, Any]] = None
     memory_warning: Optional[str] = None
     normalized_file_paths = _normalize_file_paths(file_paths)
+    normalized_file_ids = _normalize_file_ids(file_ids)
 
     yield {
         "event": "status",
@@ -218,6 +257,7 @@ def stream_agent_chat_events(
             "memory_id": effective_memory_id,
             "thread_id": thread_id,
             "file_paths": normalized_file_paths,
+            "file_ids": normalized_file_ids,
         },
     }
 
@@ -248,9 +288,11 @@ def stream_agent_chat_events(
         }
 
     chat_history = _build_chat_history(memory_doc, recent_k=recent_k)
+    effective_input = _augment_user_input_with_files(user_input, normalized_file_paths)
+    effective_input = _augment_user_input_with_file_ids(effective_input, normalized_file_ids)
     completed_response: Optional[Dict[str, Any]] = None
     for event in stream_agent_query_events(
-        _augment_user_input_with_files(user_input, normalized_file_paths),
+        effective_input,
         chat_history=chat_history,
         verbose=verbose,
         return_intermediate_steps=True,
@@ -301,6 +343,7 @@ def stream_agent_chat_events(
         "memory_id": effective_memory_id,
         "thread_id": (completed_response or {}).get("thread_id") or thread_id,
         "file_paths": normalized_file_paths,
+        "file_ids": normalized_file_ids,
         "route_trace": (completed_response or {}).get("route_trace") or {},
         "agent_result": _json_safe(completed_response or {}),
     }

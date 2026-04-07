@@ -1,13 +1,15 @@
 import os
 import logging
 import json
+from pathlib import Path
 from uuid import uuid4
 
 from dotenv import load_dotenv
-from flask import Flask, Response, jsonify, request, stream_with_context
+from flask import Flask, Response, jsonify, request, send_file, stream_with_context
 from flask_cors import CORS
 from flasgger import Swagger
 
+from .agent_file_store import require_file_record, resolve_file_id, save_uploaded_file
 from .agent_chat_service import run_agent_chat, stream_agent_chat_events
 from .pipeline import run_pipeline
 
@@ -103,10 +105,58 @@ def _sse_event(name, data):
     return f"event: {name}\ndata: {payload}\n\n"
 
 
+def _normalize_uploaded_files():
+    files = []
+    files.extend(request.files.getlist("files"))
+    single = request.files.get("file")
+    if single is not None:
+        files.append(single)
+    return [item for item in files if getattr(item, "filename", None)]
+
+
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint"""
     return jsonify({"status": "healthy", "service": "rag-pipeline"}), 200
+
+
+@app.route('/agent/files/upload', methods=['POST'])
+def upload_agent_files():
+    try:
+        files = _normalize_uploaded_files()
+        if not files:
+            return jsonify({"error": "No files uploaded. Use form field `file` or `files`."}), 400
+
+        uploaded = [save_uploaded_file(file_storage) for file_storage in files]
+        return jsonify({"files": uploaded, "count": len(uploaded)}), 200
+    except ValueError as e:
+        logger.error(f"Agent file upload validation error: {str(e)}")
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error(f"Error uploading agent files: {str(e)}", exc_info=True)
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+@app.route('/agent/files/<file_id>/download', methods=['GET'])
+def download_agent_file(file_id):
+    try:
+        record = require_file_record(file_id)
+        path = resolve_file_id(file_id)
+        mimetype = None
+        suffix = Path(record.get("filename", "")).suffix.lower()
+        if suffix == ".csv":
+            mimetype = "text/csv"
+        elif suffix == ".json":
+            mimetype = "application/json"
+        elif suffix in {".txt", ".md", ".py"}:
+            mimetype = "text/plain"
+        return send_file(path, as_attachment=True, download_name=record.get("filename") or path.name, mimetype=mimetype)
+    except ValueError as e:
+        logger.error(f"Agent file download validation error: {str(e)}")
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        logger.error(f"Error downloading agent file {file_id}: {str(e)}", exc_info=True)
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/query', methods=['POST'])
 def query():
@@ -296,6 +346,7 @@ Request body:
             smart_tool_routing=bool(data.get('smart_tool_routing', True)),
             forced_intent=data.get('forced_intent'),
             file_paths=data.get('file_paths'),
+            file_ids=data.get('file_ids'),
             verbose=bool(data.get('verbose', False)),
         )
         return jsonify(response), 200
@@ -332,6 +383,7 @@ def agent_chat_stream():
                     smart_tool_routing=bool(data.get('smart_tool_routing', True)),
                     forced_intent=data.get('forced_intent'),
                     file_paths=data.get('file_paths'),
+                    file_ids=data.get('file_ids'),
                     verbose=bool(data.get('verbose', False)),
                 ):
                     event_name = str(item.get("event") or "message")

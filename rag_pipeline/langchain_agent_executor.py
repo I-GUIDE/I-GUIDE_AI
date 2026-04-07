@@ -38,6 +38,7 @@ FILE_TOOL_NAMES = {
     "read_text_file",
     "inspect_file_for_analysis",
     "write_text_file",
+    "write_output_file",
 }
 ANALYSIS_HINTS = {
     "analyze",
@@ -100,6 +101,9 @@ FILE_ANALYSIS_HINTS = {
     "main columns",
     "column names",
     "save a short summary",
+    "uploaded file",
+    "file id",
+    "downloadable",
 }
 
 SEARCH_AGENT_PROMPT = (
