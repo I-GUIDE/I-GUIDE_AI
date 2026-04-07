@@ -92,3 +92,48 @@ python -m rag_pipeline.langchain_agent_executor \
   --tool-strategy full_pipeline \
   --include-mcp-tools
   ```
+
+## LangSmith tracing for this repo
+
+To trace the LangGraph/LangChain agent runs in LangSmith, set:
+
+```sh
+export LANGSMITH_TRACING=true
+export LANGSMITH_API_KEY=your_langsmith_api_key
+export LANGSMITH_PROJECT=i-guide-agent
+```
+
+Optional but useful:
+
+```sh
+export LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+```
+
+Then start the Flask app normally. The agent graph execution from
+`rag_pipeline.langchain_agent_executor` will show up in LangSmith traces.
+
+## Inspect the agent graph locally
+
+This repo includes a helper for the current `AGENT_QUERY_GRAPH`:
+
+```sh
+python tools/inspect_agent_query_graph.py
+```
+
+Print Mermaid:
+
+```sh
+python tools/inspect_agent_query_graph.py --format mermaid
+```
+
+Write Mermaid to a file:
+
+```sh
+python tools/inspect_agent_query_graph.py --format mermaid --output outputs/agent_query_graph.mmd
+```
+
+Write PNG:
+
+```sh
+python tools/inspect_agent_query_graph.py --format png --output outputs/agent_query_graph.png
+```
