@@ -5,8 +5,9 @@ import io
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+from .agent_file_store import create_output_file, get_file_record, resolve_file_id
 
 DEFAULT_MAX_CHARS = 12000
 DEFAULT_MAX_ROWS = 20
@@ -24,10 +25,7 @@ def _allowed_roots() -> List[Path]:
     return sorted(roots)
 
 
-def _resolve_allowed_path(path: str, *, must_exist: bool = True) -> Path:
-    if not path or not str(path).strip():
-        raise ValueError("path is required")
-
+def _resolve_local_allowed_path(path: str, *, must_exist: bool = True) -> Path:
     candidate = Path(path).expanduser()
     if not candidate.is_absolute():
         candidate = (_repo_root() / candidate).resolve()
@@ -43,6 +41,18 @@ def _resolve_allowed_path(path: str, *, must_exist: bool = True) -> Path:
         raise ValueError(f"file does not exist: {candidate}")
 
     return candidate
+
+
+def _resolve_allowed_path(path: str, *, must_exist: bool = True) -> Tuple[Path, Optional[Dict[str, Any]]]:
+    ref = str(path or "").strip()
+    if not ref:
+        raise ValueError("path is required")
+
+    record = get_file_record(ref)
+    if record:
+        return resolve_file_id(ref), record
+
+    return _resolve_local_allowed_path(ref, must_exist=must_exist), None
 
 
 def _read_text(path: Path) -> str:
@@ -80,16 +90,20 @@ def _json_preview(text: str) -> Dict[str, Any]:
 
 
 def read_text_file_tool(path: str, max_chars: int = DEFAULT_MAX_CHARS) -> str:
-    resolved = _resolve_allowed_path(path, must_exist=True)
+    resolved, record = _resolve_allowed_path(path, must_exist=True)
     if not resolved.is_file():
         raise ValueError(f"path is not a file: {resolved}")
 
     text = _read_text(resolved)
     payload = {
+        "file_id": (record or {}).get("file_id"),
+        "filename": (record or {}).get("filename") or resolved.name,
         "path": str(resolved),
         "size_bytes": resolved.stat().st_size,
         "content": _truncate(text, max_chars),
     }
+    if record:
+        payload["download_url"] = record.get("download_url")
     return json.dumps(payload, ensure_ascii=True, default=str)
 
 
@@ -99,18 +113,21 @@ def inspect_file_for_analysis_tool(
     max_chars: int = DEFAULT_MAX_CHARS,
     max_rows: int = DEFAULT_MAX_ROWS,
 ) -> str:
-    resolved = _resolve_allowed_path(path, must_exist=True)
+    resolved, record = _resolve_allowed_path(path, must_exist=True)
     if not resolved.is_file():
         raise ValueError(f"path is not a file: {resolved}")
 
     suffix = resolved.suffix.lower()
     text = _read_text(resolved)
     payload: Dict[str, Any] = {
+        "file_id": (record or {}).get("file_id"),
         "path": str(resolved),
-        "filename": resolved.name,
+        "filename": (record or {}).get("filename") or resolved.name,
         "question": question or "",
         "size_bytes": resolved.stat().st_size,
     }
+    if record:
+        payload["download_url"] = record.get("download_url")
 
     try:
         if suffix == ".csv":
@@ -126,7 +143,19 @@ def inspect_file_for_analysis_tool(
 
 
 def write_text_file_tool(path: str, content: str, overwrite: bool = False) -> str:
-    resolved = _resolve_allowed_path(path, must_exist=False)
+    if path and not any(sep in str(path) for sep in ("/", "\\")) and not str(path).startswith("."):
+        record = create_output_file(str(path), content or "", overwrite=overwrite)
+        payload = {
+            "file_id": record["file_id"],
+            "filename": record["filename"],
+            "path": record["path"],
+            "size_bytes": record["size_bytes"],
+            "download_url": record["download_url"],
+            "overwritten": bool(overwrite),
+        }
+        return json.dumps(payload, ensure_ascii=True, default=str)
+
+    resolved, record = _resolve_allowed_path(path, must_exist=False)
     existed_before = resolved.exists()
     if existed_before and not overwrite:
         raise ValueError(f"file already exists: {resolved}")
@@ -134,9 +163,26 @@ def write_text_file_tool(path: str, content: str, overwrite: bool = False) -> st
     resolved.parent.mkdir(parents=True, exist_ok=True)
     resolved.write_text(content or "", encoding="utf-8")
     payload = {
+        "file_id": (record or {}).get("file_id"),
+        "filename": (record or {}).get("filename") or resolved.name,
         "path": str(resolved),
         "size_bytes": resolved.stat().st_size,
         "overwritten": bool(overwrite and existed_before),
+    }
+    if record:
+        payload["download_url"] = record.get("download_url")
+    return json.dumps(payload, ensure_ascii=True, default=str)
+
+
+def write_output_file_tool(filename: str, content: str, overwrite: bool = False) -> str:
+    record = create_output_file(filename, content or "", overwrite=overwrite)
+    payload = {
+        "file_id": record["file_id"],
+        "filename": record["filename"],
+        "path": record["path"],
+        "size_bytes": record["size_bytes"],
+        "download_url": record["download_url"],
+        "overwritten": bool(overwrite),
     }
     return json.dumps(payload, ensure_ascii=True, default=str)
 
@@ -155,6 +201,7 @@ def make_langchain_file_tools() -> List[Any]:
             name="read_text_file",
             description=(
                 "Read a UTF-8 text-like file from an allowed local path and return its contents. "
+                "Input may be either a local path or an uploaded file_id. "
                 "Use for txt, md, py, csv, json, or other text files."
             ),
         ),
@@ -162,7 +209,7 @@ def make_langchain_file_tools() -> List[Any]:
             func=inspect_file_for_analysis_tool,
             name="inspect_file_for_analysis",
             description=(
-                "Load a local file into an LLM-friendly JSON payload for interpretation. "
+                "Load a local file or uploaded file_id into an LLM-friendly JSON payload for interpretation. "
                 "For CSV returns header and sample rows, for JSON returns structural preview, "
                 "otherwise returns text content."
             ),
@@ -175,6 +222,14 @@ def make_langchain_file_tools() -> List[Any]:
                 "Use for saving summaries, reports, code, or extracted notes."
             ),
         ),
+        StructuredTool.from_function(
+            func=write_output_file_tool,
+            name="write_output_file",
+            description=(
+                "Write downloadable output for the user into managed agent storage using only a filename. "
+                "Returns file_id and download_url for the generated file."
+            ),
+        ),
     ]
 
 
@@ -182,5 +237,6 @@ __all__ = [
     "inspect_file_for_analysis_tool",
     "make_langchain_file_tools",
     "read_text_file_tool",
+    "write_output_file_tool",
     "write_text_file_tool",
 ]

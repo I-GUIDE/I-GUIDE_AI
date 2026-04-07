@@ -1,0 +1,28 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "community": "27",
+        "theft_count": 500
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[...]]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "community": "6",
+        "theft_count": 450
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[...]]]
+      }
+    }
+    // Additional community areas with theft counts
+  ]
+}
