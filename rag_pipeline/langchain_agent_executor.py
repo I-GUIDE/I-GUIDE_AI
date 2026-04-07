@@ -4,11 +4,12 @@ import argparse
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional, Sequence
+from typing import Any, Dict, Generator, List, Optional, Sequence, TypedDict
 from uuid import uuid4
 
 from dotenv import load_dotenv
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import END, START, StateGraph
 
 from .langchain_file_tools import make_langchain_file_tools
 from .langchain_granular_tools import make_langchain_granular_tools
@@ -39,6 +40,13 @@ FILE_TOOL_NAMES = {
     "inspect_file_for_analysis",
     "write_text_file",
     "write_output_file",
+}
+IGUIDE_SEARCH_TOOL_NAMES = {
+    "keyword_search",
+    "semantic_search",
+    "neo4j_search",
+    "spatial_search",
+    "opengeodata_search",
 }
 ANALYSIS_HINTS = {
     "analyze",
@@ -218,10 +226,11 @@ def _collect_tools(
     tool_strategy: str,
     include_mcp_tools: bool,
     mcp_modules: Optional[List[str]],
+    enabled_search_methods: Optional[List[str]] = None,
 ) -> List[Any]:
     strategy = (tool_strategy or "full_pipeline").strip().lower()
     if strategy == "granular":
-        tools = make_langchain_granular_tools()
+        tools = make_langchain_granular_tools(enabled_search_methods=enabled_search_methods)
     elif strategy == "full_pipeline":
         tools = [make_langchain_rag_tool(), *make_langchain_file_tools()]
     else:
@@ -763,6 +772,193 @@ def _print_route_trace(result: Any) -> None:
     print(f"- allowed_tools: {route.get('allowed_tools')}")
 
 
+class AgentQueryGraphState(TypedDict, total=False):
+    query: str
+    chat_history: Optional[List[Any]]
+    llm: Optional[Any]
+    verbose: bool
+    return_intermediate_steps: bool
+    tool_strategy: str
+    include_mcp_tools: bool
+    mcp_modules: Optional[List[str]]
+    enabled_search_methods: Optional[List[str]]
+    smart_tool_routing: bool
+    forced_intent: Optional[str]
+    thread_id: Optional[str]
+    checkpointer: Optional[Any]
+    all_tools: List[Any]
+    effective_thread_id: Optional[str]
+    route_trace: Optional[Dict[str, Any]]
+    allowed_tool_names: Optional[List[str]]
+    search_result: Optional[Dict[str, Any]]
+    search_artifacts: Dict[str, Any]
+    analysis_context: Dict[str, Any]
+    analysis_query: Optional[str]
+    analysis_result: Optional[Dict[str, Any]]
+    response: Dict[str, Any]
+    error: Optional[str]
+
+
+def _agent_query_initialize_node(state: AgentQueryGraphState) -> AgentQueryGraphState:
+    all_tools = _collect_tools(
+        tool_strategy=state["tool_strategy"],
+        include_mcp_tools=state["include_mcp_tools"],
+        mcp_modules=state.get("mcp_modules"),
+        enabled_search_methods=state.get("enabled_search_methods"),
+    )
+    effective_thread_id = _resolve_thread_id(state.get("thread_id"), state.get("checkpointer"))
+    return {
+        "all_tools": all_tools,
+        "effective_thread_id": effective_thread_id,
+    }
+
+
+def _agent_query_route_node(state: AgentQueryGraphState) -> AgentQueryGraphState:
+    route_trace: Optional[Dict[str, Any]] = None
+    allowed_tool_names: Optional[List[str]] = None
+    if state.get("smart_tool_routing"):
+        available_names = [getattr(tool, "name", "") for tool in state.get("all_tools", []) if getattr(tool, "name", "")]
+        route_trace = _build_route_trace(state["query"], available_names, forced_intent=state.get("forced_intent"))
+        allowed_tool_names = route_trace.get("allowed_tools") or None
+    return {
+        "route_trace": route_trace,
+        "allowed_tool_names": allowed_tool_names,
+    }
+
+
+def _agent_query_search_node(state: AgentQueryGraphState) -> AgentQueryGraphState:
+    search_executor = build_search_agent_executor(
+        llm=state.get("llm"),
+        verbose=bool(state.get("verbose")),
+        return_intermediate_steps=bool(state.get("return_intermediate_steps", True)),
+        tool_strategy=state["tool_strategy"],
+        include_mcp_tools=bool(state.get("include_mcp_tools")),
+        mcp_modules=state.get("mcp_modules"),
+        allowed_tool_names=state.get("allowed_tool_names"),
+        preloaded_tools=state.get("all_tools"),
+        checkpointer=state.get("checkpointer"),
+    )
+    try:
+        search_response = _invoke_agent_with_payload_fallback(
+            search_executor,
+            query=state["query"],
+            chat_history=state.get("chat_history"),
+            config=_agent_config(state.get("effective_thread_id")),
+        )
+        return {"search_result": search_response}
+    except Exception as exc:
+        if state["tool_strategy"] == "full_pipeline" and _is_empty_model_response_error(exc):
+            direct = rag_tool(query=state["query"])
+            response: Dict[str, Any] = {
+                "fallback": "direct_rag_tool",
+                "reason": str(exc),
+                "result": direct,
+            }
+            if state.get("route_trace"):
+                response["route_trace"] = state["route_trace"]
+            return {"response": response}
+        raise
+
+
+def _agent_query_build_analysis_query_node(state: AgentQueryGraphState) -> AgentQueryGraphState:
+    search_response = state.get("search_result")
+    if not isinstance(search_response, dict):
+        return {}
+
+    analysis_context = _build_search_evidence_payload(state["query"], search_response, state.get("route_trace"))
+    analysis_query = (
+        "User query:\n"
+        f"{state['query']}\n\n"
+        "Search evidence bundle (JSON):\n"
+        f"{json.dumps(analysis_context, ensure_ascii=True, default=str)}\n\n"
+        "Produce the final answer grounded only in this evidence."
+    )
+    return {
+        "analysis_context": analysis_context,
+        "analysis_query": analysis_query,
+    }
+
+
+def _agent_query_extract_search_artifacts_node(state: AgentQueryGraphState) -> AgentQueryGraphState:
+    search_response = state.get("search_result")
+    if not isinstance(search_response, dict):
+        return {}
+    return {"search_artifacts": _extract_search_artifacts(search_response)}
+
+
+def _agent_query_analysis_node(state: AgentQueryGraphState) -> AgentQueryGraphState:
+    analysis_query = state.get("analysis_query")
+    if not isinstance(analysis_query, str) or not analysis_query:
+        return {}
+
+    analysis_executor = build_analysis_agent_executor(
+        llm=state.get("llm"),
+        verbose=bool(state.get("verbose")),
+        return_intermediate_steps=bool(state.get("return_intermediate_steps", True)),
+    )
+    analysis_response = _invoke_agent_with_payload_fallback(
+        analysis_executor,
+        query=analysis_query,
+        chat_history=None,
+    )
+    return {"analysis_result": analysis_response}
+
+
+def _agent_query_finalize_node(state: AgentQueryGraphState) -> AgentQueryGraphState:
+    if isinstance(state.get("response"), dict) and state["response"]:
+        return {}
+
+    response: Dict[str, Any] = {
+        "search_result": state.get("search_result"),
+        "analysis_result": state.get("analysis_result"),
+    }
+    final_answer = _extract_final_answer(state.get("analysis_result"))
+    if final_answer:
+        response["final_answer"] = final_answer
+    if state.get("route_trace"):
+        response["route_trace"] = state["route_trace"]
+    if state.get("effective_thread_id"):
+        response["thread_id"] = state["effective_thread_id"]
+    return {"response": response}
+
+
+def _agent_query_should_skip_analysis(state: AgentQueryGraphState) -> str:
+    if isinstance(state.get("response"), dict) and state["response"]:
+        return "finalize"
+    return "build_analysis_query"
+
+
+def _build_agent_query_graph() -> Any:
+    graph = StateGraph(AgentQueryGraphState)
+    graph.add_node("initialize", _agent_query_initialize_node)
+    graph.add_node("route", _agent_query_route_node)
+    graph.add_node("search", _agent_query_search_node)
+    graph.add_node("extract_search_artifacts", _agent_query_extract_search_artifacts_node)
+    graph.add_node("build_analysis_query", _agent_query_build_analysis_query_node)
+    graph.add_node("analysis", _agent_query_analysis_node)
+    graph.add_node("finalize", _agent_query_finalize_node)
+
+    graph.add_edge(START, "initialize")
+    graph.add_edge("initialize", "route")
+    graph.add_edge("route", "search")
+    graph.add_conditional_edges(
+        "search",
+        _agent_query_should_skip_analysis,
+        {
+            "build_analysis_query": "extract_search_artifacts",
+            "finalize": "finalize",
+        },
+    )
+    graph.add_edge("extract_search_artifacts", "build_analysis_query")
+    graph.add_edge("build_analysis_query", "analysis")
+    graph.add_edge("analysis", "finalize")
+    graph.add_edge("finalize", END)
+    return graph.compile()
+
+
+AGENT_QUERY_GRAPH = _build_agent_query_graph()
+
+
 def run_agent_query(
     query: str,
     *,
@@ -773,6 +969,7 @@ def run_agent_query(
     tool_strategy: str = "granular",
     include_mcp_tools: bool = False,
     mcp_modules: Optional[List[str]] = None,
+    enabled_search_methods: Optional[List[str]] = None,
     smart_tool_routing: bool = True,
     forced_intent: Optional[str] = None,
     thread_id: Optional[str] = None,
@@ -781,83 +978,28 @@ def run_agent_query(
     """
     Run one query through the LangChain agent executor.
     """
-    all_tools = _collect_tools(
-        tool_strategy=tool_strategy,
-        include_mcp_tools=include_mcp_tools,
-        mcp_modules=mcp_modules,
+    final_state = AGENT_QUERY_GRAPH.invoke(
+        {
+            "query": query,
+            "chat_history": chat_history,
+            "llm": llm,
+            "verbose": verbose,
+            "return_intermediate_steps": return_intermediate_steps,
+            "tool_strategy": tool_strategy,
+            "include_mcp_tools": include_mcp_tools,
+            "mcp_modules": mcp_modules,
+            "enabled_search_methods": enabled_search_methods,
+            "smart_tool_routing": smart_tool_routing,
+            "forced_intent": forced_intent,
+            "thread_id": thread_id,
+            "checkpointer": checkpointer,
+            "response": {},
+        }
     )
-    effective_thread_id = _resolve_thread_id(thread_id, checkpointer)
-    route_trace: Optional[Dict[str, Any]] = None
-    allowed_tool_names: Optional[List[str]] = None
-    if smart_tool_routing:
-        available_names = [getattr(tool, "name", "") for tool in all_tools if getattr(tool, "name", "")]
-        route_trace = _build_route_trace(query, available_names, forced_intent=forced_intent)
-        allowed_tool_names = route_trace.get("allowed_tools") or None
-
-    search_executor = build_search_agent_executor(
-        llm=llm,
-        verbose=verbose,
-        return_intermediate_steps=return_intermediate_steps,
-        tool_strategy=tool_strategy,
-        include_mcp_tools=include_mcp_tools,
-        mcp_modules=mcp_modules,
-        allowed_tool_names=allowed_tool_names,
-        preloaded_tools=all_tools,
-        checkpointer=checkpointer,
-    )
-    try:
-        search_response = _invoke_agent_with_payload_fallback(
-            search_executor,
-            query=query,
-            chat_history=chat_history,
-            config=_agent_config(effective_thread_id),
-        )
-    except Exception as exc:
-        # Anvil/OpenAI-compatible gateways occasionally return HTTP 200 with null payloads.
-        # Fall back to direct pipeline execution in full_pipeline mode.
-        if tool_strategy == "full_pipeline" and _is_empty_model_response_error(exc):
-            direct = rag_tool(query=query)
-            response = {
-                "fallback": "direct_rag_tool",
-                "reason": str(exc),
-                "result": direct,
-            }
-            if route_trace:
-                response["route_trace"] = route_trace
-            return response
-        raise
-
-    analysis_context = _build_search_evidence_payload(query, search_response, route_trace)
-    analysis_query = (
-        "User query:\n"
-        f"{query}\n\n"
-        "Search evidence bundle (JSON):\n"
-        f"{json.dumps(analysis_context, ensure_ascii=True, default=str)}\n\n"
-        "Produce the final answer grounded only in this evidence."
-    )
-    analysis_executor = build_analysis_agent_executor(
-        llm=llm,
-        verbose=verbose,
-        return_intermediate_steps=return_intermediate_steps,
-    )
-    analysis_response = _invoke_agent_with_payload_fallback(
-        analysis_executor,
-        query=analysis_query,
-        chat_history=None,
-    )
-
-    response: Dict[str, Any] = {
-        "search_result": search_response,
-        "analysis_result": analysis_response,
-    }
-    final_answer = _extract_final_answer(analysis_response)
-    if final_answer:
-        response["final_answer"] = final_answer
-    if route_trace:
-        response["route_trace"] = route_trace
-    if effective_thread_id:
-        response["thread_id"] = effective_thread_id
-    return response
+    response = final_state.get("response")
+    if isinstance(response, dict):
+        return response
+    return {}
 
 
 def stream_agent_query_events(
@@ -870,121 +1012,95 @@ def stream_agent_query_events(
     tool_strategy: str = "granular",
     include_mcp_tools: bool = False,
     mcp_modules: Optional[List[str]] = None,
+    enabled_search_methods: Optional[List[str]] = None,
     smart_tool_routing: bool = True,
     forced_intent: Optional[str] = None,
     thread_id: Optional[str] = None,
     checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
 ) -> Generator[Dict[str, Any], None, None]:
-    all_tools = _collect_tools(
-        tool_strategy=tool_strategy,
-        include_mcp_tools=include_mcp_tools,
-        mcp_modules=mcp_modules,
-    )
-    effective_thread_id = _resolve_thread_id(thread_id, checkpointer)
-
     yield {
         "event": "status",
         "data": {
             "stage": "started",
-            "thread_id": effective_thread_id,
+            "thread_id": thread_id,
             "tool_strategy": tool_strategy,
         },
     }
-
-    route_trace: Optional[Dict[str, Any]] = None
-    allowed_tool_names: Optional[List[str]] = None
-    if smart_tool_routing:
-        available_names = [getattr(tool, "name", "") for tool in all_tools if getattr(tool, "name", "")]
-        route_trace = _build_route_trace(query, available_names, forced_intent=forced_intent)
-        allowed_tool_names = route_trace.get("allowed_tools") or None
-        yield {"event": "route_trace", "data": route_trace}
-
-    search_executor = build_search_agent_executor(
-        llm=llm,
-        verbose=verbose,
-        return_intermediate_steps=return_intermediate_steps,
-        tool_strategy=tool_strategy,
-        include_mcp_tools=include_mcp_tools,
-        mcp_modules=mcp_modules,
-        allowed_tool_names=allowed_tool_names,
-        preloaded_tools=all_tools,
-        checkpointer=checkpointer,
-    )
-    yield {"event": "status", "data": {"stage": "search_agent_started"}}
     try:
-        search_response = _invoke_agent_with_payload_fallback(
-            search_executor,
-            query=query,
-            chat_history=chat_history,
-            config=_agent_config(effective_thread_id),
-        )
-    except Exception as exc:
-        if tool_strategy == "full_pipeline" and _is_empty_model_response_error(exc):
-            direct = rag_tool(query=query)
-            response = {
-                "fallback": "direct_rag_tool",
-                "reason": str(exc),
-                "result": direct,
+        final_state: AgentQueryGraphState = {}
+        for update in AGENT_QUERY_GRAPH.stream(
+            {
+                "query": query,
+                "chat_history": chat_history,
+                "llm": llm,
+                "verbose": verbose,
+                "return_intermediate_steps": return_intermediate_steps,
+                "tool_strategy": tool_strategy,
+                "include_mcp_tools": include_mcp_tools,
+                "mcp_modules": mcp_modules,
+                "enabled_search_methods": enabled_search_methods,
+                "smart_tool_routing": smart_tool_routing,
+                "forced_intent": forced_intent,
+                "thread_id": thread_id,
+                "checkpointer": checkpointer,
+                "response": {},
             }
-            if route_trace:
-                response["route_trace"] = route_trace
-            yield {"event": "final_answer", "data": response}
-            return
-        yield {"event": "error", "data": {"stage": "search_agent", "message": str(exc)}}
-        raise
-
-    search_artifacts = _extract_search_artifacts(search_response)
-    yield {
-        "event": "search_complete",
-        "data": {
-            "summary": _extract_final_answer(search_response) or "",
-            "tool_call_count": len(search_artifacts["tool_calls"]),
-            "tool_result_count": len(search_artifacts["tool_results"]),
-        },
-    }
-    for tool_call in search_artifacts["tool_calls"]:
-        yield {"event": "tool_call", "data": tool_call}
-    for tool_result in search_artifacts["tool_results"]:
-        yield {"event": "tool_result", "data": tool_result}
-
-    analysis_context = _build_search_evidence_payload(query, search_response, route_trace)
-    yield {"event": "search_evidence", "data": analysis_context}
-    analysis_query = (
-        "User query:\n"
-        f"{query}\n\n"
-        "Search evidence bundle (JSON):\n"
-        f"{json.dumps(analysis_context, ensure_ascii=True, default=str)}\n\n"
-        "Produce the final answer grounded only in this evidence."
-    )
-    analysis_executor = build_analysis_agent_executor(
-        llm=llm,
-        verbose=verbose,
-        return_intermediate_steps=return_intermediate_steps,
-    )
-    yield {"event": "status", "data": {"stage": "analysis_agent_started"}}
-    try:
-        analysis_response = _invoke_agent_with_payload_fallback(
-            analysis_executor,
-            query=analysis_query,
-            chat_history=None,
-        )
+        ):
+            if not isinstance(update, dict):
+                continue
+            for node_name, payload in update.items():
+                if not isinstance(payload, dict):
+                    continue
+                final_state.update(payload)
+                if node_name == "initialize":
+                    yield {
+                        "event": "status",
+                        "data": {
+                            "stage": "initialized",
+                            "thread_id": payload.get("effective_thread_id") or thread_id,
+                            "tool_strategy": tool_strategy,
+                        },
+                    }
+                elif node_name == "route":
+                    route_trace = payload.get("route_trace")
+                    if route_trace:
+                        yield {"event": "route_trace", "data": route_trace}
+                    yield {"event": "status", "data": {"stage": "search_agent_started"}}
+                elif node_name == "search":
+                    yield {"event": "status", "data": {"stage": "search_agent_completed"}}
+                    if isinstance(payload.get("response"), dict):
+                        response = payload["response"]
+                        yield {"event": "final_answer", "data": response}
+                elif node_name == "extract_search_artifacts":
+                    artifacts = payload.get("search_artifacts") or {}
+                    yield {
+                        "event": "search_complete",
+                        "data": {
+                            "summary": _extract_final_answer(final_state.get("search_result")) or "",
+                            "tool_call_count": len(artifacts.get("tool_calls") or []),
+                            "tool_result_count": len(artifacts.get("tool_results") or []),
+                        },
+                    }
+                    for tool_call in artifacts.get("tool_calls") or []:
+                        yield {"event": "tool_call", "data": tool_call}
+                    for tool_result in artifacts.get("tool_results") or []:
+                        yield {"event": "tool_result", "data": tool_result}
+                elif node_name == "build_analysis_query":
+                    analysis_context = payload.get("analysis_context")
+                    if isinstance(analysis_context, dict):
+                        yield {"event": "search_evidence", "data": analysis_context}
+                    yield {"event": "status", "data": {"stage": "analysis_agent_started"}}
+                elif node_name == "analysis":
+                    final_answer = _extract_final_answer(payload.get("analysis_result"))
+                    if final_answer:
+                        yield {"event": "final_answer", "data": {"answer": final_answer}}
+                elif node_name == "finalize":
+                    response = payload.get("response")
+                    if isinstance(response, dict):
+                        yield {"event": "completed", "data": response}
     except Exception as exc:
-        yield {"event": "error", "data": {"stage": "analysis_agent", "message": str(exc)}}
+        yield {"event": "error", "data": {"message": str(exc)}}
         raise
-
-    response: Dict[str, Any] = {
-        "search_result": search_response,
-        "analysis_result": analysis_response,
-    }
-    final_answer = _extract_final_answer(analysis_response)
-    if final_answer:
-        response["final_answer"] = final_answer
-    if route_trace:
-        response["route_trace"] = route_trace
-    if effective_thread_id:
-        response["thread_id"] = effective_thread_id
-    yield {"event": "final_answer", "data": {"answer": final_answer or ""}}
-    yield {"event": "completed", "data": response}
 
 
 def run_code_agent_query(

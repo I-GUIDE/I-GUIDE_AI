@@ -147,6 +147,15 @@ def _augment_user_input_with_file_ids(user_input: str, file_ids: Sequence[str]) 
     )
 
 
+def _normalize_enabled_search_methods(enabled_search_methods: Optional[Sequence[Any]]) -> Optional[List[str]]:
+    if enabled_search_methods is None:
+        return None
+    if isinstance(enabled_search_methods, (str, bytes)):
+        enabled_search_methods = [item.strip() for item in str(enabled_search_methods).split(",")]
+    normalized = [str(item).strip() for item in enabled_search_methods if str(item).strip()]
+    return normalized or []
+
+
 def run_agent_chat(
     *,
     user_input: str,
@@ -157,6 +166,8 @@ def run_agent_chat(
     tool_strategy: str = "granular",
     include_mcp_tools: bool = False,
     mcp_modules: Optional[List[str]] = None,
+    enabled_search_methods: Optional[Sequence[Any]] = None,
+    use_persistent_memory: bool = True,
     smart_tool_routing: bool = True,
     forced_intent: Optional[str] = None,
     file_paths: Optional[Sequence[Any]] = None,
@@ -168,17 +179,21 @@ def run_agent_chat(
     memory_warning: Optional[str] = None
     normalized_file_paths = _normalize_file_paths(file_paths)
     normalized_file_ids = _normalize_file_ids(file_ids)
+    normalized_enabled_search_methods = _normalize_enabled_search_methods(enabled_search_methods)
 
-    try:
-        if effective_memory_id:
-            memory_doc = get_or_create_memory(effective_memory_id)
-        else:
-            effective_memory_id = create_memory(conversation_name or "agent-chat")
-            memory_doc = get_or_create_memory(effective_memory_id)
-    except Exception as exc:
-        logger.warning("Persistent agent chat memory unavailable: %s", exc)
-        memory_warning = f"persistent_memory_unavailable: {exc}"
-        effective_memory_id = memory_id
+    if use_persistent_memory:
+        try:
+            if effective_memory_id:
+                memory_doc = get_or_create_memory(effective_memory_id)
+            else:
+                effective_memory_id = create_memory(conversation_name or "agent-chat")
+                memory_doc = get_or_create_memory(effective_memory_id)
+        except Exception as exc:
+            logger.warning("Persistent agent chat memory unavailable: %s", exc)
+            memory_warning = f"persistent_memory_unavailable: {exc}"
+            effective_memory_id = memory_id
+    else:
+        effective_memory_id = None
 
     chat_history = _build_chat_history(memory_doc, recent_k=recent_k)
     effective_input = _augment_user_input_with_files(user_input, normalized_file_paths)
@@ -192,6 +207,7 @@ def run_agent_chat(
         tool_strategy=tool_strategy,
         include_mcp_tools=include_mcp_tools,
         mcp_modules=mcp_modules,
+        enabled_search_methods=normalized_enabled_search_methods,
         smart_tool_routing=smart_tool_routing,
         forced_intent=forced_intent,
         thread_id=thread_id,
@@ -199,7 +215,7 @@ def run_agent_chat(
 
     answer = _extract_agent_answer(result)
     message_id = str(uuid4())
-    if effective_memory_id:
+    if use_persistent_memory and effective_memory_id:
         try:
             update_memory(
                 effective_memory_id,
@@ -220,6 +236,8 @@ def run_agent_chat(
         "thread_id": result.get("thread_id") or thread_id,
         "file_paths": normalized_file_paths,
         "file_ids": normalized_file_ids,
+        "enabled_search_methods": normalized_enabled_search_methods,
+        "use_persistent_memory": use_persistent_memory,
         "route_trace": result.get("route_trace") or {},
         "agent_result": _json_safe(result),
     }
@@ -238,6 +256,8 @@ def stream_agent_chat_events(
     tool_strategy: str = "granular",
     include_mcp_tools: bool = False,
     mcp_modules: Optional[List[str]] = None,
+    enabled_search_methods: Optional[Sequence[Any]] = None,
+    use_persistent_memory: bool = True,
     smart_tool_routing: bool = True,
     forced_intent: Optional[str] = None,
     file_paths: Optional[Sequence[Any]] = None,
@@ -249,6 +269,7 @@ def stream_agent_chat_events(
     memory_warning: Optional[str] = None
     normalized_file_paths = _normalize_file_paths(file_paths)
     normalized_file_ids = _normalize_file_ids(file_ids)
+    normalized_enabled_search_methods = _normalize_enabled_search_methods(enabled_search_methods)
 
     yield {
         "event": "status",
@@ -258,32 +279,43 @@ def stream_agent_chat_events(
             "thread_id": thread_id,
             "file_paths": normalized_file_paths,
             "file_ids": normalized_file_ids,
+            "enabled_search_methods": normalized_enabled_search_methods,
+            "use_persistent_memory": use_persistent_memory,
         },
     }
 
-    try:
-        if effective_memory_id:
-            memory_doc = get_or_create_memory(effective_memory_id)
-        else:
-            effective_memory_id = create_memory(conversation_name or "agent-chat")
-            memory_doc = get_or_create_memory(effective_memory_id)
+    if use_persistent_memory:
+        try:
+            if effective_memory_id:
+                memory_doc = get_or_create_memory(effective_memory_id)
+            else:
+                effective_memory_id = create_memory(conversation_name or "agent-chat")
+                memory_doc = get_or_create_memory(effective_memory_id)
+            yield {
+                "event": "memory_loaded",
+                "data": {
+                    "memory_id": effective_memory_id,
+                    "recent_k": recent_k,
+                    "history_length": len((memory_doc or {}).get("chat_history") or []),
+                },
+            }
+        except Exception as exc:
+            logger.warning("Persistent agent chat memory unavailable: %s", exc)
+            memory_warning = f"persistent_memory_unavailable: {exc}"
+            effective_memory_id = memory_id
+            yield {
+                "event": "warning",
+                "data": {
+                    "stage": "memory_load",
+                    "message": memory_warning,
+                },
+            }
+    else:
+        effective_memory_id = None
         yield {
-            "event": "memory_loaded",
+            "event": "status",
             "data": {
-                "memory_id": effective_memory_id,
-                "recent_k": recent_k,
-                "history_length": len((memory_doc or {}).get("chat_history") or []),
-            },
-        }
-    except Exception as exc:
-        logger.warning("Persistent agent chat memory unavailable: %s", exc)
-        memory_warning = f"persistent_memory_unavailable: {exc}"
-        effective_memory_id = memory_id
-        yield {
-            "event": "warning",
-            "data": {
-                "stage": "memory_load",
-                "message": memory_warning,
+                "stage": "persistent_memory_disabled",
             },
         }
 
@@ -299,6 +331,7 @@ def stream_agent_chat_events(
         tool_strategy=tool_strategy,
         include_mcp_tools=include_mcp_tools,
         mcp_modules=mcp_modules,
+        enabled_search_methods=normalized_enabled_search_methods,
         smart_tool_routing=smart_tool_routing,
         forced_intent=forced_intent,
         thread_id=thread_id,
@@ -309,7 +342,7 @@ def stream_agent_chat_events(
 
     answer = _extract_agent_answer(completed_response or {})
     message_id = str(uuid4())
-    if effective_memory_id:
+    if use_persistent_memory and effective_memory_id:
         try:
             update_memory(
                 effective_memory_id,
@@ -344,6 +377,8 @@ def stream_agent_chat_events(
         "thread_id": (completed_response or {}).get("thread_id") or thread_id,
         "file_paths": normalized_file_paths,
         "file_ids": normalized_file_ids,
+        "enabled_search_methods": normalized_enabled_search_methods,
+        "use_persistent_memory": use_persistent_memory,
         "route_trace": (completed_response or {}).get("route_trace") or {},
         "agent_result": _json_safe(completed_response or {}),
     }

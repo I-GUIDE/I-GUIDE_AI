@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
+import json
 import logging
 import os
 import sys
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Callable, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Type
 
 import requests
+from pydantic import create_model
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +22,7 @@ DEFAULT_MCP_MODULES = (
     "biomass_tools",
     "image_tools",
 )
+DEFAULT_REMOTE_MCP_URL = os.getenv("MCP_SERVER_URL", "http://127.0.0.1:8000/mcp")
 
 
 def _mcp_tool(
@@ -97,6 +101,166 @@ def _tool_description(func: Callable[..., Any]) -> str:
         or getattr(func, "__doc__", None)
         or f"MCP tool: {func.__name__}"
     ).strip()
+
+
+def _remote_mcp_url() -> str:
+    return (os.getenv("MCP_SERVER_URL") or DEFAULT_REMOTE_MCP_URL).strip()
+
+
+def _json_schema_type(schema: Dict[str, Any]) -> Type[Any]:
+    schema_type = schema.get("type")
+    if isinstance(schema_type, list):
+        non_null = [item for item in schema_type if item != "null"]
+        schema_type = non_null[0] if non_null else None
+    if schema_type == "string":
+        return str
+    if schema_type == "integer":
+        return int
+    if schema_type == "number":
+        return float
+    if schema_type == "boolean":
+        return bool
+    if schema_type == "array":
+        return list[Any]
+    if schema_type == "object":
+        return dict[str, Any]
+    return Any
+
+
+def _args_schema_from_remote_tool(tool: Any) -> Type[Any]:
+    input_schema = getattr(tool, "inputSchema", None) or {}
+    properties = input_schema.get("properties") or {}
+    required = set(input_schema.get("required") or [])
+    fields: Dict[str, Tuple[Type[Any], Any]] = {}
+
+    for name, spec in properties.items():
+        field_type = _json_schema_type(spec if isinstance(spec, dict) else {})
+        default = ... if name in required else None
+        fields[str(name)] = (field_type, default)
+
+    model_name = f"RemoteMCPTool_{getattr(tool, 'name', 'Tool')}"
+    if not fields:
+        fields["payload"] = (Optional[dict[str, Any]], None)
+    return create_model(model_name, **fields)
+
+
+def _serialize_remote_tool_result(result: Any) -> str:
+    if hasattr(result, "model_dump"):
+        payload = result.model_dump()
+    elif isinstance(result, dict):
+        payload = result
+    else:
+        return str(result)
+
+    content = payload.get("content") or []
+    text_parts: List[str] = []
+    for item in content:
+        if isinstance(item, dict):
+            if item.get("type") == "text" and item.get("text"):
+                text_parts.append(str(item["text"]))
+            elif item.get("type") == "resource_link":
+                text_parts.append(str(item.get("uri") or item.get("name") or "resource_link"))
+            else:
+                text_parts.append(str(item))
+        elif hasattr(item, "text"):
+            text_parts.append(str(getattr(item, "text")))
+        else:
+            text_parts.append(str(item))
+
+    serialized: Dict[str, Any] = {
+        "is_error": bool(payload.get("isError", False)),
+        "structured_content": payload.get("structuredContent"),
+        "content": content,
+        "text": "\n".join(part for part in text_parts if part).strip(),
+    }
+    return json.dumps(serialized, ensure_ascii=True, default=str)
+
+
+async def _remote_mcp_list_tools_async(url: str) -> List[Any]:
+    from mcp.client.session import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
+    async with streamablehttp_client(url) as (read_stream, write_stream, _):
+        async with ClientSession(read_stream, write_stream) as session:
+            await session.initialize()
+            result = await session.list_tools()
+            return list(result.tools or [])
+
+
+async def _remote_mcp_call_tool_async(url: str, tool_name: str, arguments: Dict[str, Any]) -> str:
+    from mcp.client.session import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
+    async with streamablehttp_client(url) as (read_stream, write_stream, _):
+        async with ClientSession(read_stream, write_stream) as session:
+            await session.initialize()
+            payload = dict(arguments or {})
+            if "payload" in payload and isinstance(payload["payload"], dict) and len(payload) == 1:
+                payload = payload["payload"]
+            result = await session.call_tool(tool_name, payload)
+            return _serialize_remote_tool_result(result)
+
+
+def _make_remote_mcp_tools(url: str) -> List[Any]:
+    try:
+        from langchain_core.tools import StructuredTool
+    except Exception as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError(
+            "LangChain is not installed. Add `langchain-core` (or langchain) to dependencies."
+        ) from exc
+
+    try:
+        remote_tools = asyncio.run(_remote_mcp_list_tools_async(url))
+    except Exception as exc:
+        logger.warning("Remote MCP unavailable at %s: %s", url, exc)
+        return []
+
+    tools: List[Any] = []
+    for remote_tool in remote_tools:
+        remote_name = getattr(remote_tool, "name", "")
+        if not remote_name:
+            continue
+
+        args_schema = _args_schema_from_remote_tool(remote_tool)
+        tool_name = f"mcp_{remote_name}"
+        description = (getattr(remote_tool, "description", None) or f"Remote MCP tool: {remote_name}").strip()
+
+        async def remote_tool_runner_async(
+            _tool_name: str = remote_name,
+            _url: str = url,
+            **kwargs: Any,
+        ) -> str:
+            return await _remote_mcp_call_tool_async(_url, _tool_name, kwargs)
+
+        def remote_tool_runner_sync(
+            _tool_name: str = remote_name,
+            _url: str = url,
+            **kwargs: Any,
+        ) -> str:
+            return asyncio.run(_remote_mcp_call_tool_async(_url, _tool_name, kwargs))
+
+        remote_tool_runner_async.__name__ = tool_name
+        remote_tool_runner_async.__doc__ = description
+        remote_tool_runner_sync.__name__ = tool_name
+        remote_tool_runner_sync.__doc__ = description
+
+        try:
+            tools.append(
+                StructuredTool.from_function(
+                    func=remote_tool_runner_sync,
+                    coroutine=remote_tool_runner_async,
+                    name=tool_name,
+                    description=description,
+                    args_schema=args_schema,
+                    infer_schema=False,
+                )
+            )
+        except Exception as exc:
+            logger.warning("Skipping remote MCP tool %s: %s", tool_name, exc)
+
+    if tools:
+        logger.info("Loaded %s remote MCP tools from %s", len(tools), url)
+    return tools
 
 
 def _make_image_tools(module: Any) -> List[Callable[..., Any]]:
@@ -191,6 +355,11 @@ def make_langchain_mcp_tools(
             "LangChain is not installed. Add `langchain-core` (or langchain) to dependencies."
         ) from exc
 
+    remote_url = _remote_mcp_url()
+    remote_tools = _make_remote_mcp_tools(remote_url)
+    if remote_tools:
+        return remote_tools
+
     _ensure_mcp_import_path()
     _ensure_server_stub()
 
@@ -207,7 +376,7 @@ def make_langchain_mcp_tools(
             continue
 
         if module_name == "image_tools":
-            candidates: List[Callable[..., Any]] = _make_image_tools(module)
+            candidates = _make_image_tools(module)
         else:
             candidates = list(_iter_mcp_functions(module))
 
@@ -225,6 +394,10 @@ def make_langchain_mcp_tools(
                 logger.warning("Skipping MCP tool %s from %s: %s", tool_name, module_name, exc)
                 continue
 
+    if tools:
+        logger.info("Loaded %s MCP tools via local import fallback.", len(tools))
+    else:
+        logger.warning("No remote MCP tools available and no local MCP tools loaded.")
     return tools
 
 

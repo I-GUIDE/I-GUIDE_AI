@@ -34,8 +34,16 @@ mcp = FastMCP(
     host="0.0.0.0",
     transport_security=TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
-        allowed_hosts=["149.165.147.219:*"],
-        allowed_origins=["http://149.165.147.219:*"],
+        allowed_hosts=[
+            "149.165.147.219:*",
+            "127.0.0.1:*",
+            "localhost:*",
+        ],
+        allowed_origins=[
+            "http://149.165.147.219:*",
+            "http://127.0.0.1:*",
+            "http://localhost:*",
+        ],
     ),
 )
 app = mcp.streamable_http_app()
@@ -185,4 +193,3 @@ if __name__ == "__main__":
     #mcp.run(transport="stdio")
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
