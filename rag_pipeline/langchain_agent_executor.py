@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, Generator, List, Optional, Sequence
 from uuid import uuid4
 
 from dotenv import load_dotenv
@@ -854,6 +854,133 @@ def run_agent_query(
     if effective_thread_id:
         response["thread_id"] = effective_thread_id
     return response
+
+
+def stream_agent_query_events(
+    query: str,
+    *,
+    chat_history: Optional[List[Any]] = None,
+    llm: Optional[Any] = None,
+    verbose: bool = False,
+    return_intermediate_steps: bool = True,
+    tool_strategy: str = "granular",
+    include_mcp_tools: bool = False,
+    mcp_modules: Optional[List[str]] = None,
+    smart_tool_routing: bool = True,
+    forced_intent: Optional[str] = None,
+    thread_id: Optional[str] = None,
+    checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
+) -> Generator[Dict[str, Any], None, None]:
+    all_tools = _collect_tools(
+        tool_strategy=tool_strategy,
+        include_mcp_tools=include_mcp_tools,
+        mcp_modules=mcp_modules,
+    )
+    effective_thread_id = _resolve_thread_id(thread_id, checkpointer)
+
+    yield {
+        "event": "status",
+        "data": {
+            "stage": "started",
+            "thread_id": effective_thread_id,
+            "tool_strategy": tool_strategy,
+        },
+    }
+
+    route_trace: Optional[Dict[str, Any]] = None
+    allowed_tool_names: Optional[List[str]] = None
+    if smart_tool_routing:
+        available_names = [getattr(tool, "name", "") for tool in all_tools if getattr(tool, "name", "")]
+        route_trace = _build_route_trace(query, available_names, forced_intent=forced_intent)
+        allowed_tool_names = route_trace.get("allowed_tools") or None
+        yield {"event": "route_trace", "data": route_trace}
+
+    search_executor = build_search_agent_executor(
+        llm=llm,
+        verbose=verbose,
+        return_intermediate_steps=return_intermediate_steps,
+        tool_strategy=tool_strategy,
+        include_mcp_tools=include_mcp_tools,
+        mcp_modules=mcp_modules,
+        allowed_tool_names=allowed_tool_names,
+        preloaded_tools=all_tools,
+        checkpointer=checkpointer,
+    )
+    yield {"event": "status", "data": {"stage": "search_agent_started"}}
+    try:
+        search_response = _invoke_agent_with_payload_fallback(
+            search_executor,
+            query=query,
+            chat_history=chat_history,
+            config=_agent_config(effective_thread_id),
+        )
+    except Exception as exc:
+        if tool_strategy == "full_pipeline" and _is_empty_model_response_error(exc):
+            direct = rag_tool(query=query)
+            response = {
+                "fallback": "direct_rag_tool",
+                "reason": str(exc),
+                "result": direct,
+            }
+            if route_trace:
+                response["route_trace"] = route_trace
+            yield {"event": "final_answer", "data": response}
+            return
+        yield {"event": "error", "data": {"stage": "search_agent", "message": str(exc)}}
+        raise
+
+    search_artifacts = _extract_search_artifacts(search_response)
+    yield {
+        "event": "search_complete",
+        "data": {
+            "summary": _extract_final_answer(search_response) or "",
+            "tool_call_count": len(search_artifacts["tool_calls"]),
+            "tool_result_count": len(search_artifacts["tool_results"]),
+        },
+    }
+    for tool_call in search_artifacts["tool_calls"]:
+        yield {"event": "tool_call", "data": tool_call}
+    for tool_result in search_artifacts["tool_results"]:
+        yield {"event": "tool_result", "data": tool_result}
+
+    analysis_context = _build_search_evidence_payload(query, search_response, route_trace)
+    yield {"event": "search_evidence", "data": analysis_context}
+    analysis_query = (
+        "User query:\n"
+        f"{query}\n\n"
+        "Search evidence bundle (JSON):\n"
+        f"{json.dumps(analysis_context, ensure_ascii=True, default=str)}\n\n"
+        "Produce the final answer grounded only in this evidence."
+    )
+    analysis_executor = build_analysis_agent_executor(
+        llm=llm,
+        verbose=verbose,
+        return_intermediate_steps=return_intermediate_steps,
+    )
+    yield {"event": "status", "data": {"stage": "analysis_agent_started"}}
+    try:
+        analysis_response = _invoke_agent_with_payload_fallback(
+            analysis_executor,
+            query=analysis_query,
+            chat_history=None,
+        )
+    except Exception as exc:
+        yield {"event": "error", "data": {"stage": "analysis_agent", "message": str(exc)}}
+        raise
+
+    response: Dict[str, Any] = {
+        "search_result": search_response,
+        "analysis_result": analysis_response,
+    }
+    final_answer = _extract_final_answer(analysis_response)
+    if final_answer:
+        response["final_answer"] = final_answer
+    if route_trace:
+        response["route_trace"] = route_trace
+    if effective_thread_id:
+        response["thread_id"] = effective_thread_id
+    yield {"event": "final_answer", "data": {"answer": final_answer or ""}}
+    yield {"event": "completed", "data": response}
 
 
 def run_code_agent_query(

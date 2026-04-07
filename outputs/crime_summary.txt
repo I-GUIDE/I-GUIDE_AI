@@ -1,19 +1,19 @@
-The dataset contains information about crimes in Chicago for the year 2026. The main columns include:
+The dataset contains information about crimes in Chicago for the year 2026. The main columns in the dataset are:
 
-- ID: Unique identifier for each crime record.
-- Case Number: Case reference number.
-- Date: Date and time of the crime.
-- Block: Approximate address of the crime.
-- IUCR: Illinois Uniform Crime Reporting code.
-- Primary Type: Primary classification of the crime.
-- Description: Detailed description of the crime.
-- Location Description: Type of location where the crime occurred.
-- Arrest: Indicates if an arrest was made (true/false).
-- Domestic: Indicates if the crime was domestic-related (true/false).
-- Beat, District, Ward, Community Area: Administrative and geographic divisions.
-- FBI Code: FBI classification code.
-- X Coordinate, Y Coordinate: Spatial coordinates.
-- Year: Year of the crime.
-- Updated On: Last update timestamp.
-- Latitude, Longitude: Geographic coordinates.
-- Location: Combined latitude and longitude in POINT format.
+- **ID**: Unique identifier for each crime record.
+- **Case Number**: Case reference number.
+- **Date**: Date and time of the crime.
+- **Block**: Approximate address of the crime.
+- **IUCR**: Illinois Uniform Crime Reporting code.
+- **Primary Type**: Primary classification of the crime.
+- **Description**: Detailed description of the crime.
+- **Location Description**: Type of location where the crime occurred.
+- **Arrest**: Indicates if an arrest was made (true/false).
+- **Domestic**: Indicates if the crime was domestic-related (true/false).
+- **Beat, District, Ward, Community Area**: Administrative and geographic divisions.
+- **FBI Code**: FBI classification code.
+- **X Coordinate, Y Coordinate**: Spatial coordinates.
+- **Year**: Year of the crime.
+- **Updated On**: Last update timestamp.
+- **Latitude, Longitude**: Geographic coordinates.
+- **Location**: Combined latitude and longitude in POINT format.
