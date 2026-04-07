@@ -497,6 +497,12 @@ def _resolve_thread_id(thread_id: Optional[str], checkpointer: Optional[Any]) ->
     return f"auto-thread-{uuid4()}"
 
 
+def _child_thread_id(thread_id: Optional[str], label: str) -> Optional[str]:
+    if not thread_id:
+        return None
+    return f"{thread_id}::{label}"
+
+
 def _invoke_agent_with_payload_fallback(
     executor: Any,
     *,
@@ -622,6 +628,7 @@ def _make_search_agent_evidence_tool(
     tool_strategy: str,
     include_mcp_tools: bool,
     mcp_modules: Optional[List[str]],
+    enabled_search_methods: Optional[List[str]],
     smart_tool_routing: bool,
     forced_intent: Optional[str],
     search_invocations: List[Dict[str, Any]],
@@ -636,10 +643,15 @@ def _make_search_agent_evidence_tool(
         ) from exc
 
     def search_agent_evidence(query: str) -> str:
+        invocation_index = len(search_invocations) + 1
+        nested_thread_id = thread_id
+        if nested_thread_id:
+            nested_thread_id = f"{nested_thread_id}::search_tool::{invocation_index}"
         all_tools = _collect_tools(
             tool_strategy=tool_strategy,
             include_mcp_tools=include_mcp_tools,
             mcp_modules=mcp_modules,
+            enabled_search_methods=enabled_search_methods,
         )
         route_trace: Optional[Dict[str, Any]] = None
         allowed_tool_names: Optional[List[str]] = None
@@ -663,12 +675,13 @@ def _make_search_agent_evidence_tool(
             search_executor,
             query=query,
             chat_history=None,
-            config=_agent_config(thread_id),
+            config=_agent_config(nested_thread_id),
         )
         evidence = _build_search_evidence_payload(query, search_response, route_trace)
         search_invocations.append(
             {
                 "query": query,
+                "thread_id": nested_thread_id,
                 "route_trace": route_trace,
                 "search_result": search_response,
                 "evidence": evidence,
@@ -788,13 +801,15 @@ class AgentQueryGraphState(TypedDict, total=False):
     checkpointer: Optional[Any]
     all_tools: List[Any]
     effective_thread_id: Optional[str]
+    search_thread_id: Optional[str]
+    analysis_thread_id: Optional[str]
     route_trace: Optional[Dict[str, Any]]
+    route_type: str
     allowed_tool_names: Optional[List[str]]
     search_result: Optional[Dict[str, Any]]
     search_artifacts: Dict[str, Any]
-    analysis_context: Dict[str, Any]
-    analysis_query: Optional[str]
     analysis_result: Optional[Dict[str, Any]]
+    analysis_agent_search_invocations: List[Dict[str, Any]]
     response: Dict[str, Any]
     error: Optional[str]
 
@@ -810,18 +825,27 @@ def _agent_query_initialize_node(state: AgentQueryGraphState) -> AgentQueryGraph
     return {
         "all_tools": all_tools,
         "effective_thread_id": effective_thread_id,
+        "search_thread_id": _child_thread_id(effective_thread_id, "search"),
+        "analysis_thread_id": _child_thread_id(effective_thread_id, "analysis"),
     }
 
 
 def _agent_query_route_node(state: AgentQueryGraphState) -> AgentQueryGraphState:
     route_trace: Optional[Dict[str, Any]] = None
     allowed_tool_names: Optional[List[str]] = None
+    route_type = "search"
     if state.get("smart_tool_routing"):
         available_names = [getattr(tool, "name", "") for tool in state.get("all_tools", []) if getattr(tool, "name", "")]
         route_trace = _build_route_trace(state["query"], available_names, forced_intent=state.get("forced_intent"))
         allowed_tool_names = route_trace.get("allowed_tools") or None
+        intent = str(route_trace.get("intent") or "").strip().lower()
+        if intent in {"analysis_task", "hybrid"}:
+            route_type = "analysis"
+    elif str(state.get("forced_intent") or "").strip().lower() in {"analysis_task", "hybrid"}:
+        route_type = "analysis"
     return {
         "route_trace": route_trace,
+        "route_type": route_type,
         "allowed_tool_names": allowed_tool_names,
     }
 
@@ -843,7 +867,7 @@ def _agent_query_search_node(state: AgentQueryGraphState) -> AgentQueryGraphStat
             search_executor,
             query=state["query"],
             chat_history=state.get("chat_history"),
-            config=_agent_config(state.get("effective_thread_id")),
+            config=_agent_config(state.get("search_thread_id")),
         )
         return {"search_result": search_response}
     except Exception as exc:
@@ -860,25 +884,6 @@ def _agent_query_search_node(state: AgentQueryGraphState) -> AgentQueryGraphStat
         raise
 
 
-def _agent_query_build_analysis_query_node(state: AgentQueryGraphState) -> AgentQueryGraphState:
-    search_response = state.get("search_result")
-    if not isinstance(search_response, dict):
-        return {}
-
-    analysis_context = _build_search_evidence_payload(state["query"], search_response, state.get("route_trace"))
-    analysis_query = (
-        "User query:\n"
-        f"{state['query']}\n\n"
-        "Search evidence bundle (JSON):\n"
-        f"{json.dumps(analysis_context, ensure_ascii=True, default=str)}\n\n"
-        "Produce the final answer grounded only in this evidence."
-    )
-    return {
-        "analysis_context": analysis_context,
-        "analysis_query": analysis_query,
-    }
-
-
 def _agent_query_extract_search_artifacts_node(state: AgentQueryGraphState) -> AgentQueryGraphState:
     search_response = state.get("search_result")
     if not isinstance(search_response, dict):
@@ -887,32 +892,54 @@ def _agent_query_extract_search_artifacts_node(state: AgentQueryGraphState) -> A
 
 
 def _agent_query_analysis_node(state: AgentQueryGraphState) -> AgentQueryGraphState:
-    analysis_query = state.get("analysis_query")
-    if not isinstance(analysis_query, str) or not analysis_query:
-        return {}
-
-    analysis_executor = build_analysis_agent_executor(
+    search_invocations: List[Dict[str, Any]] = []
+    search_tool = _make_search_agent_evidence_tool(
         llm=state.get("llm"),
         verbose=bool(state.get("verbose")),
         return_intermediate_steps=bool(state.get("return_intermediate_steps", True)),
+        tool_strategy=state["tool_strategy"],
+        include_mcp_tools=bool(state.get("include_mcp_tools")),
+        mcp_modules=state.get("mcp_modules"),
+        enabled_search_methods=state.get("enabled_search_methods"),
+        smart_tool_routing=bool(state.get("smart_tool_routing")),
+        forced_intent=state.get("forced_intent"),
+        search_invocations=search_invocations,
+        thread_id=state.get("analysis_thread_id"),
+        checkpointer=state.get("checkpointer"),
+    )
+    analysis_executor = build_agent_executor(
+        llm=state.get("llm"),
+        verbose=bool(state.get("verbose")),
+        return_intermediate_steps=bool(state.get("return_intermediate_steps", True)),
+        tool_strategy="granular",
+        include_mcp_tools=False,
+        mcp_modules=None,
+        preloaded_tools=[search_tool],
+        system_prompt_override=ANALYSIS_AGENT_PROMPT,
+        agent_name="analysis_agent",
+        checkpointer=state.get("checkpointer"),
     )
     analysis_response = _invoke_agent_with_payload_fallback(
         analysis_executor,
-        query=analysis_query,
-        chat_history=None,
+        query=state["query"],
+        chat_history=state.get("chat_history"),
+        config=_agent_config(state.get("analysis_thread_id")),
     )
-    return {"analysis_result": analysis_response}
+    return {
+        "analysis_result": analysis_response,
+        "analysis_agent_search_invocations": search_invocations,
+    }
 
 
-def _agent_query_finalize_node(state: AgentQueryGraphState) -> AgentQueryGraphState:
+def _agent_query_finalize_search_node(state: AgentQueryGraphState) -> AgentQueryGraphState:
     if isinstance(state.get("response"), dict) and state["response"]:
         return {}
 
     response: Dict[str, Any] = {
         "search_result": state.get("search_result"),
-        "analysis_result": state.get("analysis_result"),
+        "analysis_result": None,
     }
-    final_answer = _extract_final_answer(state.get("analysis_result"))
+    final_answer = _extract_final_answer(state.get("search_result"))
     if final_answer:
         response["final_answer"] = final_answer
     if state.get("route_trace"):
@@ -922,10 +949,28 @@ def _agent_query_finalize_node(state: AgentQueryGraphState) -> AgentQueryGraphSt
     return {"response": response}
 
 
-def _agent_query_should_skip_analysis(state: AgentQueryGraphState) -> str:
+def _agent_query_finalize_analysis_node(state: AgentQueryGraphState) -> AgentQueryGraphState:
     if isinstance(state.get("response"), dict) and state["response"]:
-        return "finalize"
-    return "build_analysis_query"
+        return {}
+
+    response: Dict[str, Any] = {
+        "search_result": None,
+        "analysis_result": state.get("analysis_result"),
+    }
+    final_answer = _extract_final_answer(state.get("analysis_result"))
+    if final_answer:
+        response["final_answer"] = final_answer
+    if state.get("route_trace"):
+        response["route_trace"] = state["route_trace"]
+    if state.get("effective_thread_id"):
+        response["thread_id"] = state["effective_thread_id"]
+    if state.get("analysis_agent_search_invocations") is not None:
+        response["analysis_agent_search_invocations"] = state.get("analysis_agent_search_invocations") or []
+    return {"response": response}
+
+
+def _agent_query_route_selector(state: AgentQueryGraphState) -> str:
+    return str(state.get("route_type") or "search")
 
 
 def _build_agent_query_graph() -> Any:
@@ -934,25 +979,25 @@ def _build_agent_query_graph() -> Any:
     graph.add_node("route", _agent_query_route_node)
     graph.add_node("search", _agent_query_search_node)
     graph.add_node("extract_search_artifacts", _agent_query_extract_search_artifacts_node)
-    graph.add_node("build_analysis_query", _agent_query_build_analysis_query_node)
     graph.add_node("analysis", _agent_query_analysis_node)
-    graph.add_node("finalize", _agent_query_finalize_node)
+    graph.add_node("finalize_search", _agent_query_finalize_search_node)
+    graph.add_node("finalize_analysis", _agent_query_finalize_analysis_node)
 
     graph.add_edge(START, "initialize")
     graph.add_edge("initialize", "route")
-    graph.add_edge("route", "search")
     graph.add_conditional_edges(
-        "search",
-        _agent_query_should_skip_analysis,
+        "route",
+        _agent_query_route_selector,
         {
-            "build_analysis_query": "extract_search_artifacts",
-            "finalize": "finalize",
+            "search": "search",
+            "analysis": "analysis",
         },
     )
-    graph.add_edge("extract_search_artifacts", "build_analysis_query")
-    graph.add_edge("build_analysis_query", "analysis")
-    graph.add_edge("analysis", "finalize")
-    graph.add_edge("finalize", END)
+    graph.add_edge("search", "extract_search_artifacts")
+    graph.add_edge("extract_search_artifacts", "finalize_search")
+    graph.add_edge("finalize_search", END)
+    graph.add_edge("analysis", "finalize_analysis")
+    graph.add_edge("finalize_analysis", END)
     return graph.compile()
 
 
@@ -1065,7 +1110,12 @@ def stream_agent_query_events(
                     route_trace = payload.get("route_trace")
                     if route_trace:
                         yield {"event": "route_trace", "data": route_trace}
-                    yield {"event": "status", "data": {"stage": "search_agent_started"}}
+                    route_type = str(payload.get("route_type") or "search")
+                    yield {"event": "status", "data": {"stage": f"{route_type}_route_selected"}}
+                    if route_type == "search":
+                        yield {"event": "status", "data": {"stage": "search_agent_started"}}
+                    else:
+                        yield {"event": "status", "data": {"stage": "analysis_agent_started"}}
                 elif node_name == "search":
                     yield {"event": "status", "data": {"stage": "search_agent_completed"}}
                     if isinstance(payload.get("response"), dict):
@@ -1085,16 +1135,31 @@ def stream_agent_query_events(
                         yield {"event": "tool_call", "data": tool_call}
                     for tool_result in artifacts.get("tool_results") or []:
                         yield {"event": "tool_result", "data": tool_result}
-                elif node_name == "build_analysis_query":
-                    analysis_context = payload.get("analysis_context")
-                    if isinstance(analysis_context, dict):
-                        yield {"event": "search_evidence", "data": analysis_context}
-                    yield {"event": "status", "data": {"stage": "analysis_agent_started"}}
                 elif node_name == "analysis":
+                    for item in payload.get("analysis_agent_search_invocations") or []:
+                        evidence = item.get("evidence") if isinstance(item, dict) else None
+                        search_result = item.get("search_result") if isinstance(item, dict) else None
+                        if isinstance(evidence, dict):
+                            yield {"event": "search_evidence", "data": evidence}
+                        if isinstance(search_result, dict):
+                            artifacts = _extract_search_artifacts(search_result)
+                            yield {
+                                "event": "search_complete",
+                                "data": {
+                                    "summary": _extract_final_answer(search_result) or "",
+                                    "tool_call_count": len(artifacts.get("tool_calls") or []),
+                                    "tool_result_count": len(artifacts.get("tool_results") or []),
+                                },
+                            }
+                            for tool_call in artifacts.get("tool_calls") or []:
+                                yield {"event": "tool_call", "data": tool_call}
+                            for tool_result in artifacts.get("tool_results") or []:
+                                yield {"event": "tool_result", "data": tool_result}
                     final_answer = _extract_final_answer(payload.get("analysis_result"))
                     if final_answer:
                         yield {"event": "final_answer", "data": {"answer": final_answer}}
-                elif node_name == "finalize":
+                    yield {"event": "status", "data": {"stage": "analysis_agent_completed"}}
+                elif node_name in {"finalize_search", "finalize_analysis"}:
                     response = payload.get("response")
                     if isinstance(response, dict):
                         yield {"event": "completed", "data": response}
@@ -1130,6 +1195,7 @@ def run_code_agent_query(
         tool_strategy=tool_strategy,
         include_mcp_tools=include_mcp_tools,
         mcp_modules=mcp_modules,
+        enabled_search_methods=None,
         smart_tool_routing=smart_tool_routing,
         forced_intent=forced_intent,
         search_invocations=search_invocations,
