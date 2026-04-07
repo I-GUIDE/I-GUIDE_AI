@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .langchain_file_tools import make_langchain_file_tools
 from .opengeodata_search import get_opengeodata_results
@@ -83,7 +83,7 @@ def opengeodata_search_tool(query: str, limit: int = 8, session_context_json: Op
     return _build_payload(hits, source="opengeodata")
 
 
-def make_langchain_granular_tools() -> List[Any]:
+def make_langchain_granular_tools(enabled_search_methods: Optional[Sequence[str]] = None) -> List[Any]:
     try:
         from langchain_core.tools import StructuredTool
     except Exception as exc:  # pragma: no cover - optional dependency
@@ -91,7 +91,7 @@ def make_langchain_granular_tools() -> List[Any]:
             "LangChain is not installed. Add `langchain-core` (or langchain) to dependencies."
         ) from exc
 
-    tools = [
+    search_tools = [
         StructuredTool.from_function(
             func=keyword_search_tool,
             name="keyword_search",
@@ -121,6 +121,11 @@ def make_langchain_granular_tools() -> List[Any]:
             ),
         ),
     ]
+    if enabled_search_methods is not None:
+        enabled = {str(name).strip() for name in enabled_search_methods if str(name).strip()}
+        search_tools = [tool for tool in search_tools if getattr(tool, "name", "") in enabled]
+
+    tools = list(search_tools)
     tools.extend(make_langchain_file_tools())
     return tools
 

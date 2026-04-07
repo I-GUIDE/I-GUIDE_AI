@@ -100,6 +100,16 @@ def _parse_mcp_modules(value):
     raise ValueError("mcp_modules must be a list of strings or a comma-separated string")
 
 
+def _parse_enabled_search_methods(value):
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    raise ValueError("enabled_search_methods must be a list of strings or a comma-separated string")
+
+
 def _sse_event(name, data):
     payload = json.dumps(data or {}, ensure_ascii=True, default=str)
     return f"event: {name}\ndata: {payload}\n\n"
@@ -321,6 +331,8 @@ Request body:
     "tool_strategy": "granular",
     "include_mcp_tools": false,
     "mcp_modules": ["search_tools", "data_tools"],
+    "enabled_search_methods": ["keyword_search", "semantic_search"],
+    "use_persistent_memory": true,
     "smart_tool_routing": true,
     "forced_intent": null,
     "file_paths": ["./data/crime.csv"],
@@ -343,6 +355,8 @@ Request body:
             tool_strategy=data.get('tool_strategy', 'granular'),
             include_mcp_tools=bool(data.get('include_mcp_tools', False)),
             mcp_modules=_parse_mcp_modules(data.get('mcp_modules')),
+            enabled_search_methods=_parse_enabled_search_methods(data.get('enabled_search_methods')),
+            use_persistent_memory=bool(data.get('use_persistent_memory', True)),
             smart_tool_routing=bool(data.get('smart_tool_routing', True)),
             forced_intent=data.get('forced_intent'),
             file_paths=data.get('file_paths'),
@@ -380,6 +394,8 @@ def agent_chat_stream():
                     tool_strategy=data.get('tool_strategy', 'granular'),
                     include_mcp_tools=bool(data.get('include_mcp_tools', False)),
                     mcp_modules=_parse_mcp_modules(data.get('mcp_modules')),
+                    enabled_search_methods=_parse_enabled_search_methods(data.get('enabled_search_methods')),
+                    use_persistent_memory=bool(data.get('use_persistent_memory', True)),
                     smart_tool_routing=bool(data.get('smart_tool_routing', True)),
                     forced_intent=data.get('forced_intent'),
                     file_paths=data.get('file_paths'),

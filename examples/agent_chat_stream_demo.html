@@ -105,6 +105,23 @@
       gap: 10px;
     }
 
+    .checkbox-group {
+      display: grid;
+      gap: 8px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+    }
+
+    .checkbox-group-title {
+      font-size: 0.88rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+    }
+
     .checkbox {
       display: flex;
       align-items: center;
@@ -293,6 +310,30 @@
             <input id="mcp_modules" value="search_tools,data_tools">
           </label>
 
+          <div class="checkbox-group">
+            <div class="checkbox-group-title">I-GUIDE Searches</div>
+            <label class="checkbox">
+              <input class="search-method" type="checkbox" value="keyword_search" checked>
+              Keyword Search
+            </label>
+            <label class="checkbox">
+              <input class="search-method" type="checkbox" value="semantic_search" checked>
+              Semantic Search
+            </label>
+            <label class="checkbox">
+              <input class="search-method" type="checkbox" value="neo4j_search" checked>
+              Neo4j Search
+            </label>
+            <label class="checkbox">
+              <input class="search-method" type="checkbox" value="spatial_search" checked>
+              Spatial Search
+            </label>
+            <label class="checkbox">
+              <input class="search-method" type="checkbox" value="opengeodata_search" checked>
+              OpenGeoData Search
+            </label>
+          </div>
+
           <label>
             Upload Files
             <input id="upload_files" type="file" multiple>
@@ -312,6 +353,10 @@
             <label class="checkbox">
               <input id="include_mcp_tools" type="checkbox">
               Include MCP Tools
+            </label>
+            <label class="checkbox">
+              <input id="use_persistent_memory" type="checkbox" checked>
+              Use Persistent Memory
             </label>
             <label class="checkbox">
               <input id="smart_tool_routing" type="checkbox" checked>
@@ -379,6 +424,7 @@
     const uploadBtn = document.getElementById("upload-btn");
     const clearFilesBtn = document.getElementById("clear-files-btn");
     const uploadInput = document.getElementById("upload_files");
+    const searchMethodInputs = Array.from(document.querySelectorAll(".search-method"));
 
     let currentAbortController = null;
     const docRefSet = new Set();
@@ -555,6 +601,8 @@
         tool_strategy: document.getElementById("tool_strategy").value,
         include_mcp_tools: document.getElementById("include_mcp_tools").checked,
         mcp_modules: lineList(document.getElementById("mcp_modules").value.replaceAll(",", "\n")),
+        enabled_search_methods: searchMethodInputs.filter((input) => input.checked).map((input) => input.value),
+        use_persistent_memory: document.getElementById("use_persistent_memory").checked,
         smart_tool_routing: document.getElementById("smart_tool_routing").checked,
         forced_intent: document.getElementById("forced_intent").value || null,
         file_ids: Array.from(attachedFiles.keys()),
