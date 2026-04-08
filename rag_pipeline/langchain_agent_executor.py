@@ -5,12 +5,11 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional, Sequence, TypedDict
+from typing import Any, Dict, Generator, List, Optional, Sequence
 from uuid import uuid4
 
 from dotenv import load_dotenv
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.graph import END, START, StateGraph
 
 from .langchain_file_tools import make_langchain_file_tools
 from .langchain_granular_tools import make_langchain_granular_tools
@@ -122,7 +121,8 @@ SEARCH_AGENT_PROMPT = (
     "1. Prefer tool calls over assumptions.\n"
     "2. Return concise evidence with doc_ids from tool outputs.\n"
     "3. Do not fabricate citations or sources.\n"
-    "4. If evidence is insufficient, explicitly say so."
+    "4. If evidence is insufficient, explicitly say so.\n"
+    "5. Do not infer local file paths or use file tools unless the user explicitly provided attached/uploaded files."
 )
 
 ANALYSIS_AGENT_PROMPT = (
@@ -153,6 +153,19 @@ DIRECT_ANSWER_AGENT_PROMPT = (
     "2. Do not call tools.\n"
     "3. If the answer is not explicitly supported by the chat history, say you do not know.\n"
     "4. Keep the answer concise and directly responsive."
+)
+
+ORCHESTRATOR_AGENT_PROMPT = (
+    "You are OrchestratorAgent.\n"
+    "Goal: answer the user query with the minimum necessary work.\n"
+    "Available capabilities may include answering from chat history, searching for evidence, and analysis.\n"
+    "Rules:\n"
+    "1. If the question can be answered directly from chat history, call `answer_from_memory` first and use that answer.\n"
+    "2. If direct memory is insufficient, decide whether to call `search_agent_evidence`, `analysis_agent_answer`, or both.\n"
+    "3. When external evidence is needed, prefer calling `search_agent_evidence` before `analysis_agent_answer`.\n"
+    "4. Do not invent facts not grounded in chat history or tool outputs.\n"
+    "5. Do not assume a local file exists unless attached/uploaded file context is explicitly present.\n"
+    "6. Produce a final answer for the user after using the minimum sufficient set of tools."
 )
 
 DEFAULT_CHECKPOINTER = InMemorySaver()
@@ -238,10 +251,14 @@ def _collect_tools(
     include_mcp_tools: bool,
     mcp_modules: Optional[List[str]],
     enabled_search_methods: Optional[List[str]] = None,
+    include_file_tools: bool = True,
 ) -> List[Any]:
     strategy = (tool_strategy or "full_pipeline").strip().lower()
     if strategy == "granular":
-        tools = make_langchain_granular_tools(enabled_search_methods=enabled_search_methods)
+        tools = make_langchain_granular_tools(
+            enabled_search_methods=enabled_search_methods,
+            include_file_tools=include_file_tools,
+        )
     elif strategy == "full_pipeline":
         tools = [make_langchain_rag_tool(), *make_langchain_file_tools()]
     else:
@@ -319,6 +336,14 @@ def _build_available_routes(
             }
         )
     return routes
+
+
+def _query_has_file_context(query: str) -> bool:
+    text = (query or "").lower()
+    return (
+        "attached files are available to the agent via local file tools" in text
+        or "uploaded files are available to the agent via local file tools" in text
+    )
 
 
 def _select_allowed_tools(intent: str, available_tool_names: Sequence[str]) -> List[str]:
@@ -723,6 +748,28 @@ def build_code_agent_executor(
     )
 
 
+def build_orchestrator_agent_executor(
+    *,
+    llm: Optional[Any] = None,
+    verbose: bool = False,
+    return_intermediate_steps: bool = True,
+    tools: Optional[List[Any]] = None,
+    checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
+) -> Any:
+    return build_agent_executor(
+        llm=llm,
+        verbose=verbose,
+        return_intermediate_steps=return_intermediate_steps,
+        tool_strategy="granular",
+        include_mcp_tools=False,
+        mcp_modules=None,
+        preloaded_tools=tools or [],
+        system_prompt_override=ORCHESTRATOR_AGENT_PROMPT,
+        agent_name="orchestrator_agent",
+        checkpointer=checkpointer,
+    )
+
+
 def _messages_payload(query: str, chat_history: Optional[List[Any]]) -> dict:
     messages: List[dict] = []
     for item in chat_history or []:
@@ -816,6 +863,62 @@ def _extract_final_answer(result: Any) -> Optional[str]:
     return None
 
 
+def _extract_tool_result_json(artifacts: Dict[str, Any], tool_name: str) -> Optional[Dict[str, Any]]:
+    for item in reversed(artifacts.get("tool_results") or []):
+        if str(item.get("name") or "") != tool_name:
+            continue
+        content = item.get("content")
+        if not isinstance(content, str):
+            continue
+        try:
+            parsed = json.loads(content)
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _build_orchestration_trace(
+    *,
+    query: str,
+    chat_history: Optional[List[Any]],
+    available_agent_names: Sequence[str],
+    orchestration_result: Dict[str, Any],
+) -> Dict[str, Any]:
+    artifacts = _extract_search_artifacts(orchestration_result)
+    tool_calls = artifacts.get("tool_calls") or []
+    called_tools = [str(item.get("name") or "") for item in tool_calls]
+    called_set = set(called_tools)
+    if "answer_from_memory" in called_set:
+        memory_payload = _extract_tool_result_json(artifacts, "answer_from_memory") or {}
+        if memory_payload.get("can_answer") and memory_payload.get("answer"):
+            route = "direct_answer"
+        elif "search_agent_evidence" in called_set and "analysis_agent_answer" in called_set:
+            route = "search_then_analysis"
+        elif "search_agent_evidence" in called_set:
+            route = "search"
+        elif "analysis_agent_answer" in called_set:
+            route = "analysis"
+        else:
+            route = "direct_answer_attempted"
+    elif "search_agent_evidence" in called_set and "analysis_agent_answer" in called_set:
+        route = "search_then_analysis"
+    elif "search_agent_evidence" in called_set:
+        route = "search"
+    elif "analysis_agent_answer" in called_set:
+        route = "analysis"
+    else:
+        route = "orchestrator_only"
+    return {
+        "query": query,
+        "route": route,
+        "available_agents": list(available_agent_names),
+        "called_tools": called_tools,
+        "chat_history_available": bool(chat_history),
+    }
+
+
 def _extract_search_artifacts(result: Any) -> Dict[str, Any]:
     artifacts: Dict[str, Any] = {"tool_calls": [], "tool_results": [], "raw_messages": []}
     if not isinstance(result, dict):
@@ -873,6 +976,84 @@ def _build_search_evidence_payload(
     }
 
 
+def _make_answer_from_memory_tool(
+    *,
+    llm: Optional[Any],
+    chat_history: Optional[List[Any]],
+) -> Any:
+    try:
+        from langchain_core.tools import StructuredTool
+    except Exception as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError(
+            "LangChain is not installed. Add `langchain-core` (or langchain) to dependencies."
+        ) from exc
+
+    history_preview = _chat_history_preview(chat_history, max_items=12)
+
+    def answer_from_memory(query: str) -> str:
+        if not history_preview:
+            return json.dumps(
+                {
+                    "can_answer": False,
+                    "answer": "",
+                    "reason": "chat_history_unavailable",
+                },
+                ensure_ascii=True,
+            )
+        active_llm = llm or _build_default_llm()
+        prompt = (
+            "You decide whether a user query can be answered directly from prior chat history.\n"
+            "Return JSON only with keys: can_answer, answer, reason.\n"
+            "Set can_answer=true only if the answer is directly supported by the chat history.\n"
+            "If can_answer=false, leave answer empty."
+        )
+        payload = {
+            "query": query,
+            "chat_history": history_preview,
+        }
+        response = active_llm.invoke(
+            [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=True)},
+            ]
+        )
+        content = getattr(response, "content", "")
+        if isinstance(content, list):
+            content = "".join(
+                part.get("text", "") if isinstance(part, dict) else getattr(part, "text", str(part))
+                for part in content
+            )
+        parsed = _extract_json_object(str(content)) or {}
+        can_answer = bool(parsed.get("can_answer"))
+        answer = str(parsed.get("answer") or "").strip()
+        reason = str(parsed.get("reason") or ("supported_by_chat_history" if can_answer else "insufficient_chat_history"))
+        if can_answer and answer:
+            return json.dumps(
+                {
+                    "can_answer": True,
+                    "answer": answer,
+                    "reason": reason,
+                    "history_items_used": len(history_preview),
+                },
+                ensure_ascii=True,
+            )
+        return json.dumps(
+            {
+                "can_answer": False,
+                "answer": "",
+                "reason": reason,
+                "history_items_used": len(history_preview),
+            },
+            ensure_ascii=True,
+        )
+
+    return StructuredTool.from_function(
+        func=answer_from_memory,
+        name="answer_from_memory",
+        description="Use the already-loaded chat history to answer memory-based questions directly. Returns JSON with can_answer and answer.",
+    )
+
+
 def _make_search_agent_evidence_tool(
     *,
     llm: Optional[Any],
@@ -885,6 +1066,7 @@ def _make_search_agent_evidence_tool(
     smart_tool_routing: bool,
     forced_intent: Optional[str],
     search_invocations: List[Dict[str, Any]],
+    allow_file_tools: bool = False,
     thread_id: Optional[str] = None,
     checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
 ) -> Any:
@@ -905,6 +1087,7 @@ def _make_search_agent_evidence_tool(
             include_mcp_tools=include_mcp_tools,
             mcp_modules=mcp_modules,
             enabled_search_methods=enabled_search_methods,
+            include_file_tools=allow_file_tools,
         )
         route_trace: Optional[Dict[str, Any]] = None
         allowed_tool_names: Optional[List[str]] = None
@@ -956,6 +1139,67 @@ def _make_search_agent_evidence_tool(
             "Call SearchAgent to retrieve domain-specific evidence and references. "
             "Use before generating code that relies on external facts."
         ),
+    )
+
+
+def _make_analysis_agent_answer_tool(
+    *,
+    llm: Optional[Any],
+    verbose: bool,
+    return_intermediate_steps: bool,
+    chat_history: Optional[List[Any]],
+    thread_id: Optional[str] = None,
+    checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
+) -> Any:
+    try:
+        from langchain_core.tools import StructuredTool
+    except Exception as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError(
+            "LangChain is not installed. Add `langchain-core` (or langchain) to dependencies."
+        ) from exc
+
+    analysis_executor = build_analysis_agent_executor(
+        llm=llm,
+        verbose=verbose,
+        return_intermediate_steps=return_intermediate_steps,
+        checkpointer=checkpointer,
+    )
+
+    def analysis_agent_answer(query: str, search_evidence_json: str = "") -> str:
+        nested_thread_id = _child_thread_id(thread_id, "analysis_tool")
+        evidence_payload = {}
+        if search_evidence_json:
+            try:
+                evidence_payload = json.loads(search_evidence_json)
+            except Exception:
+                evidence_payload = {"raw_search_evidence": search_evidence_json}
+        analysis_query = query
+        if evidence_payload:
+            analysis_query = (
+                f"{query}\n\n"
+                "Search evidence is provided below as JSON. Use only this evidence and the chat history.\n"
+                f"{json.dumps(evidence_payload, ensure_ascii=True)}"
+            )
+        analysis_response = _invoke_agent_with_payload_fallback(
+            analysis_executor,
+            query=analysis_query,
+            chat_history=chat_history,
+            config=_agent_config(nested_thread_id),
+        )
+        answer = _extract_final_answer(analysis_response) or ""
+        return json.dumps(
+            {
+                "answer": answer,
+                "analysis_result": analysis_response,
+            },
+            ensure_ascii=True,
+            default=str,
+        )
+
+    return StructuredTool.from_function(
+        func=analysis_agent_answer,
+        name="analysis_agent_answer",
+        description="Use AnalysisAgent to synthesize an answer from chat history and optional search evidence JSON.",
     )
 
 
@@ -1046,277 +1290,117 @@ def _print_route_trace(result: Any) -> None:
     print(f"- allowed_tools: {route.get('allowed_tools')}")
 
 
-class AgentQueryGraphState(TypedDict, total=False):
-    query: str
-    chat_history: Optional[List[Any]]
-    llm: Optional[Any]
-    verbose: bool
-    return_intermediate_steps: bool
-    tool_strategy: str
-    include_mcp_tools: bool
-    mcp_modules: Optional[List[str]]
-    enabled_search_methods: Optional[List[str]]
-    smart_tool_routing: bool
-    forced_intent: Optional[str]
-    thread_id: Optional[str]
-    checkpointer: Optional[Any]
-    all_tools: List[Any]
-    available_routes: List[Dict[str, Any]]
-    effective_thread_id: Optional[str]
-    search_thread_id: Optional[str]
-    analysis_thread_id: Optional[str]
-    direct_answer_thread_id: Optional[str]
-    route_trace: Optional[Dict[str, Any]]
-    route_type: str
-    allowed_tool_names: Optional[List[str]]
-    direct_answer_result: Optional[Dict[str, Any]]
-    search_result: Optional[Dict[str, Any]]
-    search_artifacts: Dict[str, Any]
-    analysis_result: Optional[Dict[str, Any]]
-    analysis_agent_search_invocations: List[Dict[str, Any]]
-    response: Dict[str, Any]
-    error: Optional[str]
-
-
-def _agent_query_initialize_node(state: AgentQueryGraphState) -> AgentQueryGraphState:
-    all_tools = _collect_tools(
-        tool_strategy=state["tool_strategy"],
-        include_mcp_tools=state["include_mcp_tools"],
-        mcp_modules=state.get("mcp_modules"),
-        enabled_search_methods=state.get("enabled_search_methods"),
+def _collect_orchestration_tools(
+    *,
+    query: str,
+    chat_history: Optional[List[Any]],
+    llm: Optional[Any],
+    verbose: bool,
+    return_intermediate_steps: bool,
+    tool_strategy: str,
+    include_mcp_tools: bool,
+    mcp_modules: Optional[List[str]],
+    enabled_search_methods: Optional[List[str]],
+    smart_tool_routing: bool,
+    forced_intent: Optional[str],
+    thread_id: Optional[str],
+    checkpointer: Optional[Any],
+) -> List[Any]:
+    tools: List[Any] = []
+    allow_file_tools = _query_has_file_context(query)
+    if chat_history:
+        tools.append(_make_answer_from_memory_tool(llm=llm, chat_history=chat_history))
+    tools.append(
+        _make_search_agent_evidence_tool(
+            llm=llm,
+            verbose=verbose,
+            return_intermediate_steps=return_intermediate_steps,
+            tool_strategy=tool_strategy,
+            include_mcp_tools=include_mcp_tools,
+            mcp_modules=mcp_modules,
+            enabled_search_methods=enabled_search_methods,
+            smart_tool_routing=smart_tool_routing,
+            forced_intent=forced_intent,
+            search_invocations=[],
+            allow_file_tools=allow_file_tools,
+            thread_id=_child_thread_id(thread_id, "search"),
+            checkpointer=checkpointer,
+        )
     )
-    effective_thread_id = _resolve_thread_id(state.get("thread_id"), state.get("checkpointer"))
-    available_names = [getattr(tool, "name", "") for tool in all_tools if getattr(tool, "name", "")]
-    return {
-        "all_tools": all_tools,
-        "available_routes": _build_available_routes(
-            available_tool_names=available_names,
-            chat_history=state.get("chat_history"),
+    tools.append(
+        _make_analysis_agent_answer_tool(
+            llm=llm,
+            verbose=verbose,
+            return_intermediate_steps=return_intermediate_steps,
+            chat_history=chat_history,
+            thread_id=_child_thread_id(thread_id, "analysis"),
+            checkpointer=checkpointer,
+        )
+    )
+    return tools
+
+
+def _run_orchestrated_agent_query(
+    query: str,
+    *,
+    chat_history: Optional[List[Any]],
+    llm: Optional[Any],
+    verbose: bool,
+    return_intermediate_steps: bool,
+    tool_strategy: str,
+    include_mcp_tools: bool,
+    mcp_modules: Optional[List[str]],
+    enabled_search_methods: Optional[List[str]],
+    smart_tool_routing: bool,
+    forced_intent: Optional[str],
+    thread_id: Optional[str],
+    checkpointer: Optional[Any],
+) -> Dict[str, Any]:
+    effective_thread_id = _resolve_thread_id(thread_id, checkpointer)
+    orchestration_tools = _collect_orchestration_tools(
+        query=query,
+        chat_history=chat_history,
+        llm=llm,
+        verbose=verbose,
+        return_intermediate_steps=return_intermediate_steps,
+        tool_strategy=tool_strategy,
+        include_mcp_tools=include_mcp_tools,
+        mcp_modules=mcp_modules,
+        enabled_search_methods=enabled_search_methods,
+        smart_tool_routing=smart_tool_routing,
+        forced_intent=forced_intent,
+        thread_id=effective_thread_id,
+        checkpointer=checkpointer,
+    )
+    orchestrator = build_orchestrator_agent_executor(
+        llm=llm,
+        verbose=verbose,
+        return_intermediate_steps=return_intermediate_steps,
+        tools=orchestration_tools,
+        checkpointer=checkpointer,
+    )
+    orchestration_result = _invoke_agent_with_payload_fallback(
+        orchestrator,
+        query=query,
+        chat_history=chat_history,
+        config=_agent_config(_child_thread_id(effective_thread_id, "orchestrator")),
+    )
+    available_agent_names = [getattr(tool, "name", "") for tool in orchestration_tools if getattr(tool, "name", "")]
+    response: Dict[str, Any] = {
+        "orchestration_result": orchestration_result,
+        "route_trace": _build_orchestration_trace(
+            query=query,
+            chat_history=chat_history,
+            available_agent_names=available_agent_names,
+            orchestration_result=orchestration_result if isinstance(orchestration_result, dict) else {},
         ),
-        "effective_thread_id": effective_thread_id,
-        "direct_answer_thread_id": _child_thread_id(effective_thread_id, "direct_answer"),
-        "search_thread_id": _child_thread_id(effective_thread_id, "search"),
-        "analysis_thread_id": _child_thread_id(effective_thread_id, "analysis"),
     }
-
-
-def _agent_query_route_node(state: AgentQueryGraphState) -> AgentQueryGraphState:
-    route_trace: Optional[Dict[str, Any]] = None
-    allowed_tool_names: Optional[List[str]] = None
-    route_type = "search"
-    if state.get("smart_tool_routing"):
-        available_names = [getattr(tool, "name", "") for tool in state.get("all_tools", []) if getattr(tool, "name", "")]
-        route_trace = _build_route_trace(
-            state["query"],
-            available_names,
-            state.get("available_routes") or [],
-            chat_history=state.get("chat_history"),
-            llm=state.get("llm"),
-            forced_intent=state.get("forced_intent"),
-        )
-        allowed_tool_names = route_trace.get("allowed_tools") or None
-        route_type = str(route_trace.get("route") or "search").strip().lower()
-    else:
-        route_trace = _heuristic_route_decision(state["query"], state.get("available_routes") or [])
-        route_type = str(route_trace.get("route") or "search").strip().lower()
-    return {
-        "route_trace": route_trace,
-        "route_type": route_type,
-        "allowed_tool_names": allowed_tool_names,
-    }
-
-
-def _agent_query_direct_answer_node(state: AgentQueryGraphState) -> AgentQueryGraphState:
-    direct_executor = build_direct_answer_agent_executor(
-        llm=state.get("llm"),
-        verbose=bool(state.get("verbose")),
-        return_intermediate_steps=bool(state.get("return_intermediate_steps", True)),
-        checkpointer=state.get("checkpointer"),
-    )
-    direct_response = _invoke_agent_with_payload_fallback(
-        direct_executor,
-        query=state["query"],
-        chat_history=state.get("chat_history"),
-        config=_agent_config(state.get("direct_answer_thread_id")),
-    )
-    return {"direct_answer_result": direct_response}
-
-
-def _agent_query_search_node(state: AgentQueryGraphState) -> AgentQueryGraphState:
-    search_executor = build_search_agent_executor(
-        llm=state.get("llm"),
-        verbose=bool(state.get("verbose")),
-        return_intermediate_steps=bool(state.get("return_intermediate_steps", True)),
-        tool_strategy=state["tool_strategy"],
-        include_mcp_tools=bool(state.get("include_mcp_tools")),
-        mcp_modules=state.get("mcp_modules"),
-        allowed_tool_names=state.get("allowed_tool_names"),
-        preloaded_tools=state.get("all_tools"),
-        checkpointer=state.get("checkpointer"),
-    )
-    try:
-        search_response = _invoke_agent_with_payload_fallback(
-            search_executor,
-            query=state["query"],
-            chat_history=state.get("chat_history"),
-            config=_agent_config(state.get("search_thread_id")),
-        )
-        return {"search_result": search_response}
-    except Exception as exc:
-        if state["tool_strategy"] == "full_pipeline" and _is_empty_model_response_error(exc):
-            direct = rag_tool(query=state["query"])
-            response: Dict[str, Any] = {
-                "fallback": "direct_rag_tool",
-                "reason": str(exc),
-                "result": direct,
-            }
-            if state.get("route_trace"):
-                response["route_trace"] = state["route_trace"]
-            return {"response": response}
-        raise
-
-
-def _agent_query_extract_search_artifacts_node(state: AgentQueryGraphState) -> AgentQueryGraphState:
-    search_response = state.get("search_result")
-    if not isinstance(search_response, dict):
-        return {}
-    return {"search_artifacts": _extract_search_artifacts(search_response)}
-
-
-def _agent_query_analysis_node(state: AgentQueryGraphState) -> AgentQueryGraphState:
-    search_invocations: List[Dict[str, Any]] = []
-    search_tool = _make_search_agent_evidence_tool(
-        llm=state.get("llm"),
-        verbose=bool(state.get("verbose")),
-        return_intermediate_steps=bool(state.get("return_intermediate_steps", True)),
-        tool_strategy=state["tool_strategy"],
-        include_mcp_tools=bool(state.get("include_mcp_tools")),
-        mcp_modules=state.get("mcp_modules"),
-        enabled_search_methods=state.get("enabled_search_methods"),
-        smart_tool_routing=bool(state.get("smart_tool_routing")),
-        forced_intent=state.get("forced_intent"),
-        search_invocations=search_invocations,
-        thread_id=state.get("analysis_thread_id"),
-        checkpointer=state.get("checkpointer"),
-    )
-    analysis_executor = build_agent_executor(
-        llm=state.get("llm"),
-        verbose=bool(state.get("verbose")),
-        return_intermediate_steps=bool(state.get("return_intermediate_steps", True)),
-        tool_strategy="granular",
-        include_mcp_tools=False,
-        mcp_modules=None,
-        preloaded_tools=[search_tool],
-        system_prompt_override=ANALYSIS_AGENT_PROMPT,
-        agent_name="analysis_agent",
-        checkpointer=state.get("checkpointer"),
-    )
-    analysis_response = _invoke_agent_with_payload_fallback(
-        analysis_executor,
-        query=state["query"],
-        chat_history=state.get("chat_history"),
-        config=_agent_config(state.get("analysis_thread_id")),
-    )
-    return {
-        "analysis_result": analysis_response,
-        "analysis_agent_search_invocations": search_invocations,
-    }
-
-
-def _agent_query_finalize_search_node(state: AgentQueryGraphState) -> AgentQueryGraphState:
-    if isinstance(state.get("response"), dict) and state["response"]:
-        return {}
-
-    response: Dict[str, Any] = {
-        "search_result": state.get("search_result"),
-        "analysis_result": None,
-    }
-    final_answer = _extract_final_answer(state.get("search_result"))
+    final_answer = _extract_final_answer(orchestration_result)
     if final_answer:
         response["final_answer"] = final_answer
-    if state.get("route_trace"):
-        response["route_trace"] = state["route_trace"]
-    if state.get("effective_thread_id"):
-        response["thread_id"] = state["effective_thread_id"]
-    return {"response": response}
-
-
-def _agent_query_finalize_direct_answer_node(state: AgentQueryGraphState) -> AgentQueryGraphState:
-    if isinstance(state.get("response"), dict) and state["response"]:
-        return {}
-    response: Dict[str, Any] = {
-        "search_result": None,
-        "analysis_result": None,
-        "direct_answer_result": state.get("direct_answer_result"),
-    }
-    final_answer = _extract_final_answer(state.get("direct_answer_result"))
-    if final_answer:
-        response["final_answer"] = final_answer
-    if state.get("route_trace"):
-        response["route_trace"] = state["route_trace"]
-    if state.get("effective_thread_id"):
-        response["thread_id"] = state["effective_thread_id"]
-    return {"response": response}
-
-
-def _agent_query_finalize_analysis_node(state: AgentQueryGraphState) -> AgentQueryGraphState:
-    if isinstance(state.get("response"), dict) and state["response"]:
-        return {}
-
-    response: Dict[str, Any] = {
-        "search_result": None,
-        "analysis_result": state.get("analysis_result"),
-    }
-    final_answer = _extract_final_answer(state.get("analysis_result"))
-    if final_answer:
-        response["final_answer"] = final_answer
-    if state.get("route_trace"):
-        response["route_trace"] = state["route_trace"]
-    if state.get("effective_thread_id"):
-        response["thread_id"] = state["effective_thread_id"]
-    if state.get("analysis_agent_search_invocations") is not None:
-        response["analysis_agent_search_invocations"] = state.get("analysis_agent_search_invocations") or []
-    return {"response": response}
-
-
-def _agent_query_route_selector(state: AgentQueryGraphState) -> str:
-    return str(state.get("route_type") or "search")
-
-
-def _build_agent_query_graph() -> Any:
-    graph = StateGraph(AgentQueryGraphState)
-    graph.add_node("initialize", _agent_query_initialize_node)
-    graph.add_node("route", _agent_query_route_node)
-    graph.add_node("direct_answer", _agent_query_direct_answer_node)
-    graph.add_node("search", _agent_query_search_node)
-    graph.add_node("extract_search_artifacts", _agent_query_extract_search_artifacts_node)
-    graph.add_node("analysis", _agent_query_analysis_node)
-    graph.add_node("finalize_direct_answer", _agent_query_finalize_direct_answer_node)
-    graph.add_node("finalize_search", _agent_query_finalize_search_node)
-    graph.add_node("finalize_analysis", _agent_query_finalize_analysis_node)
-
-    graph.add_edge(START, "initialize")
-    graph.add_edge("initialize", "route")
-    graph.add_conditional_edges(
-        "route",
-        _agent_query_route_selector,
-        {
-            "direct_answer": "direct_answer",
-            "search": "search",
-            "analysis": "analysis",
-        },
-    )
-    graph.add_edge("direct_answer", "finalize_direct_answer")
-    graph.add_edge("finalize_direct_answer", END)
-    graph.add_edge("search", "extract_search_artifacts")
-    graph.add_edge("extract_search_artifacts", "finalize_search")
-    graph.add_edge("finalize_search", END)
-    graph.add_edge("analysis", "finalize_analysis")
-    graph.add_edge("finalize_analysis", END)
-    return graph.compile()
-
-
-AGENT_QUERY_GRAPH = _build_agent_query_graph()
+    if effective_thread_id:
+        response["thread_id"] = effective_thread_id
+    return response
 
 
 def run_agent_query(
@@ -1338,28 +1422,21 @@ def run_agent_query(
     """
     Run one query through the LangChain agent executor.
     """
-    final_state = AGENT_QUERY_GRAPH.invoke(
-        {
-            "query": query,
-            "chat_history": chat_history,
-            "llm": llm,
-            "verbose": verbose,
-            "return_intermediate_steps": return_intermediate_steps,
-            "tool_strategy": tool_strategy,
-            "include_mcp_tools": include_mcp_tools,
-            "mcp_modules": mcp_modules,
-            "enabled_search_methods": enabled_search_methods,
-            "smart_tool_routing": smart_tool_routing,
-            "forced_intent": forced_intent,
-            "thread_id": thread_id,
-            "checkpointer": checkpointer,
-            "response": {},
-        }
+    return _run_orchestrated_agent_query(
+        query,
+        chat_history=chat_history,
+        llm=llm,
+        verbose=verbose,
+        return_intermediate_steps=return_intermediate_steps,
+        tool_strategy=tool_strategy,
+        include_mcp_tools=include_mcp_tools,
+        mcp_modules=mcp_modules,
+        enabled_search_methods=enabled_search_methods,
+        smart_tool_routing=smart_tool_routing,
+        forced_intent=forced_intent,
+        thread_id=thread_id,
+        checkpointer=checkpointer,
     )
-    response = final_state.get("response")
-    if isinstance(response, dict):
-        return response
-    return {}
 
 
 def stream_agent_query_events(
@@ -1378,113 +1455,89 @@ def stream_agent_query_events(
     thread_id: Optional[str] = None,
     checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
 ) -> Generator[Dict[str, Any], None, None]:
+    effective_thread_id = _resolve_thread_id(thread_id, checkpointer)
     yield {
         "event": "status",
         "data": {
             "stage": "started",
-            "thread_id": thread_id,
+            "thread_id": effective_thread_id or thread_id,
             "tool_strategy": tool_strategy,
         },
     }
+    orchestration_tools = _collect_orchestration_tools(
+        query=query,
+        chat_history=chat_history,
+        llm=llm,
+        verbose=verbose,
+        return_intermediate_steps=return_intermediate_steps,
+        tool_strategy=tool_strategy,
+        include_mcp_tools=include_mcp_tools,
+        mcp_modules=mcp_modules,
+        enabled_search_methods=enabled_search_methods,
+        smart_tool_routing=smart_tool_routing,
+        forced_intent=forced_intent,
+        thread_id=effective_thread_id,
+        checkpointer=checkpointer,
+    )
+    available_agent_names = [getattr(tool, "name", "") for tool in orchestration_tools if getattr(tool, "name", "")]
+    yield {
+        "event": "status",
+        "data": {
+            "stage": "initialized",
+            "thread_id": effective_thread_id or thread_id,
+            "tool_strategy": tool_strategy,
+            "available_agents": available_agent_names,
+        },
+    }
+    yield {"event": "status", "data": {"stage": "orchestration_agent_started"}}
     try:
-        final_state: AgentQueryGraphState = {}
-        for update in AGENT_QUERY_GRAPH.stream(
-            {
-                "query": query,
-                "chat_history": chat_history,
-                "llm": llm,
-                "verbose": verbose,
-                "return_intermediate_steps": return_intermediate_steps,
-                "tool_strategy": tool_strategy,
-                "include_mcp_tools": include_mcp_tools,
-                "mcp_modules": mcp_modules,
-                "enabled_search_methods": enabled_search_methods,
-                "smart_tool_routing": smart_tool_routing,
-                "forced_intent": forced_intent,
-                "thread_id": thread_id,
-                "checkpointer": checkpointer,
-                "response": {},
+        orchestrator = build_orchestrator_agent_executor(
+            llm=llm,
+            verbose=verbose,
+            return_intermediate_steps=return_intermediate_steps,
+            tools=orchestration_tools,
+            checkpointer=checkpointer,
+        )
+        orchestration_result = _invoke_agent_with_payload_fallback(
+            orchestrator,
+            query=query,
+            chat_history=chat_history,
+            config=_agent_config(_child_thread_id(effective_thread_id, "orchestrator")),
+        )
+        artifacts = _extract_search_artifacts(orchestration_result if isinstance(orchestration_result, dict) else {})
+        route_trace = _build_orchestration_trace(
+            query=query,
+            chat_history=chat_history,
+            available_agent_names=available_agent_names,
+            orchestration_result=orchestration_result if isinstance(orchestration_result, dict) else {},
+        )
+        yield {"event": "route_trace", "data": route_trace}
+        for tool_call in artifacts.get("tool_calls") or []:
+            yield {"event": "tool_call", "data": tool_call}
+        for tool_result in artifacts.get("tool_results") or []:
+            yield {"event": "tool_result", "data": tool_result}
+        if "search_agent_evidence" in route_trace.get("called_tools", []):
+            yield {
+                "event": "search_complete",
+                "data": {
+                    "summary": _extract_final_answer(orchestration_result) or "",
+                    "tool_call_count": len(artifacts.get("tool_calls") or []),
+                    "tool_result_count": len(artifacts.get("tool_results") or []),
+                },
             }
-        ):
-            if not isinstance(update, dict):
-                continue
-            for node_name, payload in update.items():
-                if not isinstance(payload, dict):
-                    continue
-                final_state.update(payload)
-                if node_name == "initialize":
-                    yield {
-                        "event": "status",
-                        "data": {
-                            "stage": "initialized",
-                            "thread_id": payload.get("effective_thread_id") or thread_id,
-                            "tool_strategy": tool_strategy,
-                        },
-                    }
-                elif node_name == "route":
-                    route_trace = payload.get("route_trace")
-                    if route_trace:
-                        yield {"event": "route_trace", "data": route_trace}
-                    route_type = str(payload.get("route_type") or "search")
-                    yield {"event": "status", "data": {"stage": f"{route_type}_route_selected"}}
-                    if route_type == "direct_answer":
-                        yield {"event": "status", "data": {"stage": "direct_answer_agent_started"}}
-                    elif route_type == "search":
-                        yield {"event": "status", "data": {"stage": "search_agent_started"}}
-                    else:
-                        yield {"event": "status", "data": {"stage": "analysis_agent_started"}}
-                elif node_name == "direct_answer":
-                    final_answer = _extract_final_answer(payload.get("direct_answer_result"))
-                    if final_answer:
-                        yield {"event": "final_answer", "data": {"answer": final_answer}}
-                    yield {"event": "status", "data": {"stage": "direct_answer_agent_completed"}}
-                elif node_name == "search":
-                    yield {"event": "status", "data": {"stage": "search_agent_completed"}}
-                    if isinstance(payload.get("response"), dict):
-                        response = payload["response"]
-                        yield {"event": "final_answer", "data": response}
-                elif node_name == "extract_search_artifacts":
-                    artifacts = payload.get("search_artifacts") or {}
-                    yield {
-                        "event": "search_complete",
-                        "data": {
-                            "summary": _extract_final_answer(final_state.get("search_result")) or "",
-                            "tool_call_count": len(artifacts.get("tool_calls") or []),
-                            "tool_result_count": len(artifacts.get("tool_results") or []),
-                        },
-                    }
-                    for tool_call in artifacts.get("tool_calls") or []:
-                        yield {"event": "tool_call", "data": tool_call}
-                    for tool_result in artifacts.get("tool_results") or []:
-                        yield {"event": "tool_result", "data": tool_result}
-                elif node_name == "analysis":
-                    for item in payload.get("analysis_agent_search_invocations") or []:
-                        evidence = item.get("evidence") if isinstance(item, dict) else None
-                        search_result = item.get("search_result") if isinstance(item, dict) else None
-                        if isinstance(evidence, dict):
-                            yield {"event": "search_evidence", "data": evidence}
-                        if isinstance(search_result, dict):
-                            artifacts = _extract_search_artifacts(search_result)
-                            yield {
-                                "event": "search_complete",
-                                "data": {
-                                    "summary": _extract_final_answer(search_result) or "",
-                                    "tool_call_count": len(artifacts.get("tool_calls") or []),
-                                    "tool_result_count": len(artifacts.get("tool_results") or []),
-                                },
-                            }
-                            for tool_call in artifacts.get("tool_calls") or []:
-                                yield {"event": "tool_call", "data": tool_call}
-                            for tool_result in artifacts.get("tool_results") or []:
-                                yield {"event": "tool_result", "data": tool_result}
-                    final_answer = _extract_final_answer(payload.get("analysis_result"))
-                    if final_answer:
-                        yield {"event": "final_answer", "data": {"answer": final_answer}}
-                    yield {"event": "status", "data": {"stage": "analysis_agent_completed"}}
-                elif node_name in {"finalize_direct_answer", "finalize_search", "finalize_analysis"}:
-                    response = payload.get("response")
-                    if isinstance(response, dict):
-                        yield {"event": "completed", "data": response}
+        final_answer = _extract_final_answer(orchestration_result)
+        if final_answer:
+            yield {"event": "final_answer", "data": {"answer": final_answer}}
+        yield {"event": "status", "data": {"stage": "orchestration_agent_completed"}}
+        response: Dict[str, Any] = {
+            "orchestration_result": orchestration_result,
+            "route_trace": route_trace,
+        }
+        if final_answer:
+            response["final_answer"] = final_answer
+        if effective_thread_id:
+            response["thread_id"] = effective_thread_id
+        yield {"event": "completed", "data": response}
     except Exception as exc:
         yield {"event": "error", "data": {"message": str(exc)}}
         raise

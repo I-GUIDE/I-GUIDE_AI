@@ -83,7 +83,11 @@ def opengeodata_search_tool(query: str, limit: int = 8, session_context_json: Op
     return _build_payload(hits, source="opengeodata")
 
 
-def make_langchain_granular_tools(enabled_search_methods: Optional[Sequence[str]] = None) -> List[Any]:
+def make_langchain_granular_tools(
+    enabled_search_methods: Optional[Sequence[str]] = None,
+    *,
+    include_file_tools: bool = True,
+) -> List[Any]:
     try:
         from langchain_core.tools import StructuredTool
     except Exception as exc:  # pragma: no cover - optional dependency
@@ -126,7 +130,8 @@ def make_langchain_granular_tools(enabled_search_methods: Optional[Sequence[str]
         search_tools = [tool for tool in search_tools if getattr(tool, "name", "") in enabled]
 
     tools = list(search_tools)
-    tools.extend(make_langchain_file_tools())
+    if include_file_tools:
+        tools.extend(make_langchain_file_tools())
     return tools
 
 
