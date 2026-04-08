@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional, Sequence, TypedDict
 from uuid import uuid4
@@ -144,6 +145,16 @@ CODE_AGENT_PROMPT = (
     "4. If evidence is insufficient, say what is missing."
 )
 
+DIRECT_ANSWER_AGENT_PROMPT = (
+    "You are DirectAnswerAgent.\n"
+    "Goal: answer from the supplied conversation history only.\n"
+    "Rules:\n"
+    "1. Use only the provided chat history as evidence.\n"
+    "2. Do not call tools.\n"
+    "3. If the answer is not explicitly supported by the chat history, say you do not know.\n"
+    "4. Keep the answer concise and directly responsive."
+)
+
 DEFAULT_CHECKPOINTER = InMemorySaver()
 
 
@@ -274,6 +285,42 @@ def _classify_intent(query: str) -> Dict[str, Any]:
     }
 
 
+def _build_available_routes(
+    *,
+    available_tool_names: Sequence[str],
+    chat_history: Optional[List[Any]],
+) -> List[Dict[str, Any]]:
+    routes: List[Dict[str, Any]] = []
+    history_available = bool(chat_history)
+    if history_available:
+        routes.append(
+            {
+                "route": "direct_answer",
+                "agent": "direct_answer_agent",
+                "description": "Answer only from the current conversation history already loaded for this turn.",
+                "requirements": ["chat_history"],
+            }
+        )
+    if available_tool_names:
+        routes.append(
+            {
+                "route": "search",
+                "agent": "search_agent",
+                "description": "Use the available tools to retrieve evidence and answer factual or discovery questions.",
+                "tool_names": list(available_tool_names),
+            }
+        )
+        routes.append(
+            {
+                "route": "analysis",
+                "agent": "analysis_agent",
+                "description": "Perform synthesis or analysis, calling SearchAgent for evidence when needed.",
+                "tool_names": list(available_tool_names),
+            }
+        )
+    return routes
+
+
 def _select_allowed_tools(intent: str, available_tool_names: Sequence[str]) -> List[str]:
     available = set(available_tool_names)
     selected: List[str] = []
@@ -299,24 +346,209 @@ def _select_allowed_tools(intent: str, available_tool_names: Sequence[str]) -> L
     return selected
 
 
+def _forced_route_from_value(value: Optional[str], available_routes: Sequence[Dict[str, Any]]) -> Optional[str]:
+    if not value:
+        return None
+    normalized = str(value).strip().lower()
+    available = {str(item.get("route") or "").strip().lower() for item in available_routes}
+    mapping = {
+        "analysis": "analysis",
+        "analysis_task": "analysis",
+        "hybrid": "analysis",
+        "search": "search",
+        "general_discovery": "search",
+        "code_task": "search",
+        "direct_answer": "direct_answer",
+        "memory_direct": "direct_answer",
+    }
+    forced = mapping.get(normalized)
+    if forced in available:
+        return forced
+    return None
+
+
+def _chat_history_preview(chat_history: Optional[List[Any]], max_items: int = 6) -> List[Dict[str, str]]:
+    preview: List[Dict[str, str]] = []
+    for item in (chat_history or [])[-max_items:]:
+        role = "user"
+        content = ""
+        if isinstance(item, dict):
+            role = str(item.get("role") or "user")
+            content = str(item.get("content") or "")
+        elif isinstance(item, (list, tuple)) and len(item) == 2:
+            role = str(item[0])
+            content = str(item[1])
+        else:
+            content = str(item)
+        content = " ".join(content.split())
+        if content:
+            preview.append({"role": role, "content": content[:400]})
+    return preview
+
+
+def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
+    if not text:
+        return None
+    candidates = [text.strip()]
+    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    if match:
+        candidates.append(match.group(0))
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _heuristic_route_decision(
+    query: str,
+    available_routes: Sequence[Dict[str, Any]],
+) -> Dict[str, Any]:
+    route_names = {str(item.get("route") or "") for item in available_routes}
+    lowered = (query or "").strip().lower()
+    classification = _classify_intent(query)
+    if "direct_answer" in route_names:
+        memory_phrases = (
+            "what is my ",
+            "what's my ",
+            "what was my ",
+            "what did i say ",
+            "did i mention ",
+            "what did we discuss ",
+        )
+        if lowered.startswith(memory_phrases):
+            return {
+                "route": "direct_answer",
+                "reason": "heuristic_memory_reference",
+                "intent": "memory_lookup",
+                "router_type": "heuristic",
+            }
+    if classification["intent"] in {"analysis_task", "hybrid"} and "analysis" in route_names:
+        return {
+            "route": "analysis",
+            "reason": classification["reason"],
+            "intent": classification["intent"],
+            "router_type": "heuristic",
+        }
+    if "search" in route_names:
+        return {
+            "route": "search",
+            "reason": classification["reason"],
+            "intent": classification["intent"],
+            "router_type": "heuristic",
+        }
+    fallback = next(iter(route_names), "search")
+    return {
+        "route": fallback,
+        "reason": "fallback_first_available_route",
+        "intent": classification["intent"],
+        "router_type": "heuristic",
+    }
+
+
+def _llm_route_decision(
+    *,
+    query: str,
+    chat_history: Optional[List[Any]],
+    available_routes: Sequence[Dict[str, Any]],
+    llm: Optional[Any],
+) -> Optional[Dict[str, Any]]:
+    if not available_routes:
+        return None
+    active_llm = llm or _build_default_llm()
+    route_names = [str(item.get("route") or "") for item in available_routes if item.get("route")]
+    prompt = (
+        "You are a routing model for a multi-agent assistant.\n"
+        "Choose exactly one route from the available routes.\n"
+        "Return JSON only with keys: route, reason, confidence.\n"
+        "Use direct_answer only when the question can be answered from chat history alone.\n"
+        "Use analysis for synthesis, comparison, transformation, coding, statistics, or multi-step reasoning.\n"
+        "Use search for retrieval or factual lookup that needs tools."
+    )
+    router_input = {
+        "query": query,
+        "available_routes": list(available_routes),
+        "chat_history_preview": _chat_history_preview(chat_history),
+    }
+    response = active_llm.invoke(
+        [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": json.dumps(router_input, ensure_ascii=True)},
+        ]
+    )
+    content = getattr(response, "content", "")
+    if isinstance(content, list):
+        content = "".join(
+            part.get("text", "") if isinstance(part, dict) else getattr(part, "text", str(part))
+            for part in content
+        )
+    parsed = _extract_json_object(str(content))
+    if not parsed:
+        return None
+    route = str(parsed.get("route") or "").strip()
+    if route not in route_names:
+        return None
+    return {
+        "route": route,
+        "reason": str(parsed.get("reason") or "llm_router"),
+        "confidence": parsed.get("confidence"),
+        "router_type": "llm",
+    }
+
+
 def _build_route_trace(
     query: str,
     available_tool_names: Sequence[str],
+    available_routes: Sequence[Dict[str, Any]],
+    chat_history: Optional[List[Any]] = None,
+    llm: Optional[Any] = None,
     forced_intent: Optional[str] = None,
 ) -> Dict[str, Any]:
     classification = _classify_intent(query)
-    intent = (forced_intent or classification["intent"]).strip().lower()
-    allowed = _select_allowed_tools(intent, available_tool_names)
+    forced_route = _forced_route_from_value(forced_intent, available_routes)
+    allowed = _select_allowed_tools(classification["intent"], available_tool_names)
+    if forced_route:
+        return {
+            "query": query,
+            "route": forced_route,
+            "intent": classification["intent"],
+            "forced_intent": forced_intent,
+            "reason": "forced_route",
+            "analysis_hits": classification["analysis_hits"],
+            "code_hits": classification["code_hits"],
+            "discovery_hits": classification["discovery_hits"],
+            "available_tools": list(available_tool_names),
+            "available_routes": list(available_routes),
+            "allowed_tools": allowed,
+            "router_type": "forced",
+        }
+    llm_choice = _llm_route_decision(
+        query=query,
+        chat_history=chat_history,
+        available_routes=available_routes,
+        llm=llm,
+    )
+    route = str((llm_choice or {}).get("route") or "")
+    if not route:
+        llm_choice = _heuristic_route_decision(query, available_routes)
+        route = str(llm_choice.get("route") or "search")
     return {
         "query": query,
-        "intent": intent,
+        "route": route,
+        "intent": classification["intent"],
         "forced_intent": forced_intent,
-        "reason": classification["reason"],
+        "reason": llm_choice.get("reason") or classification["reason"],
+        "confidence": llm_choice.get("confidence"),
         "analysis_hits": classification["analysis_hits"],
         "code_hits": classification["code_hits"],
         "discovery_hits": classification["discovery_hits"],
         "available_tools": list(available_tool_names),
+        "available_routes": list(available_routes),
         "allowed_tools": allowed,
+        "router_type": llm_choice.get("router_type"),
     }
 
 
@@ -444,6 +676,27 @@ def build_analysis_agent_executor(
         preloaded_tools=[],
         system_prompt_override=ANALYSIS_AGENT_PROMPT,
         agent_name="analysis_agent",
+        checkpointer=checkpointer,
+    )
+
+
+def build_direct_answer_agent_executor(
+    *,
+    llm: Optional[Any] = None,
+    verbose: bool = False,
+    return_intermediate_steps: bool = True,
+    checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
+) -> Any:
+    return build_agent_executor(
+        llm=llm,
+        verbose=verbose,
+        return_intermediate_steps=return_intermediate_steps,
+        tool_strategy="granular",
+        include_mcp_tools=False,
+        mcp_modules=None,
+        preloaded_tools=[],
+        system_prompt_override=DIRECT_ANSWER_AGENT_PROMPT,
+        agent_name="direct_answer_agent",
         checkpointer=checkpointer,
     )
 
@@ -657,7 +910,14 @@ def _make_search_agent_evidence_tool(
         allowed_tool_names: Optional[List[str]] = None
         if smart_tool_routing:
             available_names = [getattr(tool, "name", "") for tool in all_tools if getattr(tool, "name", "")]
-            route_trace = _build_route_trace(query, available_names, forced_intent=forced_intent)
+            route_trace = _build_route_trace(
+                query,
+                available_names,
+                [{"route": "search", "agent": "search_agent", "tool_names": available_names}],
+                chat_history=None,
+                llm=llm,
+                forced_intent=forced_intent,
+            )
             allowed_tool_names = route_trace.get("allowed_tools") or None
 
         search_executor = build_search_agent_executor(
@@ -777,6 +1037,7 @@ def _print_route_trace(result: Any) -> None:
     if not isinstance(route, dict):
         return
     print("\nRoute trace:")
+    print(f"- route: {route.get('route')}")
     print(f"- intent: {route.get('intent')}")
     print(f"- reason: {route.get('reason')}")
     print(f"- analysis_hits: {route.get('analysis_hits')}")
@@ -800,12 +1061,15 @@ class AgentQueryGraphState(TypedDict, total=False):
     thread_id: Optional[str]
     checkpointer: Optional[Any]
     all_tools: List[Any]
+    available_routes: List[Dict[str, Any]]
     effective_thread_id: Optional[str]
     search_thread_id: Optional[str]
     analysis_thread_id: Optional[str]
+    direct_answer_thread_id: Optional[str]
     route_trace: Optional[Dict[str, Any]]
     route_type: str
     allowed_tool_names: Optional[List[str]]
+    direct_answer_result: Optional[Dict[str, Any]]
     search_result: Optional[Dict[str, Any]]
     search_artifacts: Dict[str, Any]
     analysis_result: Optional[Dict[str, Any]]
@@ -822,9 +1086,15 @@ def _agent_query_initialize_node(state: AgentQueryGraphState) -> AgentQueryGraph
         enabled_search_methods=state.get("enabled_search_methods"),
     )
     effective_thread_id = _resolve_thread_id(state.get("thread_id"), state.get("checkpointer"))
+    available_names = [getattr(tool, "name", "") for tool in all_tools if getattr(tool, "name", "")]
     return {
         "all_tools": all_tools,
+        "available_routes": _build_available_routes(
+            available_tool_names=available_names,
+            chat_history=state.get("chat_history"),
+        ),
         "effective_thread_id": effective_thread_id,
+        "direct_answer_thread_id": _child_thread_id(effective_thread_id, "direct_answer"),
         "search_thread_id": _child_thread_id(effective_thread_id, "search"),
         "analysis_thread_id": _child_thread_id(effective_thread_id, "analysis"),
     }
@@ -836,18 +1106,40 @@ def _agent_query_route_node(state: AgentQueryGraphState) -> AgentQueryGraphState
     route_type = "search"
     if state.get("smart_tool_routing"):
         available_names = [getattr(tool, "name", "") for tool in state.get("all_tools", []) if getattr(tool, "name", "")]
-        route_trace = _build_route_trace(state["query"], available_names, forced_intent=state.get("forced_intent"))
+        route_trace = _build_route_trace(
+            state["query"],
+            available_names,
+            state.get("available_routes") or [],
+            chat_history=state.get("chat_history"),
+            llm=state.get("llm"),
+            forced_intent=state.get("forced_intent"),
+        )
         allowed_tool_names = route_trace.get("allowed_tools") or None
-        intent = str(route_trace.get("intent") or "").strip().lower()
-        if intent in {"analysis_task", "hybrid"}:
-            route_type = "analysis"
-    elif str(state.get("forced_intent") or "").strip().lower() in {"analysis_task", "hybrid"}:
-        route_type = "analysis"
+        route_type = str(route_trace.get("route") or "search").strip().lower()
+    else:
+        route_trace = _heuristic_route_decision(state["query"], state.get("available_routes") or [])
+        route_type = str(route_trace.get("route") or "search").strip().lower()
     return {
         "route_trace": route_trace,
         "route_type": route_type,
         "allowed_tool_names": allowed_tool_names,
     }
+
+
+def _agent_query_direct_answer_node(state: AgentQueryGraphState) -> AgentQueryGraphState:
+    direct_executor = build_direct_answer_agent_executor(
+        llm=state.get("llm"),
+        verbose=bool(state.get("verbose")),
+        return_intermediate_steps=bool(state.get("return_intermediate_steps", True)),
+        checkpointer=state.get("checkpointer"),
+    )
+    direct_response = _invoke_agent_with_payload_fallback(
+        direct_executor,
+        query=state["query"],
+        chat_history=state.get("chat_history"),
+        config=_agent_config(state.get("direct_answer_thread_id")),
+    )
+    return {"direct_answer_result": direct_response}
 
 
 def _agent_query_search_node(state: AgentQueryGraphState) -> AgentQueryGraphState:
@@ -949,6 +1241,24 @@ def _agent_query_finalize_search_node(state: AgentQueryGraphState) -> AgentQuery
     return {"response": response}
 
 
+def _agent_query_finalize_direct_answer_node(state: AgentQueryGraphState) -> AgentQueryGraphState:
+    if isinstance(state.get("response"), dict) and state["response"]:
+        return {}
+    response: Dict[str, Any] = {
+        "search_result": None,
+        "analysis_result": None,
+        "direct_answer_result": state.get("direct_answer_result"),
+    }
+    final_answer = _extract_final_answer(state.get("direct_answer_result"))
+    if final_answer:
+        response["final_answer"] = final_answer
+    if state.get("route_trace"):
+        response["route_trace"] = state["route_trace"]
+    if state.get("effective_thread_id"):
+        response["thread_id"] = state["effective_thread_id"]
+    return {"response": response}
+
+
 def _agent_query_finalize_analysis_node(state: AgentQueryGraphState) -> AgentQueryGraphState:
     if isinstance(state.get("response"), dict) and state["response"]:
         return {}
@@ -977,9 +1287,11 @@ def _build_agent_query_graph() -> Any:
     graph = StateGraph(AgentQueryGraphState)
     graph.add_node("initialize", _agent_query_initialize_node)
     graph.add_node("route", _agent_query_route_node)
+    graph.add_node("direct_answer", _agent_query_direct_answer_node)
     graph.add_node("search", _agent_query_search_node)
     graph.add_node("extract_search_artifacts", _agent_query_extract_search_artifacts_node)
     graph.add_node("analysis", _agent_query_analysis_node)
+    graph.add_node("finalize_direct_answer", _agent_query_finalize_direct_answer_node)
     graph.add_node("finalize_search", _agent_query_finalize_search_node)
     graph.add_node("finalize_analysis", _agent_query_finalize_analysis_node)
 
@@ -989,10 +1301,13 @@ def _build_agent_query_graph() -> Any:
         "route",
         _agent_query_route_selector,
         {
+            "direct_answer": "direct_answer",
             "search": "search",
             "analysis": "analysis",
         },
     )
+    graph.add_edge("direct_answer", "finalize_direct_answer")
+    graph.add_edge("finalize_direct_answer", END)
     graph.add_edge("search", "extract_search_artifacts")
     graph.add_edge("extract_search_artifacts", "finalize_search")
     graph.add_edge("finalize_search", END)
@@ -1112,10 +1427,17 @@ def stream_agent_query_events(
                         yield {"event": "route_trace", "data": route_trace}
                     route_type = str(payload.get("route_type") or "search")
                     yield {"event": "status", "data": {"stage": f"{route_type}_route_selected"}}
-                    if route_type == "search":
+                    if route_type == "direct_answer":
+                        yield {"event": "status", "data": {"stage": "direct_answer_agent_started"}}
+                    elif route_type == "search":
                         yield {"event": "status", "data": {"stage": "search_agent_started"}}
                     else:
                         yield {"event": "status", "data": {"stage": "analysis_agent_started"}}
+                elif node_name == "direct_answer":
+                    final_answer = _extract_final_answer(payload.get("direct_answer_result"))
+                    if final_answer:
+                        yield {"event": "final_answer", "data": {"answer": final_answer}}
+                    yield {"event": "status", "data": {"stage": "direct_answer_agent_completed"}}
                 elif node_name == "search":
                     yield {"event": "status", "data": {"stage": "search_agent_completed"}}
                     if isinstance(payload.get("response"), dict):
@@ -1159,7 +1481,7 @@ def stream_agent_query_events(
                     if final_answer:
                         yield {"event": "final_answer", "data": {"answer": final_answer}}
                     yield {"event": "status", "data": {"stage": "analysis_agent_completed"}}
-                elif node_name in {"finalize_search", "finalize_analysis"}:
+                elif node_name in {"finalize_direct_answer", "finalize_search", "finalize_analysis"}:
                     response = payload.get("response")
                     if isinstance(response, dict):
                         yield {"event": "completed", "data": response}
