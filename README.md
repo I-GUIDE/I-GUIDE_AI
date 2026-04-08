@@ -112,9 +112,9 @@ export LANGSMITH_ENDPOINT=https://api.smith.langchain.com
 Then start the Flask app normally. The agent graph execution from
 `rag_pipeline.langchain_agent_executor` will show up in LangSmith traces.
 
-## Inspect the agent graph locally
+## Inspect the agent flow locally
 
-This repo includes a helper for the current `AGENT_QUERY_GRAPH`:
+This repo includes a helper for the active orchestration-based agent flow:
 
 ```sh
 python tools/inspect_agent_query_graph.py
@@ -129,11 +129,11 @@ python tools/inspect_agent_query_graph.py --format mermaid
 Write Mermaid to a file:
 
 ```sh
-python tools/inspect_agent_query_graph.py --format mermaid --output outputs/agent_query_graph.mmd
+python tools/inspect_agent_query_graph.py --format mermaid --output outputs/agent_orchestration.mmd
 ```
 
-Write PNG:
+Print JSON:
 
 ```sh
-python tools/inspect_agent_query_graph.py --format png --output outputs/agent_query_graph.png
+python tools/inspect_agent_query_graph.py --format json
 ```
