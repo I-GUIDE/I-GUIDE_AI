@@ -21,6 +21,8 @@ DEFAULT_MCP_MODULES = (
     "spatial_analysis_tools",
     "biomass_tools",
     "image_tools",
+    "notebook_workflow_tools",
+    "generated_notebook_tools",
 )
 DEFAULT_REMOTE_MCP_URL = os.getenv("MCP_SERVER_URL", "http://127.0.0.1:8000/mcp")
 
