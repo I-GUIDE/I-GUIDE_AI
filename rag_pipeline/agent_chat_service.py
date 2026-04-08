@@ -174,7 +174,8 @@ def run_agent_chat(
     file_ids: Optional[Sequence[Any]] = None,
     verbose: bool = False,
 ) -> Dict[str, Any]:
-    effective_memory_id = memory_id
+    effective_thread_id = thread_id or memory_id
+    effective_memory_id = memory_id or thread_id
     memory_doc: Optional[Mapping[str, Any]] = None
     memory_warning: Optional[str] = None
     normalized_file_paths = _normalize_file_paths(file_paths)
@@ -210,7 +211,7 @@ def run_agent_chat(
         enabled_search_methods=normalized_enabled_search_methods,
         smart_tool_routing=smart_tool_routing,
         forced_intent=forced_intent,
-        thread_id=thread_id,
+        thread_id=effective_thread_id,
     )
 
     answer = _extract_agent_answer(result)
@@ -233,7 +234,7 @@ def run_agent_chat(
         "answer": answer,
         "message_id": message_id,
         "memory_id": effective_memory_id,
-        "thread_id": result.get("thread_id") or thread_id,
+        "thread_id": result.get("thread_id") or effective_thread_id,
         "file_paths": normalized_file_paths,
         "file_ids": normalized_file_ids,
         "enabled_search_methods": normalized_enabled_search_methods,
@@ -264,7 +265,8 @@ def stream_agent_chat_events(
     file_ids: Optional[Sequence[Any]] = None,
     verbose: bool = False,
 ) -> Generator[Dict[str, Any], None, None]:
-    effective_memory_id = memory_id
+    effective_thread_id = thread_id or memory_id
+    effective_memory_id = memory_id or thread_id
     memory_doc: Optional[Mapping[str, Any]] = None
     memory_warning: Optional[str] = None
     normalized_file_paths = _normalize_file_paths(file_paths)
@@ -276,7 +278,7 @@ def stream_agent_chat_events(
         "data": {
             "stage": "agent_chat_started",
             "memory_id": effective_memory_id,
-            "thread_id": thread_id,
+            "thread_id": effective_thread_id,
             "file_paths": normalized_file_paths,
             "file_ids": normalized_file_ids,
             "enabled_search_methods": normalized_enabled_search_methods,
@@ -334,7 +336,7 @@ def stream_agent_chat_events(
         enabled_search_methods=normalized_enabled_search_methods,
         smart_tool_routing=smart_tool_routing,
         forced_intent=forced_intent,
-        thread_id=thread_id,
+        thread_id=effective_thread_id,
     ):
         if event.get("event") == "completed" and isinstance(event.get("data"), Mapping):
             completed_response = dict(event["data"])
@@ -374,7 +376,7 @@ def stream_agent_chat_events(
         "answer": answer,
         "message_id": message_id,
         "memory_id": effective_memory_id,
-        "thread_id": (completed_response or {}).get("thread_id") or thread_id,
+        "thread_id": (completed_response or {}).get("thread_id") or effective_thread_id,
         "file_paths": normalized_file_paths,
         "file_ids": normalized_file_ids,
         "enabled_search_methods": normalized_enabled_search_methods,
