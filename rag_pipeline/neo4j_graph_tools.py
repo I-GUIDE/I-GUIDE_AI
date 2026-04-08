@@ -28,10 +28,46 @@ log = logging.getLogger("neo4j_graph_tools")
 
 
 # ---------------------------------------------------------------------------
+# Schema constants — update these when the Neo4j schema changes
+# ---------------------------------------------------------------------------
+# Last verified: 2026-04 against Neo4j instance at 149.165.155.135
+#
+# To add a new resource type: add its label to _RESOURCE_LABELS
+# To add a new internal/infra node: add its label to _INTERNAL_LABELS
+# These can also be overridden at runtime via env vars without a code change:
+#   NEO4J_RESOURCE_LABELS=Notebook,Dataset,Publication,...
+#   NEO4J_INTERNAL_LABELS=Contributor,User,Alias,...
+
+_DEFAULT_RESOURCE_LABELS = {
+    "Notebook", "Dataset", "Publication", "Oer",
+    "Documentation", "Map", "Code", "Collection",
+}
+
+_DEFAULT_INTERNAL_LABELS = {
+    "Contributor", "User", "Alias", "Temp", "Notification",
+}
+
+
+def _get_resource_labels() -> set:
+    env_val = os.getenv("NEO4J_RESOURCE_LABELS", "").strip()
+    if env_val:
+        return {l.strip() for l in env_val.split(",") if l.strip()}
+    return _DEFAULT_RESOURCE_LABELS
+
+
+def _get_internal_labels() -> set:
+    env_val = os.getenv("NEO4J_INTERNAL_LABELS", "").strip()
+    if env_val:
+        return {l.strip() for l in env_val.split(",") if l.strip()}
+    return _DEFAULT_INTERNAL_LABELS
+
+
+# ---------------------------------------------------------------------------
 # Cypher constants
 # ---------------------------------------------------------------------------
 
 # Shared score expression reused across queries for consistency.
+# Uses coalesce throughout so nodes without click_count still score correctly.
 _SCORE_EXPR = (
     "coalesce(log10(toFloat(coalesce(r.click_count, 0)) + 1), 0) * 0.3 "
     "+ coalesce(toFloat(count { (r)--() }), 0) * 0.05"
@@ -82,9 +118,12 @@ ORDER BY score DESC
 LIMIT $limit
 """.replace("{SCORE_EXPR}", _SCORE_EXPR)
 
+# Matches against node labels directly — automatically picks up new resource
+# types without a code change as long as _RESOURCE_LABELS is kept current.
 _CYPHER_BY_RESOURCE_TYPE = """
 MATCH (r)
-WHERE toLower(coalesce(r.element_type, r.`resource-type`, '')) CONTAINS toLower($rtype)
+WHERE any(label IN labels(r) WHERE toLower(label) CONTAINS toLower($rtype))
+  AND NOT any(label IN labels(r) WHERE label IN $internal_labels)
 WITH r,
      {SCORE_EXPR} AS score
 RETURN r AS node, score
@@ -111,6 +150,8 @@ RETURN r AS node, score, col.title AS collection_name
 ORDER BY score DESC
 LIMIT $limit
 """.replace("{SCORE_EXPR}", _SCORE_EXPR)
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -296,7 +337,13 @@ def build_tool_query(
     elif pattern_name == "by_tag":
         params["tag"] = captured.get("tag", "")
     elif pattern_name == "by_resource_type":
-        params["rtype"] = captured.get("rtype", "")
+        rtype = captured.get("rtype", "")
+        # Labels are singular (Notebook, Dataset) but queries use plurals (notebooks, datasets)
+        # Strip trailing 's' so "notebooks" matches label "Notebook"
+        if rtype.endswith("s") and not rtype.endswith("ss"):
+            rtype = rtype[:-1]
+        params["rtype"] = rtype
+        params["internal_labels"] = list(_get_internal_labels())
     elif pattern_name == "related_to":
         params["title"] = captured.get("title", "")
     elif pattern_name == "in_collection":
