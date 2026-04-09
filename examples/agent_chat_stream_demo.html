@@ -453,7 +453,8 @@
 
       wrapper.appendChild(header);
       wrapper.appendChild(body);
-      toolTraceEl.prepend(wrapper);
+      toolTraceEl.appendChild(wrapper);
+      toolTraceEl.scrollTop = toolTraceEl.scrollHeight;
     }
 
     function renderDocRefs() {
