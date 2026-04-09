@@ -132,7 +132,8 @@ ANALYSIS_AGENT_PROMPT = (
     "1. Use only evidence provided in the conversation context.\n"
     "2. Cite only doc_ids that appear in the evidence.\n"
     "3. If evidence is insufficient, state uncertainty clearly.\n"
-    "4. Never invent titles, sources, or citation ids."
+    "4. Never invent titles, sources, or citation ids.\n"
+    "5. If the user would benefit from executable code and the question cannot be fully resolved with the existing evidence alone, call `code_agent_answer`."
 )
 
 CODE_AGENT_PROMPT = (
@@ -141,8 +142,9 @@ CODE_AGENT_PROMPT = (
     "Rules:\n"
     "1. Use the `search_agent_evidence` tool to fetch domain-specific references before finalizing technical details.\n"
     "2. Ground domain facts and citations only on tool evidence.\n"
-    "3. Output runnable code snippets when possible.\n"
-    "4. If evidence is insufficient, say what is missing."
+    "3. When appropriate, output a runnable fenced code block.\n"
+    "4. Include a short `Dependencies:` section listing required packages or system dependencies.\n"
+    "5. If evidence is insufficient, say what is missing."
 )
 
 DIRECT_ANSWER_AGENT_PROMPT = (
@@ -164,8 +166,9 @@ ORCHESTRATOR_AGENT_PROMPT = (
     "2. If direct memory is insufficient, decide whether to call `search_agent_evidence`, `analysis_agent_answer`, or both.\n"
     "3. When external evidence is needed, prefer calling `search_agent_evidence` before `analysis_agent_answer`.\n"
     "4. Do not invent facts not grounded in chat history or tool outputs.\n"
-    "5. Do not assume a local file exists unless attached/uploaded file context is explicitly present.\n"
-    "6. Produce a final answer for the user after using the minimum sufficient set of tools."
+    "5. If attached/uploaded file context is explicitly present, you may use file tools directly yourself.\n"
+    "6. Do not assume a local file exists unless attached/uploaded file context is explicitly present.\n"
+    "7. Produce a final answer for the user after using the minimum sufficient set of tools."
 )
 
 DEFAULT_CHECKPOINTER = InMemorySaver()
@@ -879,6 +882,13 @@ def _extract_tool_result_json(artifacts: Dict[str, Any], tool_name: str) -> Opti
     return None
 
 
+def _nested_called_tools_from_analysis_payload(artifacts: Dict[str, Any]) -> List[str]:
+    payload = _extract_tool_result_json(artifacts, "analysis_agent_answer") or {}
+    analysis_result = payload.get("analysis_result")
+    nested_artifacts = _extract_search_artifacts(analysis_result if isinstance(analysis_result, dict) else {})
+    return [str(item.get("name") or "") for item in nested_artifacts.get("tool_calls") or []]
+
+
 def _build_orchestration_trace(
     *,
     query: str,
@@ -890,10 +900,16 @@ def _build_orchestration_trace(
     tool_calls = artifacts.get("tool_calls") or []
     called_tools = [str(item.get("name") or "") for item in tool_calls]
     called_set = set(called_tools)
+    nested_analysis_called_tools = _nested_called_tools_from_analysis_payload(artifacts)
+    nested_analysis_called_set = set(nested_analysis_called_tools)
     if "answer_from_memory" in called_set:
         memory_payload = _extract_tool_result_json(artifacts, "answer_from_memory") or {}
         if memory_payload.get("can_answer") and memory_payload.get("answer"):
             route = "direct_answer"
+        elif "search_agent_evidence" in called_set and "analysis_agent_answer" in called_set and "code_agent_answer" in nested_analysis_called_set:
+            route = "search_then_analysis_with_code"
+        elif "analysis_agent_answer" in called_set and "code_agent_answer" in nested_analysis_called_set:
+            route = "analysis_with_code"
         elif "search_agent_evidence" in called_set and "analysis_agent_answer" in called_set:
             route = "search_then_analysis"
         elif "search_agent_evidence" in called_set:
@@ -902,6 +918,10 @@ def _build_orchestration_trace(
             route = "analysis"
         else:
             route = "direct_answer_attempted"
+    elif "search_agent_evidence" in called_set and "analysis_agent_answer" in called_set and "code_agent_answer" in nested_analysis_called_set:
+        route = "search_then_analysis_with_code"
+    elif "analysis_agent_answer" in called_set and "code_agent_answer" in nested_analysis_called_set:
+        route = "analysis_with_code"
     elif "search_agent_evidence" in called_set and "analysis_agent_answer" in called_set:
         route = "search_then_analysis"
     elif "search_agent_evidence" in called_set:
@@ -915,6 +935,7 @@ def _build_orchestration_trace(
         "route": route,
         "available_agents": list(available_agent_names),
         "called_tools": called_tools,
+        "analysis_called_tools": nested_analysis_called_tools,
         "chat_history_available": bool(chat_history),
     }
 
@@ -958,6 +979,256 @@ def _extract_search_artifacts(result: Any) -> Dict[str, Any]:
                 }
             )
     return artifacts
+
+
+def _message_role(msg: Any) -> str:
+    if isinstance(msg, dict):
+        role = msg.get("role") or msg.get("type")
+        if isinstance(role, str) and role.strip():
+            return role.strip()
+    role = getattr(msg, "type", None)
+    if isinstance(role, str) and role.strip():
+        return role.strip()
+    role = getattr(msg, "role", None)
+    if isinstance(role, str) and role.strip():
+        return role.strip()
+    return msg.__class__.__name__.replace("Message", "").lower() or "message"
+
+
+def _message_text(msg: Any) -> str:
+    content = getattr(msg, "content", None)
+    if isinstance(msg, dict) and content is None:
+        content = msg.get("content")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+            else:
+                text = getattr(item, "text", None)
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+        return "\n".join(parts).strip()
+    return ""
+
+
+def _parse_tool_result_payload(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    content = item.get("content")
+    if not isinstance(content, str):
+        return None
+    try:
+        parsed = json.loads(content)
+    except Exception:
+        return None
+    if isinstance(parsed, dict):
+        return parsed
+    return None
+
+
+def _build_search_payload_interactions(
+    payload: Dict[str, Any],
+    *,
+    agent_name: str,
+    parent_tool_name: str,
+    sequence_start: int,
+) -> List[Dict[str, Any]]:
+    interactions: List[Dict[str, Any]] = []
+    sequence = sequence_start
+
+    route_trace = payload.get("route_trace")
+    if isinstance(route_trace, dict):
+        interactions.append(
+            {
+                "sequence": sequence,
+                "kind": "agent_route_decision",
+                "agent": agent_name,
+                "parent_tool": parent_tool_name,
+                "route_trace": route_trace,
+            }
+        )
+        sequence += 1
+
+    for call in payload.get("search_agent_tool_calls") or []:
+        interactions.append(
+            {
+                "sequence": sequence,
+                "kind": "llm_tool_decision",
+                "agent": agent_name,
+                "parent_tool": parent_tool_name,
+                "tool_name": call.get("name", "unknown_tool"),
+                "tool_args": call.get("args", {}),
+            }
+        )
+        sequence += 1
+
+    for result in payload.get("search_agent_tool_results") or []:
+        interactions.append(
+            {
+                "sequence": sequence,
+                "kind": "tool_result",
+                "agent": agent_name,
+                "parent_tool": parent_tool_name,
+                "tool_name": result.get("name", "unknown_tool"),
+                "tool_call_id": result.get("tool_call_id"),
+                "content": result.get("content", ""),
+            }
+        )
+        sequence += 1
+
+    summary = payload.get("search_agent_summary")
+    if isinstance(summary, str) and summary.strip():
+        interactions.append(
+            {
+                "sequence": sequence,
+                "kind": "llm_message",
+                "agent": agent_name,
+                "parent_tool": parent_tool_name,
+                "role": "assistant",
+                "content": summary.strip(),
+            }
+        )
+
+    return interactions
+
+
+def _build_llm_interaction_trace(
+    result: Any,
+    *,
+    agent_name: str,
+    sequence_start: int = 1,
+) -> List[Dict[str, Any]]:
+    if not isinstance(result, dict):
+        return []
+
+    messages = result.get("messages")
+    if not isinstance(messages, list):
+        return []
+
+    interactions: List[Dict[str, Any]] = []
+    sequence = sequence_start
+
+    for index, msg in enumerate(messages):
+        role = _message_role(msg)
+        content = _message_text(msg)
+        tool_calls = getattr(msg, "tool_calls", None)
+        if isinstance(msg, dict) and tool_calls is None:
+            tool_calls = msg.get("tool_calls")
+
+        if isinstance(tool_calls, list) and tool_calls:
+            interactions.append(
+                {
+                    "sequence": sequence,
+                    "kind": "llm_tool_decision",
+                    "agent": agent_name,
+                    "message_index": index,
+                    "role": role,
+                    "content": content,
+                    "tool_calls": [
+                        {
+                            "name": call.get("name", "unknown_tool"),
+                            "args": call.get("args", {}),
+                        }
+                        for call in tool_calls
+                    ],
+                }
+            )
+            sequence += 1
+            continue
+
+        name = getattr(msg, "name", None)
+        tool_call_id = getattr(msg, "tool_call_id", None)
+        if isinstance(msg, dict):
+            if name is None:
+                name = msg.get("name")
+            if tool_call_id is None:
+                tool_call_id = msg.get("tool_call_id")
+
+        if name and tool_call_id:
+            payload = _parse_tool_result_payload(
+                {
+                    "name": str(name),
+                    "tool_call_id": str(tool_call_id),
+                    "content": content,
+                }
+            )
+            tool_name = str(name)
+            if isinstance(payload, dict):
+                if tool_name == "search_agent_evidence":
+                    nested = _build_search_payload_interactions(
+                        payload,
+                        agent_name="search_agent",
+                        parent_tool_name=tool_name,
+                        sequence_start=sequence,
+                    )
+                    interactions.extend(nested)
+                    if nested:
+                        sequence = nested[-1]["sequence"] + 1
+                elif tool_name == "analysis_agent_answer":
+                    analysis_result = payload.get("analysis_result")
+                    nested = _build_llm_interaction_trace(
+                        analysis_result,
+                        agent_name="analysis_agent",
+                        sequence_start=sequence,
+                    )
+                    interactions.extend(nested)
+                    if nested:
+                        sequence = nested[-1]["sequence"] + 1
+                elif tool_name == "code_agent_answer":
+                    code_result = payload.get("code_result")
+                    nested = _build_llm_interaction_trace(
+                        code_result,
+                        agent_name="code_agent",
+                        sequence_start=sequence,
+                    )
+                    interactions.extend(nested)
+                    if nested:
+                        sequence = nested[-1]["sequence"] + 1
+                elif tool_name == "answer_from_memory":
+                    interactions.append(
+                        {
+                            "sequence": sequence,
+                            "kind": "memory_decision",
+                            "agent": agent_name,
+                            "tool_name": tool_name,
+                            "can_answer": payload.get("can_answer"),
+                            "reason": payload.get("reason"),
+                            "answer": payload.get("answer", ""),
+                        }
+                    )
+                    sequence += 1
+
+            interactions.append(
+                {
+                    "sequence": sequence,
+                    "kind": "tool_result",
+                    "agent": agent_name,
+                    "message_index": index,
+                    "tool_name": tool_name,
+                    "tool_call_id": str(tool_call_id),
+                    "content": content,
+                }
+            )
+            sequence += 1
+            continue
+
+        if content:
+            interactions.append(
+                {
+                    "sequence": sequence,
+                    "kind": "llm_message",
+                    "agent": agent_name,
+                    "message_index": index,
+                    "role": role,
+                    "content": content,
+                }
+            )
+            sequence += 1
+
+    return interactions
 
 
 def _build_search_evidence_payload(
@@ -1148,6 +1419,13 @@ def _make_analysis_agent_answer_tool(
     verbose: bool,
     return_intermediate_steps: bool,
     chat_history: Optional[List[Any]],
+    tool_strategy: str = "granular",
+    include_mcp_tools: bool = False,
+    mcp_modules: Optional[List[str]] = None,
+    enabled_search_methods: Optional[List[str]] = None,
+    smart_tool_routing: bool = True,
+    forced_intent: Optional[str] = None,
+    allow_file_tools: bool = False,
     thread_id: Optional[str] = None,
     checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
 ) -> Any:
@@ -1158,10 +1436,81 @@ def _make_analysis_agent_answer_tool(
             "LangChain is not installed. Add `langchain-core` (or langchain) to dependencies."
         ) from exc
 
-    analysis_executor = build_analysis_agent_executor(
+    search_invocations: List[Dict[str, Any]] = []
+    code_search_invocations: List[Dict[str, Any]] = []
+    search_tool = _make_search_agent_evidence_tool(
         llm=llm,
         verbose=verbose,
         return_intermediate_steps=return_intermediate_steps,
+        tool_strategy=tool_strategy,
+        include_mcp_tools=include_mcp_tools,
+        mcp_modules=mcp_modules,
+        enabled_search_methods=enabled_search_methods,
+        smart_tool_routing=smart_tool_routing,
+        forced_intent=forced_intent,
+        search_invocations=search_invocations,
+        allow_file_tools=allow_file_tools,
+        thread_id=_child_thread_id(thread_id, "analysis_search"),
+        checkpointer=checkpointer,
+    )
+
+    def code_agent_answer(query: str, search_evidence_json: str = "") -> str:
+        nested_thread_id = _child_thread_id(thread_id, "code_tool")
+        code_query = query
+        if search_evidence_json:
+            code_query = (
+                f"{query}\n\n"
+                "Relevant search evidence is provided below as JSON. Use it when writing code and dependencies.\n"
+                f"{search_evidence_json}"
+            )
+        code_response = run_code_agent_query(
+            code_query,
+            chat_history=chat_history,
+            llm=llm,
+            verbose=verbose,
+            return_intermediate_steps=return_intermediate_steps,
+            tool_strategy=tool_strategy,
+            include_mcp_tools=include_mcp_tools,
+            mcp_modules=mcp_modules,
+            smart_tool_routing=smart_tool_routing,
+            forced_intent=forced_intent,
+            thread_id=nested_thread_id,
+            checkpointer=checkpointer,
+        )
+        code_search_invocations.extend(code_response.get("code_agent_search_invocations") or [])
+        return json.dumps(
+            {
+                "answer": code_response.get("final_answer", ""),
+                "code_result": code_response.get("code_result"),
+                "code_agent_search_invocations": code_response.get("code_agent_search_invocations") or [],
+            },
+            ensure_ascii=True,
+            default=str,
+        )
+
+    code_tool = StructuredTool.from_function(
+        func=code_agent_answer,
+        name="code_agent_answer",
+        description="Use CodeAgent to provide runnable code and a Dependencies section when analysis alone is insufficient.",
+    )
+
+    analysis_tools: List[Any] = [search_tool, code_tool]
+    if include_mcp_tools:
+        analysis_tools = [
+            *make_langchain_mcp_tools(include_modules=mcp_modules),
+            *analysis_tools,
+        ]
+
+    analysis_executor = build_agent_executor(
+        llm=llm,
+        verbose=verbose,
+        return_intermediate_steps=return_intermediate_steps,
+        tool_strategy="granular",
+        include_mcp_tools=False,
+        mcp_modules=None,
+        preloaded_tools=analysis_tools,
+        system_prompt_override=ANALYSIS_AGENT_PROMPT,
+        agent_name="analysis_agent",
         checkpointer=checkpointer,
     )
 
@@ -1191,6 +1540,8 @@ def _make_analysis_agent_answer_tool(
             {
                 "answer": answer,
                 "analysis_result": analysis_response,
+                "analysis_agent_search_invocations": search_invocations,
+                "analysis_agent_code_search_invocations": code_search_invocations,
             },
             ensure_ascii=True,
             default=str,
@@ -1308,6 +1659,8 @@ def _collect_orchestration_tools(
 ) -> List[Any]:
     tools: List[Any] = []
     allow_file_tools = _query_has_file_context(query)
+    if allow_file_tools:
+        tools.extend(make_langchain_file_tools())
     if chat_history:
         tools.append(_make_answer_from_memory_tool(llm=llm, chat_history=chat_history))
     tools.append(
@@ -1322,7 +1675,7 @@ def _collect_orchestration_tools(
             smart_tool_routing=smart_tool_routing,
             forced_intent=forced_intent,
             search_invocations=[],
-            allow_file_tools=allow_file_tools,
+            allow_file_tools=False,
             thread_id=_child_thread_id(thread_id, "search"),
             checkpointer=checkpointer,
         )
@@ -1333,6 +1686,13 @@ def _collect_orchestration_tools(
             verbose=verbose,
             return_intermediate_steps=return_intermediate_steps,
             chat_history=chat_history,
+            tool_strategy=tool_strategy,
+            include_mcp_tools=include_mcp_tools,
+            mcp_modules=mcp_modules,
+            enabled_search_methods=enabled_search_methods,
+            smart_tool_routing=smart_tool_routing,
+            forced_intent=forced_intent,
+            allow_file_tools=allow_file_tools,
             thread_id=_child_thread_id(thread_id, "analysis"),
             checkpointer=checkpointer,
         )
@@ -1512,6 +1872,22 @@ def stream_agent_query_events(
             orchestration_result=orchestration_result if isinstance(orchestration_result, dict) else {},
         )
         yield {"event": "route_trace", "data": route_trace}
+        yield {
+            "event": "decision",
+            "data": {
+                "agent": "orchestrator_agent",
+                "query": query,
+                "route": route_trace.get("route"),
+                "called_tools": route_trace.get("called_tools") or [],
+                "analysis_called_tools": route_trace.get("analysis_called_tools") or [],
+                "chat_history_available": route_trace.get("chat_history_available"),
+            },
+        }
+        for interaction in _build_llm_interaction_trace(
+            orchestration_result if isinstance(orchestration_result, dict) else {},
+            agent_name="orchestrator_agent",
+        ):
+            yield {"event": "llm_interaction", "data": interaction}
         for tool_call in artifacts.get("tool_calls") or []:
             yield {"event": "tool_call", "data": tool_call}
         for tool_result in artifacts.get("tool_results") or []:
