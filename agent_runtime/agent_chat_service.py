@@ -234,11 +234,14 @@ def run_agent_chat(
         "message_id": message_id,
         "memory_id": effective_memory_id,
         "thread_id": result.get("thread_id") or thread_id,
+        "agent_role": result.get("agent_role"),
+        "intent": result.get("intent"),
         "file_paths": normalized_file_paths,
         "file_ids": normalized_file_ids,
         "enabled_search_methods": normalized_enabled_search_methods,
         "use_persistent_memory": use_persistent_memory,
         "route_trace": result.get("route_trace") or {},
+        "artifacts": result.get("artifacts") or {},
         "agent_result": _json_safe(result),
     }
     if memory_warning:
@@ -375,11 +378,14 @@ def stream_agent_chat_events(
         "message_id": message_id,
         "memory_id": effective_memory_id,
         "thread_id": (completed_response or {}).get("thread_id") or thread_id,
+        "agent_role": (completed_response or {}).get("agent_role"),
+        "intent": (completed_response or {}).get("intent"),
         "file_paths": normalized_file_paths,
         "file_ids": normalized_file_ids,
         "enabled_search_methods": normalized_enabled_search_methods,
         "use_persistent_memory": use_persistent_memory,
         "route_trace": (completed_response or {}).get("route_trace") or {},
+        "artifacts": (completed_response or {}).get("artifacts") or {},
         "agent_result": _json_safe(completed_response or {}),
     }
     if memory_warning:
