@@ -15,9 +15,10 @@ def rag_tool(
     extra_state: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
-    LangChain-friendly wrapper around the existing RAG pipeline orchestration.
+    Compatibility wrapper around the legacy RAG pipeline orchestration.
 
-    Returns a compact dict aligned with the `/query` API payload shape.
+    This remains available as a fallback tool, but the LangGraph runtime now
+    prefers granular tools and explicit graph nodes.
     """
     result = run_pipeline(
         user_input=query,
@@ -84,7 +85,7 @@ def make_langchain_rag_tool() -> Any:
         func=rag_tool_json,
         name="rag_tool",
         description=(
-            "Run the full RAG pipeline for a user query. "
+            "Compatibility tool that runs the legacy full RAG pipeline for a user query. "
             "Inputs: query, optional memory_id, session_context, params, recent_k, extra_state. "
             "Returns JSON string with answer, citations, retrieval steps, and final state."
         ),
