@@ -9,7 +9,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from rag_pipeline.langchain_agent_executor import AGENT_QUERY_GRAPH
+from agent_runtime.langchain_agent_executor import AGENT_QUERY_GRAPH
 
 
 def main() -> None:

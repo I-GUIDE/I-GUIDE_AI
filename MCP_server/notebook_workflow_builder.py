@@ -21,7 +21,7 @@ def _ensure_repo_root_on_path() -> Path:
 
 REPO_ROOT = _ensure_repo_root_on_path()
 
-from rag_pipeline.agent_file_store import get_file_record, resolve_file_id, storage_root
+from agent_runtime.file_store import get_file_record, resolve_file_id, storage_root
 
 
 ENTRYPOINT_PRIORITY = ("run_workflow", "main", "run")
@@ -238,4 +238,3 @@ def build_notebook_workflow_artifacts(
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=True, indent=2), encoding="utf-8")
     manifest["manifest_path"] = str(manifest_path)
     return manifest
-

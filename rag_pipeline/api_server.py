@@ -9,8 +9,8 @@ from flask import Flask, Response, jsonify, request, send_file, stream_with_cont
 from flask_cors import CORS
 from flasgger import Swagger
 
-from .agent_file_store import require_file_record, resolve_file_id, save_uploaded_file
-from .agent_chat_service import run_agent_chat, stream_agent_chat_events
+from agent_runtime.agent_chat_service import run_agent_chat, stream_agent_chat_events
+from agent_runtime.file_store import require_file_record, resolve_file_id, save_uploaded_file
 from .pipeline import run_pipeline
 
 app = Flask(__name__)

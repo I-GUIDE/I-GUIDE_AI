@@ -4,7 +4,7 @@ import argparse
 import sys
 
 try:
-    from rag_pipeline.langchain_agent_executor import run_agent_query
+    from agent_runtime.langchain_agent_executor import run_agent_query
 except Exception:
     from langchain_agent_executor import run_agent_query
 
