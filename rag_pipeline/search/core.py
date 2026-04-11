@@ -17,12 +17,12 @@ import logging
 import os
 from typing import Any, List, MutableMapping
 
-from .opengeodata_search import retrieve_opengeodata
-from .search_keyword import retrieve_keyword
-from .search_neo4j import retrieve_neo4j          # basic keyword fallback, kept for reference
-from .semantic_search import retrieve_semantic
-from .spatial_search import retrieve_spatial
-from .state import (
+from .opengeodata import retrieve_opengeodata
+from .keyword import retrieve_keyword
+from .neo4j import retrieve_neo4j          # basic keyword fallback, kept for reference
+from .semantic import retrieve_semantic
+from .spatial import retrieve_spatial
+from ..state import (
     AgentState,
     RoutingDecision,
     ensure_state_shapes,
@@ -30,13 +30,13 @@ from .state import (
     merge_retrieval,
     summarize_evidence,
 )
-from .search_utils import get_logger
+from .utils import get_logger
 
 logger = get_logger("search_core")
 
 # Neo4j agent (3-tier: pattern tools → Text2Cypher → keyword fallback)
 try:
-    from .search_agents import get_neo4j_agent_results
+    from .agents import get_neo4j_agent_results
     NEO4J_AGENT_AVAILABLE = True
 except ImportError as exc:
     logger.warning("Neo4j agent search unavailable: %s", exc)
@@ -82,7 +82,7 @@ def _llm_route(query: str, decisions: List[RoutingDecision]) -> tuple[bool, bool
 
     if use_llm_routing:
         try:
-            from .router_llm import LLMRouter, ModuleRegistry
+            from ..router_llm import LLMRouter, ModuleRegistry
             registry = ModuleRegistry()
             router = LLMRouter(registry=registry)
             # Read decision directly — plan.chosen_modules filters by registry
@@ -117,7 +117,7 @@ def _llm_route(query: str, decisions: List[RoutingDecision]) -> tuple[bool, bool
 
     # Simple heuristic fallback — uses pattern detection so author/org/tag
     # queries still trigger graph search even when the LLM router is unavailable
-    from .neo4j_graph_tools import detect_pattern
+    from .neo4j_graph_tools import detect_pattern  # noqa: F811
     use_graph = detect_pattern(query) is not None
     use_spatial = False
     _record_decision(decisions, "heuristic_routing", "LLM routing disabled or errored")

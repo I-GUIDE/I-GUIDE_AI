@@ -5,8 +5,8 @@ from typing import Any, Dict, List, MutableMapping, Optional
 
 from opensearchpy import OpenSearch
 
-from .search_utils import get_logger, getenv, normalize_source_fields, safe_score
-from .state import EvidenceEntry, ensure_state_shapes, get_query_text, merge_retrieval
+from .utils import get_logger, getenv, normalize_source_fields, safe_score
+from ..state import EvidenceEntry, ensure_state_shapes, get_query_text, merge_retrieval
 
 log = get_logger("search_keyword")
 

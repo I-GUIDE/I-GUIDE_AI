@@ -17,7 +17,7 @@ os.environ["ES_INDEX"] = os.environ["OPENSEARCH_INDEX"]
 # --- Import the pipeline modules ---
 from rag_pipeline.state import ensure_state_shapes, summarize_evidence
 from rag_pipeline.routing import rag_pipeline
-import rag_pipeline.search_core as search_core
+import rag_pipeline.search.core as search_core
 
 # Optional: disable retrievers if some services are down
 # (Uncomment only if you see connection errors)

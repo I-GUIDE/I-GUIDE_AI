@@ -5,7 +5,7 @@ from typing import Any, MutableMapping
 
 from .generation import run_generation
 from .reranker_llm import rerank_evidence_with_llm
-from .search_core import run_retrieval
+from .search import run_retrieval
 from .state import AgentState, ensure_state_shapes
 
 logger = logging.getLogger(__name__)

@@ -14,8 +14,8 @@ except Exception:  # pragma: no cover - optional dependency
 from opensearchpy import OpenSearch
 from dotenv import load_dotenv
 
-from .search_utils import get_logger, getenv, normalize_source_fields, safe_score
-from .state import EvidenceEntry, ensure_state_shapes, get_query_text, merge_retrieval
+from .utils import get_logger, getenv, normalize_source_fields, safe_score
+from ..state import EvidenceEntry, ensure_state_shapes, get_query_text, merge_retrieval
 
 load_dotenv()
 

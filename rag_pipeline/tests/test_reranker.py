@@ -2,7 +2,7 @@
 from pprint import pprint
 
 from rag_pipeline.memory_module import initialize_state
-from rag_pipeline.search_core import run_retrieval
+from rag_pipeline.search.core import run_retrieval
 from rag_pipeline.reranker import rerank_evidence_with_colbert
 
 def summarize(label, docs):

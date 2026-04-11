@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import logging
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Sequence, Tuple
-from .llm_utils import call_llm
+from ..llm_utils import call_llm
 
 import requests
 from requests.adapters import HTTPAdapter, Retry
@@ -21,8 +21,8 @@ try:  # pragma: no cover - optional dependency
 except Exception:  # pragma: no cover
     dotenv_values = None  # type: ignore
 
-from .search_utils import get_logger
-from .state import EvidenceEntry, ensure_state_shapes, get_query_text, merge_retrieval
+from .utils import get_logger
+from ..state import EvidenceEntry, ensure_state_shapes, get_query_text, merge_retrieval
 
 logger = get_logger("opengeodata_search")
 
