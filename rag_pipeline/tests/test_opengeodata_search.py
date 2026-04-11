@@ -46,7 +46,7 @@ SAMPLE_PAYLOAD = {
 }
 
 
-@patch("rag_pipeline.opengeodata_search.run_opengeodata")
+@patch("rag_pipeline.search.opengeodata.run_opengeodata")
 def test_get_opengeodata_results_normalizes_assets(mock_run):
     mock_run.return_value = SAMPLE_PAYLOAD
     hits = get_opengeodata_results("water datasets", limit=5)
@@ -57,7 +57,7 @@ def test_get_opengeodata_results_normalizes_assets(mock_run):
     assert hits[0]["_score"] > hits[1]["_score"]
 
 
-@patch("rag_pipeline.opengeodata_search.run_opengeodata")
+@patch("rag_pipeline.search.opengeodata.run_opengeodata")
 def test_run_opengeodata_search_merges_into_state(mock_run):
     mock_run.return_value = SAMPLE_PAYLOAD
     state = ensure_state_shapes({"query_information": {"raw_text": "water datasets"}, "session_context": {}})
@@ -69,14 +69,14 @@ def test_run_opengeodata_search_merges_into_state(mock_run):
     assert docs[0]["document"]["doc_id"] == "asset-1"
 
 
-@patch("rag_pipeline.opengeodata_search.run_opengeodata")
+@patch("rag_pipeline.search.opengeodata.run_opengeodata")
 def test_get_opengeodata_results_handles_errors(mock_run):
     mock_run.side_effect = OpenGeoDataError("failure")
     hits = get_opengeodata_results("water")
     assert hits == []
 
 
-@patch("rag_pipeline.opengeodata_search.run_opengeodata")
+@patch("rag_pipeline.search.opengeodata.run_opengeodata")
 def test_get_opengeodata_results_includes_nl_block(mock_run, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("OPENAI_API_BASE", "https://example.com/api")

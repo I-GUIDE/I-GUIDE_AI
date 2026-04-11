@@ -87,8 +87,8 @@ def test_spatial_routing_to_generation_e2e(monkeypatch):
         print("   [Test] Suppressing semantic search to isolate spatial path")
         return []
     
-    monkeypatch.setattr("rag_pipeline.search_keyword.retrieve_keyword", empty_keyword)
-    monkeypatch.setattr("rag_pipeline.semantic_search.retrieve_semantic", empty_semantic)
+    monkeypatch.setattr("rag_pipeline.search.keyword.retrieve_keyword", empty_keyword)
+    monkeypatch.setattr("rag_pipeline.search.semantic.retrieve_semantic", empty_semantic)
     
     # === RUN PIPELINE WITH LIVE APIS ===
     # - Spatial search will use real Google Maps API for geocoding
