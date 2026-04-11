@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from rag_pipeline.opengeodata_search import (
+from rag_pipeline.search.opengeodata import (
     OpenGeoDataError,
     get_opengeodata_results,
     run_opengeodata_search,

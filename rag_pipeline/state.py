@@ -4,7 +4,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple, TypedDict
 
-from .search_utils import normalize_source_fields, safe_score
+from .search.utils import normalize_source_fields, safe_score
 
 
 class DocumentPayload(TypedDict, total=False):

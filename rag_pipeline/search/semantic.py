@@ -9,7 +9,7 @@ from opensearchpy import OpenSearch
 
 from dotenv import load_dotenv
 
-from .search_utils import get_logger, getenv
+from .utils import get_logger, getenv
 
 load_dotenv()
 
@@ -159,7 +159,7 @@ def retrieve_semantic(state: MutableMapping[str, Any]) -> List[Dict[str, Any]]:
 
 
 # --- State-aligned helper ---
-from .state import EvidenceEntry, ensure_state_shapes, get_query_text, merge_retrieval
+from ..state import EvidenceEntry, ensure_state_shapes, get_query_text, merge_retrieval
 
 
 def run_semantic_search(

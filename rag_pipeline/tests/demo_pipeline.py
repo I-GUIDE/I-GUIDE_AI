@@ -119,10 +119,10 @@ def main():
     
     try:
         from rag_pipeline.router_llm import build_default_registry, LLMRouter
-        from rag_pipeline.search_keyword import retrieve_keyword
-        from rag_pipeline.semantic_search import retrieve_semantic
-        from rag_pipeline.spatial_search import retrieve_spatial
-        from rag_pipeline.search_neo4j import retrieve_neo4j
+        from rag_pipeline.search.keyword import retrieve_keyword
+        from rag_pipeline.search.semantic import retrieve_semantic
+        from rag_pipeline.search.spatial import retrieve_spatial
+        from rag_pipeline.search.neo4j import retrieve_neo4j
         
         # Build adapters for real backends
         class RealKeywordAdapter:

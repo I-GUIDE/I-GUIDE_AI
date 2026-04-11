@@ -4,11 +4,11 @@ import json
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .langchain_file_tools import make_langchain_file_tools
-from .opengeodata_search import get_opengeodata_results
-from .search_keyword import get_keyword_search_results
-from .search_neo4j import get_neo4j_search_results
-from .semantic_search import semantic_search as run_semantic_search
-from .spatial_search import get_spatial_search_results
+from .search.opengeodata import get_opengeodata_results
+from .search.keyword import get_keyword_search_results
+from .search.neo4j import get_neo4j_search_results
+from .search.semantic import semantic_search as run_semantic_search
+from .search.spatial import get_spatial_search_results
 
 
 def _safe_int(value: Any, default: int = 8, minimum: int = 1, maximum: int = 100) -> int:

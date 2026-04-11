@@ -37,7 +37,7 @@ from .neo4j_graph_tools import (
     detect_pattern,
     run_user_author_fallback,
 )
-from .state import EvidenceEntry, ensure_state_shapes, get_query_text, merge_retrieval
+from ..state import EvidenceEntry, ensure_state_shapes, get_query_text, merge_retrieval
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -441,7 +441,7 @@ def get_neo4j_agent_results(user_query: str, limit: int = 12) -> List[Dict[str, 
 
     # ── Tier 3: basic keyword fallback ────────────────────────────────────
     log.info("Using basic Neo4j keyword fallback for query: %s", query)
-    from rag_pipeline.search_neo4j import get_neo4j_search_results
+    from rag_pipeline.search.neo4j import get_neo4j_search_results
     return get_neo4j_search_results(query, limit=limit)
 
 
@@ -582,7 +582,7 @@ def get_opensearch_agent_results(user_query: str, limit: int = 12) -> List[Dict[
         hits_raw = raw.get("hits", {}).get("hits", []) or []
     except Exception as exc:
         log.error("OpenSearch agent query failed (%s); falling back to keyword search.", exc)
-        from rag_pipeline.search_keyword import get_keyword_search_results
+        from rag_pipeline.search.keyword import get_keyword_search_results
         return get_keyword_search_results(query, size=limit)
 
     hits: List[Dict[str, Any]] = []
@@ -647,8 +647,8 @@ def run_agent_search(
 # ---------------------------------------------------------------------------
 # Convenience re-exports (keep backward compatibility with search_core.py)
 # ---------------------------------------------------------------------------
-from rag_pipeline.search_keyword import get_keyword_search_results
-from rag_pipeline.search_neo4j import get_neo4j_search_results as get_basic_neo4j_search_results
+from rag_pipeline.search.keyword import get_keyword_search_results
+from rag_pipeline.search.neo4j import get_neo4j_search_results as get_basic_neo4j_search_results
 
 
 __all__ = [
