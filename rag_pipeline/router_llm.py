@@ -134,8 +134,15 @@ Query:
 
 Guidelines:
 - semantic: enable when synonyms/paraphrase/generalization likely help (ambiguous wording, 'similar to', 'about', 'compare', long-form questions).
-- spatial: enable when locations/coordinates/regions/distance/routing/maps are involved (place names, lat/lon, 'near', 'within X miles', addresses).
-- graph: enable when entity-relationship traversal, paths, hierarchies, or joining across entities helps (people-orgs, dependencies, 'connected to', 'path between').
+- spatial: enable when locations/coordinates/regions/distance/routing/maps are involved (place names, lat/lon, 'near', 'within X miles', addresses, geographic regions).
+- graph: enable when entity-relationship traversal, paths, hierarchies, or joining across entities helps
+  Common triggers for graph search:
+    • Author/contributor queries: "by [person]", "from [author]", "published by", "created by", "uploaded by", "authored by"
+    • Organization queries: "from [org]", "by [institution]", "affiliated with", "maintained by", "developed by"
+    • Tag/category queries: "tagged with", "categorized as", "labeled as", "type of", "classified as"
+    • Relationship queries: "related to", "connected to", "similar to", "associated with", "linked to", "references"
+    • Entity-centric: any query mentioning specific people, organizations, contributors, or tags
+  Examples: "publications by John Smith", "datasets from NASA", "resources tagged climate", "papers affiliated with USGS"
 
 Return STRICT JSON only:
 {{
