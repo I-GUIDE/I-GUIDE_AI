@@ -1,11 +1,25 @@
+"""
+search_core.py
+--------------
+Orchestrates all retrieval strategies for the I-GUIDE RAG pipeline.
+
+Search order:
+  1. Keyword search      (always)
+  2. Semantic search     (always)
+  3. Neo4j graph search  (LLM-routed — uses 3-tier agent in search_agents.py)
+  4. Spatial search      (LLM-routed)
+  5. OpenGeoData         (always)
+"""
+
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, List, MutableMapping
 
 from .opengeodata_search import retrieve_opengeodata
 from .search_keyword import retrieve_keyword
-from .search_neo4j import retrieve_neo4j
+from .search_neo4j import retrieve_neo4j          # basic keyword fallback, kept for reference
 from .semantic_search import retrieve_semantic
 from .spatial_search import retrieve_spatial
 from .state import (
@@ -20,6 +34,19 @@ from .search_utils import get_logger
 
 logger = get_logger("search_core")
 
+# Neo4j agent (3-tier: pattern tools → Text2Cypher → keyword fallback)
+try:
+    from .search_agents import get_neo4j_agent_results
+    NEO4J_AGENT_AVAILABLE = True
+except ImportError as exc:
+    logger.warning("Neo4j agent search unavailable: %s", exc)
+    NEO4J_AGENT_AVAILABLE = False
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
 def _record_decision(decisions: List[RoutingDecision], source: str, reason: str) -> None:
     decisions.append(RoutingDecision(source=source, reason=reason))
 
@@ -32,112 +59,161 @@ def _limit_for(state: MutableMapping[str, Any]) -> int:
         return 8
 
 
+def _log_hits(label: str, hits: List[Any], max_shown: int = 10) -> None:
+    titles = [h.get("_source", {}).get("title", "No title") for h in hits]
+    logger.info("%s returned %d documents:", label, len(titles))
+    for i, title in enumerate(titles[:max_shown], 1):
+        logger.info("  %d. %s", i, title)
+    if len(titles) > max_shown:
+        logger.info("  ... and %d more", len(titles) - max_shown)
+
+
+# ---------------------------------------------------------------------------
+# LLM routing
+# ---------------------------------------------------------------------------
+
+def _llm_route(query: str, decisions: List[RoutingDecision]) -> tuple[bool, bool, dict]:
+    """
+    Ask the LLM router whether to run graph and/or spatial search.
+    Returns (use_graph, use_spatial, rationale_dict).
+    Falls back to conservative heuristics on any error.
+    """
+    use_llm_routing = os.getenv("USE_LLM_ROUTING", "true").lower() == "true"
+
+    if use_llm_routing:
+        try:
+            from .router_llm import LLMRouter, ModuleRegistry
+            registry = ModuleRegistry()
+            router = LLMRouter(registry=registry)
+            # Read decision directly — plan.chosen_modules filters by registry
+            # which is empty by default, so graph/spatial get dropped from chosen_modules
+            decision = router.llm_engine.decide(query)
+            rationale = decision.rationale or {}
+
+            # Check if LLM failed internally and returned conservative fallback
+            llm_failed = any(
+                "failed" in str(v).lower() or "keyword-only" in str(v).lower()
+                for v in rationale.values()
+            )
+            if not llm_failed:
+                use_graph   = decision.use_graph
+                use_spatial = decision.use_spatial
+                logger.info(
+                    "LLM Router → graph=%s spatial=%s | rationale: %s",
+                    use_graph, use_spatial, rationale,
+                )
+                _record_decision(
+                    decisions, "llm_router",
+                    f"graph={use_graph} spatial={use_spatial}",
+                )
+                return use_graph, use_spatial, rationale
+
+            logger.warning("LLM router returned failure rationale; using pattern fallback.")
+            _record_decision(decisions, "llm_router_fallback", "LLM call failed internally")
+
+        except Exception as exc:
+            logger.warning("LLM routing failed (%s); using pattern fallback.", exc)
+            _record_decision(decisions, "llm_router_fallback", f"error: {str(exc)[:100]}")
+
+    # Simple heuristic fallback — uses pattern detection so author/org/tag
+    # queries still trigger graph search even when the LLM router is unavailable
+    from .neo4j_graph_tools import detect_pattern
+    use_graph = detect_pattern(query) is not None
+    use_spatial = False
+    _record_decision(decisions, "heuristic_routing", "LLM routing disabled or errored")
+    return use_graph, use_spatial, {}
+
+
+# ---------------------------------------------------------------------------
+# Main retrieval orchestrator
+# ---------------------------------------------------------------------------
+
 def run_retrieval(state: MutableMapping[str, Any]) -> AgentState:
     state = ensure_state_shapes(state)
     limit = _limit_for(state)
     query = get_query_text(state)
     decisions: List[RoutingDecision] = []
-    
-    logger.info(f"=== Starting retrieval for query: '{query}' (top_k={limit}) ===")
 
+    logger.info("=== Retrieval start | query='%s' top_k=%d ===", query, limit)
+
+    # ── 1. Keyword search (always) ────────────────────────────────────────
     keyword_hits = retrieve_keyword(state)
-    keyword_titles = [hit.get("_source", {}).get("title", "No title") for hit in keyword_hits]
-    logger.info(f"📚 KEYWORD search returned {len(keyword_hits)} documents:")
-    for i, title in enumerate(keyword_titles[:10], 1):
-        logger.info(f"  {i}. {title}")
-    if len(keyword_titles) > 10:
-        logger.info(f"  ... and {len(keyword_titles) - 10} more")
-    
-    appended = merge_retrieval(
-        state,
-        source="keyword",
-        hits=keyword_hits,
-        limit=limit,
-    )
+    _log_hits("📚 KEYWORD", keyword_hits)
+    appended = merge_retrieval(state, source="keyword", hits=keyword_hits, limit=limit)
     _record_decision(decisions, "keyword", f"hits:{len(keyword_hits)} appended:{len(appended)}")
 
+    # ── 2. Semantic search (always) ───────────────────────────────────────
     semantic_hits = retrieve_semantic(state)
-    semantic_titles = [hit.get("_source", {}).get("title", "No title") for hit in semantic_hits]
-    logger.info(f"🔍 SEMANTIC search returned {len(semantic_hits)} documents:")
-    for i, title in enumerate(semantic_titles[:10], 1):
-        logger.info(f"  {i}. {title}")
-    if len(semantic_titles) > 10:
-        logger.info(f"  ... and {len(semantic_titles) - 10} more")
-    
-    appended = merge_retrieval(
-        state,
-        source="semantic",
-        hits=semantic_hits,
-        limit=limit,
-    )
+    _log_hits("🔍 SEMANTIC", semantic_hits)
+    appended = merge_retrieval(state, source="semantic", hits=semantic_hits, limit=limit)
     _record_decision(decisions, "semantic", f"hits:{len(semantic_hits)} appended:{len(appended)}")
 
-    session_ctx = state.get("session_context") or {}
-    if "graph" in query.lower() or session_ctx.get("use_neo4j"):
-        neo_hits = retrieve_neo4j(state)
-        neo_titles = [hit.get("_source", {}).get("title", "No title") for hit in neo_hits]
-        logger.info(f"🕸️ NEO4J search returned {len(neo_hits)} documents:")
-        for i, title in enumerate(neo_titles[:10], 1):
-            logger.info(f"  {i}. {title}")
-        if len(neo_titles) > 10:
-            logger.info(f"  ... and {len(neo_titles) - 10} more")
-        
-        appended = merge_retrieval(
-            state,
-            source="neo4j",
-            hits=neo_hits,
-            limit=limit,
-        )
-        _record_decision(decisions, "neo4j", f"hits:{len(neo_hits)} appended:{len(appended)}")
+    # ── 3. LLM routing for graph + spatial ───────────────────────────────
+    use_graph, use_spatial, rationale = _llm_route(query, decisions)
 
-    if session_ctx.get("use_spatial"):
+    # ── 4. Neo4j graph search (LLM-routed) ───────────────────────────────
+    if use_graph:
+        use_agent = os.getenv("USE_NEO4J_AGENT_SEARCH", "true").lower() == "true"
+
+        if use_agent and NEO4J_AGENT_AVAILABLE:
+            try:
+                neo_hits = get_neo4j_agent_results(query, limit=limit)
+                search_method = "neo4j_agent"
+            except Exception as exc:
+                logger.warning("Neo4j agent search failed (%s); falling back to basic.", exc)
+                neo_hits = retrieve_neo4j(state)
+                search_method = "neo4j_basic_fallback"
+        else:
+            logger.info("Basic Neo4j search (set USE_NEO4J_AGENT_SEARCH=true for agent).")
+            neo_hits = retrieve_neo4j(state)
+            search_method = "neo4j_basic"
+
+        _log_hits("🕸️  NEO4J", neo_hits)
+        appended = merge_retrieval(state, source="neo4j", hits=neo_hits, limit=limit)
+        reason = rationale.get("graph", "enabled")
+        _record_decision(
+            decisions, "neo4j",
+            f"method:{search_method} hits:{len(neo_hits)} appended:{len(appended)} reason:{reason}",
+        )
+    else:
+        _record_decision(decisions, "neo4j", f"skipped reason:{rationale.get('graph', 'disabled')}")
+
+    # ── 5. Spatial search (LLM-routed) ───────────────────────────────────
+    if use_spatial:
         spatial_hits = retrieve_spatial(state)
-        spatial_titles = [hit.get("_source", {}).get("title", "No title") for hit in spatial_hits]
-        logger.info(f"🗺️ SPATIAL search returned {len(spatial_hits)} documents:")
-        for i, title in enumerate(spatial_titles[:10], 1):
-            logger.info(f"  {i}. {title}")
-        if len(spatial_titles) > 10:
-            logger.info(f"  ... and {len(spatial_titles) - 10} more")
-        
-        appended = merge_retrieval(
-            state,
-            source="spatial",
-            hits=spatial_hits,
-            limit=limit,
+        _log_hits("🗺️  SPATIAL", spatial_hits)
+        appended = merge_retrieval(state, source="spatial", hits=spatial_hits, limit=limit)
+        reason = rationale.get("spatial", "enabled")
+        _record_decision(
+            decisions, "spatial",
+            f"hits:{len(spatial_hits)} appended:{len(appended)} reason:{reason}",
         )
-        _record_decision(decisions, "spatial", f"hits:{len(spatial_hits)} appended:{len(appended)}")
+    else:
+        _record_decision(decisions, "spatial", f"skipped reason:{rationale.get('spatial', 'disabled')}")
 
+    # ── 6. OpenGeoData (always, no limit cap) ────────────────────────────
     opengeo_hits = retrieve_opengeodata(state)
-    opengeo_titles = [hit.get("_source", {}).get("title", "No title") for hit in opengeo_hits]
-    logger.info(f"🌍 OPENGEODATA search returned {len(opengeo_hits)} documents:")
-    for i, title in enumerate(opengeo_titles[:10], 1):
-        logger.info(f"  {i}. {title}")
-    if len(opengeo_titles) > 10:
-        logger.info(f"  ... and {len(opengeo_titles) - 10} more")
-    
-    # Don't apply limit to opengeodata - always include results to ensure they appear in frontend
-    # The limit will be applied later during reranking/final selection
+    _log_hits("🌍 OPENGEODATA", opengeo_hits)
     appended = merge_retrieval(
         state,
         source="opengeodata",
         hits=opengeo_hits,
-        limit=None,  # No limit - always include opengeodata results
+        limit=None,   # always include — capped later during reranking
     )
-    logger.info(f"OpenGeoData: {len(appended)} documents appended to evidence")
+    logger.info("OpenGeoData: %d documents appended to evidence", len(appended))
     _record_decision(
-        decisions,
-        "opengeodata",
+        decisions, "opengeodata",
         f"hits:{len(opengeo_hits)} appended:{len(appended)}",
     )
 
-    # Summary log
-    total_evidence = len(state.get("evidence", {}).get("retrieved_documents", []))
-    logger.info(f"=== Retrieval complete: {total_evidence} total documents in evidence ===")
+    # ── Summary ───────────────────────────────────────────────────────────
+    total = len(state.get("evidence", {}).get("retrieved_documents", []))
+    logger.info("=== Retrieval complete: %d total documents in evidence ===", total)
 
     trace = state.setdefault("trace_observability", {})
     trace["retrieval_summary"] = summarize_evidence(state["evidence"])
     trace["retrieval_routing_decisions"] = [
-        {"source": decision.source, "reason": decision.reason} for decision in decisions
+        {"source": d.source, "reason": d.reason} for d in decisions
     ]
     return state  # type: ignore[return-value]
 
