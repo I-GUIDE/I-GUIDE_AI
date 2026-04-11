@@ -23,10 +23,10 @@ _EXPORT_MAP = {
     "make_langchain_granular_tools": (".langchain_granular_tools", "make_langchain_granular_tools"),
     "make_langchain_mcp_tools": (".langchain_mcp_tools", "make_langchain_mcp_tools"),
     "run_agent_chat": (".agent_chat_service", "run_agent_chat"),
-    "build_agent_executor": (".langchain_agent_executor", "build_agent_executor"),
-    "build_code_agent_executor": (".langchain_agent_executor", "build_code_agent_executor"),
-    "run_agent_query": (".langchain_agent_executor", "run_agent_query"),
-    "run_code_agent_query": (".langchain_agent_executor", "run_code_agent_query"),
+    "build_agent_executor": ("agent_runtime.executor_factory", "build_agent_executor"),
+    "build_code_agent_executor": ("agent_runtime.executor_factory", "build_code_agent_executor"),
+    "run_agent_query": ("agent_runtime.graph_runtime", "run_agent_query"),
+    "run_code_agent_query": ("agent_runtime.graph_runtime", "run_code_agent_query"),
 }
 
 

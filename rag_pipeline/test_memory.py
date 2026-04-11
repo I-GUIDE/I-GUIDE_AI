@@ -3,10 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-try:
-    from rag_pipeline.langchain_agent_executor import run_agent_query
-except Exception:
-    from langchain_agent_executor import run_agent_query
+from agent_runtime.graph_runtime import run_agent_query
 
 
 def main() -> int:
