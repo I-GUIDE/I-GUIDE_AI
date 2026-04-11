@@ -1,0 +1,56 @@
+"""Shared type definitions and constants for the agent runtime.
+
+Every other module in ``agent_runtime`` may import from here.
+Nothing in this file should import from ``rag_pipeline`` so the
+dependency direction stays clean.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List, Literal, Optional, Sequence
+
+# ---------------------------------------------------------------------------
+# Intent / role / route literals
+# ---------------------------------------------------------------------------
+AgentIntent = Literal["general_discovery", "analysis_task", "code_task", "hybrid"]
+AgentRole = Literal["search", "analysis", "code", "direct_answer", "orchestrator"]
+RouteType = Literal["search", "analysis", "code", "direct_answer"]
+
+# ---------------------------------------------------------------------------
+# Tool-name sets
+#
+# These are the *canonical* names that tool_policy and intent_classifier
+# use to decide which tools an agent is allowed to call.  If a new MCP
+# tool is added, register it in the appropriate set here.
+# ---------------------------------------------------------------------------
+ANALYSIS_TOOL_NAMES: set[str] = {
+    "mcp_load_chicago_community_areas",
+    "mcp_load_chicago_crime_data",
+    "mcp_get_crime_statistics",
+    "mcp_count_crimes_per_community",
+    "mcp_generate_crime_map",
+}
+
+DISCOVERY_TOOL_NAMES: set[str] = {
+    "rag_tool",
+    "mcp_search_geospatial_resources",
+    "mcp_search_publications",
+}
+
+RAG_COMPONENT_TOOL_NAMES: set[str] = {
+    "keyword_search",
+    "semantic_search",
+    "neo4j_search",
+    "spatial_search",
+    "opengeodata_search",
+}
+
+FILE_TOOL_NAMES: set[str] = {
+    "read_text_file",
+    "inspect_file_for_analysis",
+    "write_text_file",
+    "write_output_file",
+}
+
+# Alias kept for backward compatibility — identical to RAG_COMPONENT_TOOL_NAMES.
+IGUIDE_SEARCH_TOOL_NAMES: set[str] = RAG_COMPONENT_TOOL_NAMES.copy()
