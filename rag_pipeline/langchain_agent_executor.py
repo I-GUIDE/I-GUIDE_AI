@@ -37,6 +37,10 @@ from agent_runtime.intent_classifier import (
     llm_route_decision as _llm_route_decision_impl,
     query_has_file_context as _query_has_file_context,
 )
+from agent_runtime.tool_policy import (
+    collect_tools as _collect_tools,
+    select_allowed_tools as _select_allowed_tools,
+)
 
 SEARCH_AGENT_PROMPT = (
     "You are SearchAgent.\n"
@@ -172,62 +176,9 @@ def _build_default_llm() -> Any:
     return ChatOpenAI(**kwargs)
 
 
-def _collect_tools(
-    *,
-    tool_strategy: str,
-    include_mcp_tools: bool,
-    mcp_modules: Optional[List[str]],
-    enabled_search_methods: Optional[List[str]] = None,
-    include_file_tools: bool = True,
-) -> List[Any]:
-    strategy = (tool_strategy or "full_pipeline").strip().lower()
-    if strategy == "granular":
-        tools = make_langchain_granular_tools(
-            enabled_search_methods=enabled_search_methods,
-            include_file_tools=include_file_tools,
-        )
-    elif strategy == "full_pipeline":
-        tools = [make_langchain_rag_tool(), *make_langchain_file_tools()]
-    else:
-        raise ValueError("tool_strategy must be either 'full_pipeline' or 'granular'.")
-    if include_mcp_tools:
-        tools.extend(make_langchain_mcp_tools(include_modules=mcp_modules))
-    return tools
 
+# _collect_tools, _select_allowed_tools moved to agent_runtime.tool_policy
 
-
-# _classify_intent, _build_available_routes, _query_has_file_context
-# moved to agent_runtime.intent_classifier
-
-
-def _select_allowed_tools(intent: str, available_tool_names: Sequence[str]) -> List[str]:
-    available = set(available_tool_names)
-    selected: List[str] = []
-
-    if intent == "analysis_task":
-        selected = [name for name in ANALYSIS_TOOL_NAMES if name in available]
-    elif intent == "code_task":
-        preferred = DISCOVERY_TOOL_NAMES | RAG_COMPONENT_TOOL_NAMES | FILE_TOOL_NAMES
-        selected = [name for name in available_tool_names if name in preferred]
-    elif intent == "general_discovery":
-        preferred = DISCOVERY_TOOL_NAMES | RAG_COMPONENT_TOOL_NAMES | FILE_TOOL_NAMES
-        selected = [name for name in available_tool_names if name in preferred]
-    else:  # hybrid
-        preferred = DISCOVERY_TOOL_NAMES | RAG_COMPONENT_TOOL_NAMES | ANALYSIS_TOOL_NAMES | FILE_TOOL_NAMES
-        selected = [name for name in available_tool_names if name in preferred]
-
-    for file_tool_name in FILE_TOOL_NAMES:
-        if file_tool_name in available and file_tool_name not in selected:
-            selected.append(file_tool_name)
-
-    if not selected:
-        selected = list(available_tool_names)
-    return selected
-
-
-# Thin wrappers that inject local dependencies into intent_classifier functions
-# to avoid circular imports.  These will move to tool_policy / executor_factory
-# in later steps.
 
 def _build_route_trace(
     query: str,
