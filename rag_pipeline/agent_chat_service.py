@@ -6,7 +6,7 @@ from typing import Any, Dict, Generator, List, Mapping, Optional, Sequence
 from uuid import uuid4
 
 from .agent_file_store import get_file_record
-from .langchain_agent_executor import run_agent_query, stream_agent_query_events
+from agent_runtime.graph_runtime import run_agent_query, stream_agent_query_events
 from .memory_module import create_memory, get_or_create_memory, update_memory
 
 logger = logging.getLogger(__name__)
