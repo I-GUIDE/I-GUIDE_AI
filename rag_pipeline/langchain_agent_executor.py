@@ -16,103 +16,27 @@ from .langchain_granular_tools import make_langchain_granular_tools
 from .langchain_mcp_tools import make_langchain_mcp_tools
 from .langchain_tool import make_langchain_rag_tool, rag_tool
 
-ANALYSIS_TOOL_NAMES = {
-    "mcp_load_chicago_community_areas",
-    "mcp_load_chicago_crime_data",
-    "mcp_get_crime_statistics",
-    "mcp_count_crimes_per_community",
-    "mcp_generate_crime_map",
-}
-DISCOVERY_TOOL_NAMES = {
-    "rag_tool",
-    "mcp_search_geospatial_resources",
-    "mcp_search_publications",
-}
-RAG_COMPONENT_TOOL_NAMES = {
-    "keyword_search",
-    "semantic_search",
-    "neo4j_search",
-    "spatial_search",
-    "opengeodata_search",
-}
-FILE_TOOL_NAMES = {
-    "read_text_file",
-    "inspect_file_for_analysis",
-    "write_text_file",
-    "write_output_file",
-}
-IGUIDE_SEARCH_TOOL_NAMES = {
-    "keyword_search",
-    "semantic_search",
-    "neo4j_search",
-    "spatial_search",
-    "opengeodata_search",
-}
-ANALYSIS_HINTS = {
-    "analyze",
-    "analysis",
-    "count",
-    "join",
-    "spatial join",
-    "buffer",
-    "intersect",
-    "within",
-    "map",
-    "plot",
-    "statistics",
-    "statistical",
-    "hotspot",
-}
-CODE_HINTS = {
-    "code",
-    "python",
-    "script",
-    "function",
-    "class",
-    "implement",
-    "implementation",
-    "api",
-    "endpoint",
-    "refactor",
-    "debug",
-    "fix",
-    "unit test",
-    "sql",
-}
-DISCOVERY_HINTS = {
-    "what is",
-    "overview",
-    "background",
-    "resources",
-    "dataset",
-    "datasets",
-    "publication",
-    "publications",
-    "notebook",
-    "notebooks",
-    "find",
-    "discover",
-    "file",
-    "csv",
-    "json",
-    "column",
-    "columns",
-    "attached",
-    "attachment",
-}
-FILE_ANALYSIS_HINTS = {
-    "inspect",
-    "attached file",
-    "attached files",
-    "attachment",
-    "attachments",
-    "main columns",
-    "column names",
-    "save a short summary",
-    "uploaded file",
-    "file id",
-    "downloadable",
-}
+from agent_runtime.graph_state import (
+    ANALYSIS_TOOL_NAMES,
+    DISCOVERY_TOOL_NAMES,
+    FILE_TOOL_NAMES,
+    IGUIDE_SEARCH_TOOL_NAMES,
+    RAG_COMPONENT_TOOL_NAMES,
+)
+from agent_runtime.intent_classifier import (
+    ANALYSIS_HINTS,
+    CODE_HINTS,
+    DISCOVERY_HINTS,
+    FILE_ANALYSIS_HINTS,
+    build_available_routes as _build_available_routes,
+    build_route_trace as _build_route_trace_impl,
+    chat_history_preview as _chat_history_preview,
+    classify_intent as _classify_intent,
+    extract_json_object as _extract_json_object,
+    heuristic_route_decision as _heuristic_route_decision,
+    llm_route_decision as _llm_route_decision_impl,
+    query_has_file_context as _query_has_file_context,
+)
 
 SEARCH_AGENT_PROMPT = (
     "You are SearchAgent.\n"
@@ -271,82 +195,9 @@ def _collect_tools(
     return tools
 
 
-def _classify_intent(query: str) -> Dict[str, Any]:
-    text = (query or "").strip().lower()
-    analysis_hits = sorted([kw for kw in ANALYSIS_HINTS if kw in text])
-    code_hits = sorted([kw for kw in CODE_HINTS if kw in text])
-    discovery_hits = sorted([kw for kw in DISCOVERY_HINTS if kw in text])
-    file_analysis_hits = sorted([kw for kw in FILE_ANALYSIS_HINTS if kw in text])
-    has_attached_files = "attached files are available to the agent via local file tools" in text
 
-    if has_attached_files and file_analysis_hits:
-        intent = "hybrid"
-        reason = "attached_file_analysis_request"
-    elif code_hits:
-        intent = "code_task"
-        reason = "matched_code_hints"
-    elif analysis_hits and discovery_hits:
-        intent = "hybrid"
-        reason = "matched_analysis_and_discovery_hints"
-    elif analysis_hits:
-        intent = "analysis_task"
-        reason = "matched_analysis_hints"
-    else:
-        intent = "general_discovery"
-        reason = "default_to_discovery"
-    return {
-        "intent": intent,
-        "reason": reason,
-        "analysis_hits": analysis_hits,
-        "code_hits": code_hits,
-        "discovery_hits": discovery_hits,
-        "file_analysis_hits": file_analysis_hits,
-        "has_attached_files": has_attached_files,
-    }
-
-
-def _build_available_routes(
-    *,
-    available_tool_names: Sequence[str],
-    chat_history: Optional[List[Any]],
-) -> List[Dict[str, Any]]:
-    routes: List[Dict[str, Any]] = []
-    history_available = bool(chat_history)
-    if history_available:
-        routes.append(
-            {
-                "route": "direct_answer",
-                "agent": "direct_answer_agent",
-                "description": "Answer only from the current conversation history already loaded for this turn.",
-                "requirements": ["chat_history"],
-            }
-        )
-    if available_tool_names:
-        routes.append(
-            {
-                "route": "search",
-                "agent": "search_agent",
-                "description": "Use the available tools to retrieve evidence and answer factual or discovery questions.",
-                "tool_names": list(available_tool_names),
-            }
-        )
-        routes.append(
-            {
-                "route": "analysis",
-                "agent": "analysis_agent",
-                "description": "Perform synthesis or analysis, calling SearchAgent for evidence when needed.",
-                "tool_names": list(available_tool_names),
-            }
-        )
-    return routes
-
-
-def _query_has_file_context(query: str) -> bool:
-    text = (query or "").lower()
-    return (
-        "attached files are available to the agent via local file tools" in text
-        or "uploaded files are available to the agent via local file tools" in text
-    )
+# _classify_intent, _build_available_routes, _query_has_file_context
+# moved to agent_runtime.intent_classifier
 
 
 def _select_allowed_tools(intent: str, available_tool_names: Sequence[str]) -> List[str]:
@@ -374,158 +225,9 @@ def _select_allowed_tools(intent: str, available_tool_names: Sequence[str]) -> L
     return selected
 
 
-def _forced_route_from_value(value: Optional[str], available_routes: Sequence[Dict[str, Any]]) -> Optional[str]:
-    if not value:
-        return None
-    normalized = str(value).strip().lower()
-    available = {str(item.get("route") or "").strip().lower() for item in available_routes}
-    mapping = {
-        "analysis": "analysis",
-        "analysis_task": "analysis",
-        "hybrid": "analysis",
-        "search": "search",
-        "general_discovery": "search",
-        "code_task": "search",
-        "direct_answer": "direct_answer",
-        "memory_direct": "direct_answer",
-    }
-    forced = mapping.get(normalized)
-    if forced in available:
-        return forced
-    return None
-
-
-def _chat_history_preview(chat_history: Optional[List[Any]], max_items: int = 6) -> List[Dict[str, str]]:
-    preview: List[Dict[str, str]] = []
-    for item in (chat_history or [])[-max_items:]:
-        role = "user"
-        content = ""
-        if isinstance(item, dict):
-            role = str(item.get("role") or "user")
-            content = str(item.get("content") or "")
-        elif isinstance(item, (list, tuple)) and len(item) == 2:
-            role = str(item[0])
-            content = str(item[1])
-        else:
-            content = str(item)
-        content = " ".join(content.split())
-        if content:
-            preview.append({"role": role, "content": content[:400]})
-    return preview
-
-
-def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
-    if not text:
-        return None
-    candidates = [text.strip()]
-    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-    if match:
-        candidates.append(match.group(0))
-    for candidate in candidates:
-        try:
-            parsed = json.loads(candidate)
-        except Exception:
-            continue
-        if isinstance(parsed, dict):
-            return parsed
-    return None
-
-
-def _heuristic_route_decision(
-    query: str,
-    available_routes: Sequence[Dict[str, Any]],
-) -> Dict[str, Any]:
-    route_names = {str(item.get("route") or "") for item in available_routes}
-    lowered = (query or "").strip().lower()
-    classification = _classify_intent(query)
-    if "direct_answer" in route_names:
-        memory_phrases = (
-            "what is my ",
-            "what's my ",
-            "what was my ",
-            "what did i say ",
-            "did i mention ",
-            "what did we discuss ",
-        )
-        if lowered.startswith(memory_phrases):
-            return {
-                "route": "direct_answer",
-                "reason": "heuristic_memory_reference",
-                "intent": "memory_lookup",
-                "router_type": "heuristic",
-            }
-    if classification["intent"] in {"analysis_task", "hybrid"} and "analysis" in route_names:
-        return {
-            "route": "analysis",
-            "reason": classification["reason"],
-            "intent": classification["intent"],
-            "router_type": "heuristic",
-        }
-    if "search" in route_names:
-        return {
-            "route": "search",
-            "reason": classification["reason"],
-            "intent": classification["intent"],
-            "router_type": "heuristic",
-        }
-    fallback = next(iter(route_names), "search")
-    return {
-        "route": fallback,
-        "reason": "fallback_first_available_route",
-        "intent": classification["intent"],
-        "router_type": "heuristic",
-    }
-
-
-def _llm_route_decision(
-    *,
-    query: str,
-    chat_history: Optional[List[Any]],
-    available_routes: Sequence[Dict[str, Any]],
-    llm: Optional[Any],
-) -> Optional[Dict[str, Any]]:
-    if not available_routes:
-        return None
-    active_llm = llm or _build_default_llm()
-    route_names = [str(item.get("route") or "") for item in available_routes if item.get("route")]
-    prompt = (
-        "You are a routing model for a multi-agent assistant.\n"
-        "Choose exactly one route from the available routes.\n"
-        "Return JSON only with keys: route, reason, confidence.\n"
-        "Use direct_answer only when the question can be answered from chat history alone.\n"
-        "Use analysis for synthesis, comparison, transformation, coding, statistics, or multi-step reasoning.\n"
-        "Use search for retrieval or factual lookup that needs tools."
-    )
-    router_input = {
-        "query": query,
-        "available_routes": list(available_routes),
-        "chat_history_preview": _chat_history_preview(chat_history),
-    }
-    response = active_llm.invoke(
-        [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": json.dumps(router_input, ensure_ascii=True)},
-        ]
-    )
-    content = getattr(response, "content", "")
-    if isinstance(content, list):
-        content = "".join(
-            part.get("text", "") if isinstance(part, dict) else getattr(part, "text", str(part))
-            for part in content
-        )
-    parsed = _extract_json_object(str(content))
-    if not parsed:
-        return None
-    route = str(parsed.get("route") or "").strip()
-    if route not in route_names:
-        return None
-    return {
-        "route": route,
-        "reason": str(parsed.get("reason") or "llm_router"),
-        "confidence": parsed.get("confidence"),
-        "router_type": "llm",
-    }
-
+# Thin wrappers that inject local dependencies into intent_classifier functions
+# to avoid circular imports.  These will move to tool_policy / executor_factory
+# in later steps.
 
 def _build_route_trace(
     query: str,
@@ -535,49 +237,16 @@ def _build_route_trace(
     llm: Optional[Any] = None,
     forced_intent: Optional[str] = None,
 ) -> Dict[str, Any]:
-    classification = _classify_intent(query)
-    forced_route = _forced_route_from_value(forced_intent, available_routes)
-    allowed = _select_allowed_tools(classification["intent"], available_tool_names)
-    if forced_route:
-        return {
-            "query": query,
-            "route": forced_route,
-            "intent": classification["intent"],
-            "forced_intent": forced_intent,
-            "reason": "forced_route",
-            "analysis_hits": classification["analysis_hits"],
-            "code_hits": classification["code_hits"],
-            "discovery_hits": classification["discovery_hits"],
-            "available_tools": list(available_tool_names),
-            "available_routes": list(available_routes),
-            "allowed_tools": allowed,
-            "router_type": "forced",
-        }
-    llm_choice = _llm_route_decision(
-        query=query,
+    return _build_route_trace_impl(
+        query,
+        available_tool_names,
+        available_routes,
         chat_history=chat_history,
-        available_routes=available_routes,
         llm=llm,
+        forced_intent=forced_intent,
+        build_default_llm=_build_default_llm,
+        select_allowed_tools=_select_allowed_tools,
     )
-    route = str((llm_choice or {}).get("route") or "")
-    if not route:
-        llm_choice = _heuristic_route_decision(query, available_routes)
-        route = str(llm_choice.get("route") or "search")
-    return {
-        "query": query,
-        "route": route,
-        "intent": classification["intent"],
-        "forced_intent": forced_intent,
-        "reason": llm_choice.get("reason") or classification["reason"],
-        "confidence": llm_choice.get("confidence"),
-        "analysis_hits": classification["analysis_hits"],
-        "code_hits": classification["code_hits"],
-        "discovery_hits": classification["discovery_hits"],
-        "available_tools": list(available_tool_names),
-        "available_routes": list(available_routes),
-        "allowed_tools": allowed,
-        "router_type": llm_choice.get("router_type"),
-    }
 
 
 def build_agent_executor(
