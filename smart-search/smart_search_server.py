@@ -3,16 +3,16 @@
 Smart Search Server Entry Point
 
 This is the entry point for the production Docker container.
-It imports and runs the Flask app from rag_pipeline.api_server.
+It imports and runs the Flask app from api.server.
 """
 
 import sys
 import os
 
-# Add parent directory to path so we can import rag_pipeline
+# Add parent directory to path so we can import api / rag_pipeline
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from rag_pipeline.api_server import app
+from api.server import app
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5002))

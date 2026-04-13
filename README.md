@@ -4,9 +4,10 @@ A multi-agent RAG (Retrieval-Augmented Generation) system for geospatial researc
 
 ## Architecture
 
-The codebase has three main packages:
+The codebase has four main packages:
 
 ```
+api/                   Flask REST API layer (thin routing over the services)
 rag_pipeline/          Search, retrieval, generation (the RAG engine)
 agent_runtime/         Multi-agent orchestration (decides how to answer)
 MCP_server/            Geospatial analysis tools exposed via Model Context Protocol
@@ -50,8 +51,10 @@ agent_runtime/                   Multi-agent orchestration
   graph_runtime.py               Public API: run_agent_query(), stream_agent_query_events()
   runtime_utils.py               Response parsing, trace building
 
+api/                             Flask REST API layer
+  server.py                      All HTTP routes (/query, /agent/chat, /agent/files/*) (port 5002)
+
 rag_pipeline/                    RAG engine
-  api_server.py                  Flask REST API (port 5002)
   pipeline.py                    Pipeline orchestration (memory -> search -> rerank -> generate)
   routing.py                     Retrieval -> reranking -> generation glue
   state.py                       Shared AgentState schema
@@ -123,7 +126,7 @@ pip install -r requirements.txt
 ### Run the API server
 
 ```sh
-python -m rag_pipeline.api_server
+python -m api.server
 # Runs on port 5002
 ```
 
