@@ -6,7 +6,9 @@ import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
+from threading import Lock
 from types import ModuleType
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Type
 
@@ -25,6 +27,67 @@ DEFAULT_MCP_MODULES = (
     "generated_notebook_tools",
 )
 DEFAULT_REMOTE_MCP_URL = os.getenv("MCP_SERVER_URL", "http://127.0.0.1:8000/mcp")
+
+
+# ---------------------------------------------------------------------------
+# Tool list cache
+#
+# make_langchain_mcp_tools() builds StructuredTool wrappers for every MCP
+# tool.  For remote tools this hits the MCP server over the network once
+# per call.  Within a single agent query the function is called 2-6 times.
+#
+# The cache stores the final tool list keyed by (remote_url, modules)
+# with a TTL controlled by MCP_CACHE_TTL_SECONDS (default 60s, 0 disables).
+# ---------------------------------------------------------------------------
+
+_CacheKey = Tuple[str, Tuple[str, ...]]
+_mcp_tool_cache: Dict[_CacheKey, Tuple[float, List[Any]]] = {}
+_mcp_cache_lock = Lock()
+_mcp_cache_stats = {"hits": 0, "misses": 0, "stores": 0}
+
+
+def _mcp_cache_ttl_seconds() -> float:
+    """TTL for the MCP tool cache, in seconds.  0 disables the cache."""
+    raw = os.getenv("MCP_CACHE_TTL_SECONDS", "60")
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return 60.0
+
+
+def _mcp_cache_key(remote_url: str, include_modules: Optional[List[str]]) -> _CacheKey:
+    modules: Tuple[str, ...]
+    if include_modules is None:
+        modules = tuple(DEFAULT_MCP_MODULES)
+    else:
+        modules = tuple(include_modules)
+    return (remote_url, modules)
+
+
+def clear_mcp_cache() -> None:
+    """Drop every cached MCP tool list.  Useful for tests and dev reloads."""
+    with _mcp_cache_lock:
+        _mcp_tool_cache.clear()
+        _mcp_cache_stats["hits"] = 0
+        _mcp_cache_stats["misses"] = 0
+        _mcp_cache_stats["stores"] = 0
+    logger.info("MCP tool cache cleared")
+
+
+def get_mcp_cache_stats() -> Dict[str, Any]:
+    """Return a snapshot of cache state for visibility / tests."""
+    with _mcp_cache_lock:
+        return {
+            "entries": len(_mcp_tool_cache),
+            "hits": _mcp_cache_stats["hits"],
+            "misses": _mcp_cache_stats["misses"],
+            "stores": _mcp_cache_stats["stores"],
+            "ttl_seconds": _mcp_cache_ttl_seconds(),
+            "keys": [
+                {"url": url, "modules": list(modules)}
+                for (url, modules) in _mcp_tool_cache.keys()
+            ],
+        }
 
 
 def _mcp_tool(
@@ -349,18 +412,44 @@ def make_langchain_mcp_tools(
 ) -> List[Any]:
     """
     Build LangChain tools from selected MCP tool modules under MCP_server/tools.
+
+    Results are cached for ``MCP_CACHE_TTL_SECONDS`` (default 60s) to avoid
+    re-fetching the remote MCP tool list on every call.  Set the env var to
+    ``0`` to disable caching.  Use :func:`clear_mcp_cache` in tests.
     """
+    remote_url = _remote_mcp_url()
+    cache_key = _mcp_cache_key(remote_url, include_modules)
+    ttl = _mcp_cache_ttl_seconds()
+
+    if ttl > 0:
+        with _mcp_cache_lock:
+            cached = _mcp_tool_cache.get(cache_key)
+            if cached is not None:
+                stored_at, tools = cached
+                if (time.monotonic() - stored_at) < ttl:
+                    _mcp_cache_stats["hits"] += 1
+                    logger.debug("MCP tool cache HIT for %s", cache_key)
+                    return list(tools)
+                # Expired — fall through and rebuild.
+                _mcp_tool_cache.pop(cache_key, None)
+            _mcp_cache_stats["misses"] += 1
+    logger.debug("MCP tool cache MISS for %s (ttl=%.1fs)", cache_key, ttl)
+
+    remote_tools = _make_remote_mcp_tools(remote_url)
+    if remote_tools:
+        if ttl > 0:
+            with _mcp_cache_lock:
+                _mcp_tool_cache[cache_key] = (time.monotonic(), list(remote_tools))
+                _mcp_cache_stats["stores"] += 1
+        return remote_tools
+
+    # Local fallback — only needs StructuredTool when we actually build local tools.
     try:
         from langchain_core.tools import StructuredTool
     except Exception as exc:  # pragma: no cover - optional dependency
         raise RuntimeError(
             "LangChain is not installed. Add `langchain-core` (or langchain) to dependencies."
         ) from exc
-
-    remote_url = _remote_mcp_url()
-    remote_tools = _make_remote_mcp_tools(remote_url)
-    if remote_tools:
-        return remote_tools
 
     _ensure_mcp_import_path()
     _ensure_server_stub()
@@ -400,7 +489,17 @@ def make_langchain_mcp_tools(
         logger.info("Loaded %s MCP tools via local import fallback.", len(tools))
     else:
         logger.warning("No remote MCP tools available and no local MCP tools loaded.")
+
+    if ttl > 0 and tools:
+        with _mcp_cache_lock:
+            _mcp_tool_cache[cache_key] = (time.monotonic(), list(tools))
+            _mcp_cache_stats["stores"] += 1
     return tools
 
 
-__all__ = ["make_langchain_mcp_tools", "DEFAULT_MCP_MODULES"]
+__all__ = [
+    "make_langchain_mcp_tools",
+    "DEFAULT_MCP_MODULES",
+    "clear_mcp_cache",
+    "get_mcp_cache_stats",
+]
