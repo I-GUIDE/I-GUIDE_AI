@@ -21,7 +21,6 @@ DEFAULT_MCP_MODULES = (
     "search_tools",
     "data_tools",
     "spatial_analysis_tools",
-    "biomass_tools",
     "image_tools",
     "notebook_workflow_tools",
     "generated_notebook_tools",
@@ -166,6 +165,19 @@ def _tool_description(func: Callable[..., Any]) -> str:
         or getattr(func, "__doc__", None)
         or f"MCP tool: {func.__name__}"
     ).strip()
+
+
+def _tool_metadata(func: Callable[..., Any]) -> Dict[str, Any]:
+    """Return StructuredTool metadata for a decorated MCP function.
+
+    Currently carries the capability category set by @mcp_tool(category=...).
+    Read downstream by agent_runtime.tool_policy to route tools by intent.
+    """
+    metadata: Dict[str, Any] = {}
+    category = getattr(func, "_mcp_category", None)
+    if category:
+        metadata["category"] = category
+    return metadata
 
 
 def _remote_mcp_url() -> str:
@@ -403,6 +415,8 @@ def _make_image_tools(module: Any) -> List[Callable[..., Any]]:
 
     describe_image_b64.__name__ = "describe_image_b64"
     describe_map_b64.__name__ = "describe_map_b64"
+    describe_image_b64._mcp_category = "generation"
+    describe_map_b64._mcp_category = "generation"
     return [describe_image_b64, describe_map_b64]
 
 
@@ -479,6 +493,7 @@ def make_langchain_mcp_tools(
                         func=func,
                         name=tool_name,
                         description=_tool_description(func),
+                        metadata=_tool_metadata(func),
                     )
                 )
             except Exception as exc:

@@ -88,6 +88,7 @@ def make_langchain_rag_tool() -> Any:
             "Inputs: query, optional memory_id, session_context, params, recent_k, extra_state. "
             "Returns JSON string with answer, citations, retrieval steps, and final state."
         ),
+        metadata={"category": "retrieval_internal"},
     )
 
 

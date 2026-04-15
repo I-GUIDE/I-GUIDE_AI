@@ -100,21 +100,25 @@ def make_langchain_granular_tools(
             func=keyword_search_tool,
             name="keyword_search",
             description="Keyword/BM25 search over indexed contents. Returns JSON with doc_ids and snippets.",
+            metadata={"category": "retrieval_internal"},
         ),
         StructuredTool.from_function(
             func=semantic_search_tool,
             name="semantic_search",
             description="Vector semantic search over indexed contents. Returns JSON with doc_ids and snippets.",
+            metadata={"category": "retrieval_internal"},
         ),
         StructuredTool.from_function(
             func=neo4j_search_tool,
             name="neo4j_search",
             description="Graph-aware Neo4j keyword search. Returns JSON with doc_ids and snippets.",
+            metadata={"category": "retrieval_internal"},
         ),
         StructuredTool.from_function(
             func=spatial_search_tool,
             name="spatial_search",
             description="Spatially-biased search inferred from location mentions. Returns JSON with doc_ids and snippets.",
+            metadata={"category": "retrieval_internal"},
         ),
         StructuredTool.from_function(
             func=opengeodata_search_tool,
@@ -123,6 +127,7 @@ def make_langchain_granular_tools(
                 "OpenGeoData federated search. Optional session_context_json for bbox/time/provider hints. "
                 "Returns JSON with doc_ids and snippets."
             ),
+            metadata={"category": "retrieval_external"},
         ),
     ]
     if enabled_search_methods is not None:

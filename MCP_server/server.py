@@ -51,22 +51,54 @@ app = mcp.streamable_http_app()
 # Registry to store tool functions
 _tool_registry: dict[str, Callable] = {}
 
+# --- MCP tool categories ---
+# Capability-based taxonomy — describes WHAT SHAPE of work a tool does,
+# independent of domain (climate, biomass, health, urban, etc).
+# Any new tool from any domain should fit into exactly one of these.
+# Intent → category mapping lives in agent_runtime.tool_policy.
+# Remote/external MCP tools are auto-classified into this same taxonomy
+# by rag_pipeline.langchain_mcp_tools at import time.
+MCP_TOOL_CATEGORIES = frozenset({
+    "retrieval_internal",  # I-GUIDE's own indices (keyword, semantic, Neo4j)
+    "retrieval_external",  # federated third-party catalogs (STAC, OGC, web)
+    "data_loading",        # fetches a dataset into working memory
+    "computation",         # analyzes/transforms loaded data (stats, spatial joins)
+    "generation",          # produces new artifacts (maps, images, code, notebooks)
+    "io",                  # file read/write
+})
+
+
 # --- MCP tool decorator (marks functions for MCP registration) ---
 def mcp_tool(
     _func=None,
     *,
+    category: str | None = None,
     summary: str | None = None,
     description: str | None = None,
     tool_description: str | None = None,
     mcp_description: str | None = None,
 ):
     """Decorator to mark functions as MCP tools.
-    
-    This decorator is backward-compatible with the old FastAPI implementation.
-    It now marks functions for MCP registration while preserving metadata.
+
+    Args:
+        category: Routing category read by agent_runtime.tool_policy at runtime
+            to decide which tools are available for a given query intent.
+            Must be one of MCP_TOOL_CATEGORIES. Optional for now; Phase 3
+            validation will make it required.
+        summary: Short human summary.
+        description / tool_description / mcp_description: Tool description
+            variants surfaced to the LLM (kept for backward compatibility).
     """
+    if category is not None and category not in MCP_TOOL_CATEGORIES:
+        raise ValueError(
+            f"Unknown mcp_tool category {category!r}. "
+            f"Valid categories: {sorted(MCP_TOOL_CATEGORIES)}"
+        )
+
     def decorator(func):
         func._is_mcp_tool = True
+        if category:
+            func._mcp_category = category
         if summary:
             func._mcp_summary = summary
             func._tool_summary = summary

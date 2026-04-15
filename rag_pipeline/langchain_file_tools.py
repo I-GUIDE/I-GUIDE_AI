@@ -204,6 +204,7 @@ def make_langchain_file_tools() -> List[Any]:
                 "Input may be either a local path or an uploaded file_id. "
                 "Use for txt, md, py, csv, json, or other text files."
             ),
+            metadata={"category": "io"},
         ),
         StructuredTool.from_function(
             func=inspect_file_for_analysis_tool,
@@ -213,6 +214,7 @@ def make_langchain_file_tools() -> List[Any]:
                 "For CSV returns header and sample rows, for JSON returns structural preview, "
                 "otherwise returns text content."
             ),
+            metadata={"category": "io"},
         ),
         StructuredTool.from_function(
             func=write_text_file_tool,
@@ -221,6 +223,7 @@ def make_langchain_file_tools() -> List[Any]:
                 "Write text output to a local file under an allowed root. "
                 "Use for saving summaries, reports, code, or extracted notes."
             ),
+            metadata={"category": "io"},
         ),
         StructuredTool.from_function(
             func=write_output_file_tool,
@@ -229,6 +232,7 @@ def make_langchain_file_tools() -> List[Any]:
                 "Write downloadable output for the user into managed agent storage using only a filename. "
                 "Returns file_id and download_url for the generated file."
             ),
+            metadata={"category": "io"},
         ),
     ]
 
