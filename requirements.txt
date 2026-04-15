@@ -1,24 +1,50 @@
-aiohttp
-boto3
-fiona
+# Web framework / server
 flask
 flask-cors
-geopandas
 gunicorn
+fastapi
+
+# HTTP clients
+aiohttp
 httpx
-mcp[cli]
-nbformat
-neo4j
-openai
-opensearch-py
-pytest
-python-dotenv
-rasterio
 requests
-sentence-transformers
-shapely
-smolagents
-spacy
-torch
-transformers
+
+# LLM / agent stack
+openai
+langchain
 langchain-core
+langchain-openai
+langgraph
+langchain-mcp-adapters
+mcp[cli]>=1.2
+smolagents
+
+# Search backends
+opensearch-py
+neo4j
+ddgs
+
+# Embeddings / ML
+sentence-transformers
+transformers
+torch
+spacy
+
+# Geospatial
+geopandas
+shapely
+fiona
+rasterio
+
+# Data / notebooks
+pandas
+matplotlib
+nbformat
+
+# Storage / cloud
+boto3
+
+# Config / testing
+python-dotenv
+pytest
+pydantic

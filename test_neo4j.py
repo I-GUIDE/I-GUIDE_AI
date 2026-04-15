@@ -6,7 +6,7 @@ Run from project root: python test_robustness.py
 """
 from dotenv import load_dotenv
 import os, logging
-load_dotenv(os.path.join('rag_pipeline', '.env.local'))
+load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
 from rag_pipeline.search.agents import get_neo4j_agent_results

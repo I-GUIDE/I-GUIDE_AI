@@ -1,5 +1,7 @@
+from pathlib import Path
 from dotenv import load_dotenv
-load_dotenv(dotenv_path=".env.local", override=True)
+
+load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
 
 from importlib import import_module
 
