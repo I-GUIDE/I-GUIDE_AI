@@ -24,7 +24,7 @@ def encode_bytes(image_bytes: bytes) -> str:
     return base64.b64encode(image_bytes).decode("utf-8")
 
 # --- MCP Tools ---
-@mcp_tool
+@mcp_tool(category="generation")
 def describe_image(
     file: UploadFile = File(...),
     prompt_text: str = "Describe what is in this image."
@@ -71,6 +71,7 @@ def describe_image(
         raise RuntimeError(f"Failed to describe image: {str(e)}")
 
 @mcp_tool(
+    category="generation",
     tool_description=(
         "Describe a map image with focus on area, problem, and provided information.\n\n"
         "Example usage:\n"

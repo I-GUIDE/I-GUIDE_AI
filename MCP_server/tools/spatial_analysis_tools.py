@@ -18,7 +18,7 @@ from server import mcp_tool
 from tools.data_tools import _dataframe_cache
 
 
-@mcp_tool
+@mcp_tool(category="computation")
 def count_crimes_per_community(crime_type: str = None) -> Dict[str, Any]:
     """
     Performs a spatial join to count crimes in each Chicago community area.
@@ -90,7 +90,7 @@ def count_crimes_per_community(crime_type: str = None) -> Dict[str, Any]:
     return summary
 
 
-@mcp_tool
+@mcp_tool(category="generation")
 def generate_crime_map(title: str = "Crime Counts by Community Area") -> str:
     """
     Generates a choropleth map of crime counts per community area.
@@ -129,7 +129,7 @@ def generate_crime_map(title: str = "Crime Counts by Community Area") -> str:
     return f"data:image/png;base64,{img_base64}"
 
 
-@mcp_tool
+@mcp_tool(category="retrieval_external")
 def search_geospatial_resources(topic: str, resource_type: str) -> list:
     """
     Searches for geospatial resources like datasets, notebooks, or publications on a given topic.
@@ -153,7 +153,7 @@ def search_geospatial_resources(topic: str, resource_type: str) -> list:
     return results
 
 
-@mcp_tool
+@mcp_tool(category="computation")
 def analyze_and_organize_results(results: list, topic: str) -> str:
     """
     Analyzes a list of search results and organizes metadata into a Markdown table.

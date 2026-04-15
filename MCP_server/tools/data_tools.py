@@ -16,7 +16,7 @@ from server import mcp_tool
 _dataframe_cache: Dict[str, gpd.GeoDataFrame] = {}
 
 
-@mcp_tool
+@mcp_tool(category="data_loading")
 def load_chicago_community_areas() -> Dict[str, Any]:
     """
     Loads the official boundaries for Chicago's 77 community areas.
@@ -62,7 +62,7 @@ def load_chicago_community_areas() -> Dict[str, Any]:
     }
 
 
-@mcp_tool
+@mcp_tool(category="data_loading")
 def load_chicago_crime_data() -> Dict[str, Any]:
     """
     Loads reported crime incidents in Chicago from the last 365 days.
@@ -145,7 +145,7 @@ def load_chicago_crime_data() -> Dict[str, Any]:
     }
 
 
-@mcp_tool
+@mcp_tool(category="computation")
 def get_crime_statistics(crime_type: str = None) -> Dict[str, Any]:
     """
     Get summary statistics for Chicago crime data.

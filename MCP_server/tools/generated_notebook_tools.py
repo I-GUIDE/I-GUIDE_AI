@@ -101,11 +101,12 @@ def register_generated_tool_from_manifest(manifest_path, *, register_with_server
         return tool_name
 
     @mcp_tool(
+        category="computation",
         description=(
             f"Generated from uploaded notebook {Path(str(manifest.get('notebook_path') or '')).name}. "
             "Pass parameters_json as a JSON object string. "
             f"Execution mode: {manifest.get('mode')}."
-        )
+        ),
     )
     def _generated_tool(parameters_json: str = "{}") -> Dict[str, Any]:
         return _run_generated_manifest(manifest, parameters_json=parameters_json)

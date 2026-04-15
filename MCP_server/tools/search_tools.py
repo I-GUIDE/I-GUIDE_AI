@@ -1,6 +1,6 @@
 from typing import List
 from server import mcp_tool  # decorator
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 
 # @mcp_tool
 # def search_publications(query: str, limit: int = 5) -> List[dict]:
@@ -15,7 +15,7 @@ from duckduckgo_search import DDGS
 #     """
 #     return [{"title": f"Paper about {query}", "year": 2024} for _ in range(limit)]
 
-@mcp_tool
+@mcp_tool(category="retrieval_external")
 def search_external_resources(topic: str, resource_type: str) -> list:
     """
     Searches for geospatial resources like datasets, notebooks, or publications on a given topic.

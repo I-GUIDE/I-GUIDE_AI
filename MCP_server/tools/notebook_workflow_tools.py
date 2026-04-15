@@ -14,7 +14,7 @@ from notebook_workflow_builder import build_notebook_workflow_artifacts, list_ma
 from tools.generated_notebook_tools import register_generated_tool_from_manifest
 
 
-@mcp_tool
+@mcp_tool(category="generation")
 def create_notebook_workflow_tool(notebook_ref: str, tool_name: str = "", overwrite: bool = False) -> Dict[str, Any]:
     """
     Convert an uploaded Jupyter notebook into a callable MCP tool.
@@ -53,7 +53,7 @@ def create_notebook_workflow_tool(notebook_ref: str, tool_name: str = "", overwr
     }
 
 
-@mcp_tool
+@mcp_tool(category="retrieval_internal")
 def list_generated_notebook_workflow_tools() -> List[Dict[str, Any]]:
     """
     List notebook-derived MCP tools currently materialized on disk.
