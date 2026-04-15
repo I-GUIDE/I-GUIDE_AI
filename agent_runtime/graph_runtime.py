@@ -404,11 +404,11 @@ def main() -> None:
     parser.add_argument(
         "--include-mcp-tools",
         action="store_true",
-        help="Also load MCP tools from MCP_server/tools (search/data/spatial/biomass/image adapters).",
+        help="Also load MCP tools from MCP_server/tools (search/data/spatial/image adapters).",
     )
     parser.add_argument(
         "--mcp-modules",
-        default="search_tools,data_tools,spatial_analysis_tools,biomass_tools,image_tools",
+        default="search_tools,data_tools,spatial_analysis_tools,image_tools",
         help="Comma-separated MCP tool module names to load when --include-mcp-tools is set.",
     )
     parser.add_argument(

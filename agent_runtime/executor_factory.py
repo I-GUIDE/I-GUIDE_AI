@@ -85,18 +85,11 @@ DEFAULT_CHECKPOINTER = InMemorySaver()
 
 
 def load_env() -> None:
-    """Load dotenv files (rag_pipeline/.env, repo .env, repo .env.local)."""
-    current_dir = Path(__file__).resolve().parent
-    repo_root = current_dir.parent
-    rag_dir = repo_root / "rag_pipeline"
-    candidates = [
-        rag_dir / ".env",
-        repo_root / ".env",
-        repo_root / ".env.local",
-    ]
-    for env_path in candidates:
-        if env_path.exists():
-            load_dotenv(dotenv_path=env_path, override=False)
+    """Load the single canonical .env from the repo root."""
+    repo_root = Path(__file__).resolve().parent.parent
+    env_path = repo_root / ".env"
+    if env_path.exists():
+        load_dotenv(dotenv_path=env_path, override=False)
 
 
 load_env()
@@ -201,9 +194,9 @@ def invoke_agent_with_payload_fallback(
     """Invoke *executor* trying the modern messages format first, then legacy."""
     msg_payload = messages_payload(query, chat_history)
     legacy_payload = {"input": query, "chat_history": chat_history or []}
+    config = {**(config or {})}
+    config.setdefault("recursion_limit", 25)
     try:
-        if config is None:
-            return executor.invoke(msg_payload)
         return executor.invoke(msg_payload, config=config)
     except Exception as exc:
         text = str(exc).lower()
@@ -211,8 +204,6 @@ def invoke_agent_with_payload_fallback(
             "input" in text and "messages" in text
         ) or ("invalid" in text and "messages" in text) or ("missing" in text and "messages" in text)
         if payload_shape_error:
-            if config is None:
-                return executor.invoke(legacy_payload)
             return executor.invoke(legacy_payload, config=config)
         raise
 
@@ -288,6 +279,8 @@ def build_agent_executor(
             tools=tools,
             verbose=verbose,
             return_intermediate_steps=return_intermediate_steps,
+            max_iterations=15,
+            max_execution_time=120,
         )
     except Exception:
         # Current API path (langchain>=1.x)
