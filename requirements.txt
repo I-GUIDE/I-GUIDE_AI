@@ -1,6 +1,7 @@
 # Web framework / server
 flask
 flask-cors
+flasgger
 gunicorn
 fastapi
 
