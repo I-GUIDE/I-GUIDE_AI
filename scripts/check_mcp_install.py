@@ -6,7 +6,7 @@ Run this to verify your MCP server implementation is working correctly.
 import sys
 import os
 
-# Add parent directory to path
+# Add repo root to sys.path (scripts/ is one level below repo root)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def test_imports():

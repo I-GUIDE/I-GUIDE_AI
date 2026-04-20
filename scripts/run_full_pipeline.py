@@ -13,14 +13,14 @@ import os
 import sys
 from pathlib import Path
 
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+# Add repo root to sys.path (scripts/ is one level below)
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
 
 from dotenv import load_dotenv
 
-# Load environment
-env_path = Path(__file__).parent.parent / ".env.local"
-load_dotenv(env_path)
+# Load environment from repo-root .env
+load_dotenv(REPO_ROOT / ".env")
 
 from rag_pipeline.pipeline import run_pipeline
 

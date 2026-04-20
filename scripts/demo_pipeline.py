@@ -3,17 +3,19 @@
 Demonstration of the full RAG pipeline with LLM router.
 Shows each step: Query -> Memory -> LLM Router -> Search -> Generation
 
-Loads credentials from rag_pipeline/.env.local
+Loads credentials from the repo-root .env file.
 """
 import sys
 import os
 from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
+# Add repo root to sys.path (scripts/ is one level below)
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
 
-# Load environment variables from .env.local
+# Load environment variables from repo-root .env
 from dotenv import load_dotenv
-env_path = Path(__file__).parent.parent / ".env.local"
+env_path = REPO_ROOT / ".env"
 if env_path.exists():
     load_dotenv(env_path)
     print(f"✓ Loaded credentials from {env_path}")

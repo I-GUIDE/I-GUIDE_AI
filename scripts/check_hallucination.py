@@ -8,7 +8,7 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from dotenv import load_dotenv
 
@@ -17,7 +17,7 @@ from rag_pipeline.pipeline import run_pipeline
 
 
 def _load_env() -> None:
-    env_path = Path(__file__).parent.parent / ".env.local"
+    env_path = Path(__file__).resolve().parent.parent / ".env"
     if env_path.exists():
         load_dotenv(env_path)
     else:
