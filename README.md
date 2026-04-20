@@ -191,13 +191,19 @@ See [.env.example](.env.example) for all configuration options. Key variables:
 
 ```sh
 # Run unit tests (no live services needed)
-python -m pytest MCP_server/ rag_pipeline/tests/test_opengeodata_search.py test_opengeodata.py -v
+python -m pytest MCP_server/ rag_pipeline/tests/test_opengeodata_search.py rag_pipeline/tests/test_mcp_cache.py -v
 
 # Run integration tests (requires OpenSearch, LLM, etc.)
 python -m pytest rag_pipeline/tests/ -v
 
-# Run Neo4j search tests (requires Neo4j)
-python test_neo4j.py
+# Dev verification scripts — runnable E2E checks (see scripts/ dir)
+python scripts/check_neo4j_search.py            # Neo4j 3-tier search
+python scripts/run_local_rag_test.py            # Full pipeline with connectivity checks
+python scripts/run_full_pipeline.py             # Full pipeline with step-by-step output
+python scripts/check_hallucination.py           # Hallucination audit on a sample query
+python scripts/demo_reranker.py                 # ColBERT reranker demo
+python scripts/check_mcp_install.py             # MCP dependency sanity check
+python scripts/check_memory_thread.py           # Multi-turn memory thread verification
 ```
 
 ## LangSmith Tracing

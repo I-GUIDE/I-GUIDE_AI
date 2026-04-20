@@ -31,12 +31,12 @@ from dotenv import load_dotenv
 # === Configuration ===
 
 def load_environment():
-    """Load environment variables from rag_pipeline/.env.local"""
-    env_path = Path(__file__).parent.parent / ".env.local"
+    """Load environment variables from repo-root .env."""
+    env_path = Path(__file__).resolve().parent.parent / ".env"
     if not env_path.exists():
-        print(f"❌ ERROR: .env.local not found at {env_path}")
+        print(f"❌ ERROR: .env not found at {env_path}")
         sys.exit(1)
-    
+
     load_dotenv(env_path)
     print(f"✅ Loaded environment from {env_path}")
 
