@@ -126,12 +126,90 @@ def _normalize_uploaded_files():
 
 @app.route('/health', methods=['GET'])
 def health():
-    """Health check endpoint"""
+    """
+    Health check endpoint.
+
+    ---
+    tags:
+      - Health
+    produces:
+      - application/json
+    responses:
+      200:
+        description: Service is healthy.
+        schema:
+          type: object
+          properties:
+            status:
+              type: string
+              example: healthy
+            service:
+              type: string
+              example: rag-pipeline
+    """
     return jsonify({"status": "healthy", "service": "rag-pipeline"}), 200
 
 
 @app.route('/agent/files/upload', methods=['POST'])
 def upload_agent_files():
+    """
+    Upload one or more files for the agent to inspect.
+
+    The returned `file_id` values can be passed to `/agent/chat` or `/agent/chat/stream`
+    via the JSON field `file_ids`.
+
+    ---
+    tags:
+      - Agent Files
+    consumes:
+      - multipart/form-data
+    produces:
+      - application/json
+    parameters:
+      - in: formData
+        name: file
+        type: file
+        required: false
+        description: Single file upload.
+      - in: formData
+        name: files
+        type: file
+        required: false
+        description: Multi-file upload (repeat this field per file).
+    responses:
+      200:
+        description: Upload succeeded.
+        schema:
+          type: object
+          properties:
+            files:
+              type: array
+              items:
+                type: object
+                properties:
+                  file_id:
+                    type: string
+                    example: file_0123456789ab
+                  filename:
+                    type: string
+                    example: data.csv
+                  kind:
+                    type: string
+                    example: upload
+                  size_bytes:
+                    type: integer
+                    example: 1234
+                  download_url:
+                    type: string
+                    example: /agent/files/file_0123456789ab/download
+            count:
+              type: integer
+              example: 2
+      400:
+        description: No files provided or invalid request.
+      500:
+        description: Internal server error.
+    """
     try:
         files = _normalize_uploaded_files()
         if not files:
@@ -149,6 +227,28 @@ def upload_agent_files():
 
 @app.route('/agent/files/<file_id>/download', methods=['GET'])
 def download_agent_file(file_id):
+    """
+    Download an uploaded (or generated) file by `file_id`.
+
+    ---
+    tags:
+      - Agent Files
+    produces:
+      - application/octet-stream
+    parameters:
+      - in: path
+        name: file_id
+        type: string
+        required: true
+        description: File identifier returned by `/agent/files/upload` or `write_output_file`.
+    responses:
+      200:
+        description: File bytes.
+      404:
+        description: Unknown `file_id`.
+      500:
+        description: Internal server error.
+    """
     try:
         record = require_file_record(file_id)
         path = resolve_file_id(file_id)
@@ -319,9 +419,9 @@ responses:
 @app.route('/agent/chat', methods=['POST'])
 def agent_chat():
     """
-Chat endpoint backed by the LangChain agent with optional persistent memory.
+	Chat endpoint backed by the LangChain agent with optional persistent memory.
 
-Request body:
+	Request body:
 {
     "user_input": "What datasets are available for Chicago crime?",
     "thread_id": "chat-thread-1",
@@ -336,9 +436,95 @@ Request body:
     "smart_tool_routing": true,
     "forced_intent": null,
     "file_paths": ["./data/crime.csv"],
-    "verbose": false
-}
-"""
+	    "verbose": false
+	}
+
+	---
+	tags:
+	  - Agent Chat
+	consumes:
+	  - application/json
+	produces:
+	  - application/json
+	parameters:
+	  - in: body
+	    name: body
+	    required: true
+	    schema:
+	      type: object
+	      required:
+	        - user_input
+	      properties:
+	        user_input:
+	          type: string
+	          example: What datasets are available for Chicago crime?
+	        thread_id:
+	          type: string
+	          nullable: true
+	          example: chat-thread-1
+	        memory_id:
+	          type: string
+	          nullable: true
+	          example: conversation-1
+	        conversation_name:
+	          type: string
+	          nullable: true
+	          example: Chicago agent chat
+	        recent_k:
+	          type: integer
+	          nullable: true
+	          example: 8
+	        tool_strategy:
+	          type: string
+	          example: granular
+	        include_mcp_tools:
+	          type: boolean
+	          example: false
+	        mcp_modules:
+	          type: array
+	          items:
+	            type: string
+	          nullable: true
+	          example: ["search_tools", "data_tools"]
+	        enabled_search_methods:
+	          type: array
+	          items:
+	            type: string
+	          nullable: true
+	          example: ["keyword_search", "semantic_search"]
+	        use_persistent_memory:
+	          type: boolean
+	          example: true
+	        smart_tool_routing:
+	          type: boolean
+	          example: true
+	        forced_intent:
+	          type: string
+	          nullable: true
+	          example: null
+	        file_paths:
+	          type: array
+	          items:
+	            type: string
+	          nullable: true
+	          example: ["./data/crime.csv"]
+	        file_ids:
+	          type: array
+	          items:
+	            type: string
+	          nullable: true
+	          example: ["file_0123456789ab"]
+	        verbose:
+	          type: boolean
+	          example: false
+	responses:
+	  200:
+	    description: Agent chat response payload.
+	  400:
+	    description: Validation error (e.g., missing user_input).
+	  500:
+	    description: Internal server error.
+	"""
     try:
         data = request.get_json() or {}
         user_input = data.get('user_input')
@@ -374,6 +560,97 @@ Request body:
 
 @app.route('/agent/chat/stream', methods=['POST'])
 def agent_chat_stream():
+    """
+    Stream agent chat events using Server-Sent Events (SSE).
+
+    The response is `text/event-stream` with blocks of the form:
+    `event: <name>\\ndata: <json>\\n\\n`
+
+    ---
+    tags:
+      - Agent Chat
+    consumes:
+      - application/json
+    produces:
+      - text/event-stream
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - user_input
+          properties:
+            user_input:
+              type: string
+              example: Inspect the attached CSV and summarize the main columns.
+            thread_id:
+              type: string
+              nullable: true
+              example: demo-thread-1
+            memory_id:
+              type: string
+              nullable: true
+              example: demo-session-1
+            conversation_name:
+              type: string
+              nullable: true
+            recent_k:
+              type: integer
+              nullable: true
+              example: 8
+            tool_strategy:
+              type: string
+              example: granular
+            include_mcp_tools:
+              type: boolean
+              example: false
+            mcp_modules:
+              type: array
+              items:
+                type: string
+              nullable: true
+              example: ["search_tools", "data_tools"]
+            enabled_search_methods:
+              type: array
+              items:
+                type: string
+              nullable: true
+              example: ["keyword_search", "semantic_search"]
+            use_persistent_memory:
+              type: boolean
+              example: true
+            smart_tool_routing:
+              type: boolean
+              example: true
+            forced_intent:
+              type: string
+              nullable: true
+              example: null
+            file_paths:
+              type: array
+              items:
+                type: string
+              nullable: true
+              example: ["./data/crime.csv"]
+            file_ids:
+              type: array
+              items:
+                type: string
+              nullable: true
+              example: ["file_0123456789ab"]
+            verbose:
+              type: boolean
+              example: false
+    responses:
+      200:
+        description: SSE stream of agent events.
+      400:
+        description: Validation error (e.g., missing user_input).
+      500:
+        description: Internal server error.
+    """
     try:
         data = request.get_json() or {}
         user_input = data.get('user_input')
@@ -440,6 +717,48 @@ def batch_query():
             {"user_input": "query 2", "memory_id": "session-2"}
         ]
     }
+
+    ---
+    tags:
+      - RAG
+      - Query
+    consumes:
+      - application/json
+    produces:
+      - application/json
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - queries
+          properties:
+            queries:
+              type: array
+              items:
+                type: object
+                properties:
+                  user_input:
+                    type: string
+                    example: What datasets are available for Chicago crime?
+                  memory_id:
+                    type: string
+                    nullable: true
+                  params:
+                    type: object
+                    nullable: true
+                  session_context:
+                    type: object
+                    nullable: true
+    responses:
+      200:
+        description: Batch query results.
+      400:
+        description: Validation error.
+      500:
+        description: Internal server error.
     """
     try:
         data = request.get_json() or {}
