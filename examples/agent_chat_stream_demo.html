@@ -254,6 +254,11 @@
           </label>
 
           <label>
+            API Key
+            <input id="api_key" value="">
+          </label>
+
+          <label>
             Upload Endpoint
             <input id="upload_endpoint" value="http://localhost:3500/agent/files/upload">
           </label>
@@ -625,7 +630,10 @@
 
       const response = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-API-KEY": document.getElementById("api_key").value.trim()
+        },
         body: JSON.stringify(payload),
         signal: currentAbortController.signal
       });
@@ -746,6 +754,9 @@
       try {
         const response = await fetch(document.getElementById("upload_endpoint").value.trim(), {
           method: "POST",
+          headers: {
+            "X-API-KEY": document.getElementById("api_key").value.trim()
+          },
           body: formData
         });
         const payload = await response.json();
