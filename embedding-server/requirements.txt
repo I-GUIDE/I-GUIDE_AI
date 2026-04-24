@@ -1,0 +1,8 @@
+flask
+torch
+transformers
+opensearch-py
+shapely
+python-dotenv
+requests
+

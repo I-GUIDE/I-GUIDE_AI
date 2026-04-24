@@ -1,0 +1,3 @@
+-r embedding-server/requirements.txt
+-r metadata-extraction-server/requirements.txt
+
