@@ -37,6 +37,30 @@ def _coalesce(*values):
     return None
 
 
+def _get_agent_chat_api_key() -> str:
+    return str(os.getenv("AGENT_CHAT_API_KEY") or "").strip()
+
+
+def _extract_presented_api_key() -> str:
+    header_key = str(request.headers.get("X-API-KEY") or "").strip()
+    if header_key:
+        return header_key
+    auth = str(request.headers.get("Authorization") or "").strip()
+    lowered = auth.lower()
+    if lowered.startswith("bearer "):
+        return auth[7:].strip()
+    return ""
+
+
+def _require_agent_chat_api_key() -> None:
+    expected = _get_agent_chat_api_key()
+    if not expected:
+        raise RuntimeError("AGENT_CHAT_API_KEY is not configured.")
+    presented = _extract_presented_api_key()
+    if not presented or presented != expected:
+        raise PermissionError("Forbidden: invalid API key.")
+
+
 def _normalize_agent_chat_request(data: dict) -> dict:
     """
     Normalize Node-style camelCase request fields to the internal snake_case names.
@@ -549,6 +573,11 @@ def agent_chat():
 	produces:
 	  - application/json
 	parameters:
+	  - in: header
+	    name: X-API-KEY
+	    type: string
+	    required: true
+	    description: API key required for agent chat endpoints.
 	  - in: body
 	    name: body
 	    required: true
@@ -628,6 +657,14 @@ def agent_chat():
 	    description: Internal server error.
 	"""
     try:
+        try:
+            _require_agent_chat_api_key()
+        except PermissionError as exc:
+            return jsonify({"error": str(exc)}), 403
+        except RuntimeError as exc:
+            logger.error("Agent chat API key misconfigured: %s", exc)
+            return jsonify({"error": "Server misconfiguration: API key not set"}), 500
+
         data = request.get_json() or {}
         normalized = _normalize_agent_chat_request(data)
         user_query = normalized["user_query"]
@@ -688,6 +725,11 @@ def agent_chat_stream():
     produces:
       - text/event-stream
     parameters:
+      - in: header
+        name: X-API-KEY
+        type: string
+        required: true
+        description: API key required for agent chat endpoints.
       - in: body
         name: body
         required: true
@@ -766,6 +808,14 @@ def agent_chat_stream():
         description: Internal server error.
     """
     try:
+        try:
+            _require_agent_chat_api_key()
+        except PermissionError as exc:
+            return jsonify({"error": str(exc)}), 403
+        except RuntimeError as exc:
+            logger.error("Agent chat stream API key misconfigured: %s", exc)
+            return jsonify({"error": "Server misconfiguration: API key not set"}), 500
+
         data = request.get_json() or {}
         normalized = _normalize_agent_chat_request(data)
         user_query = normalized["user_query"]
