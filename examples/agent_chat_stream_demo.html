@@ -593,19 +593,20 @@
     function buildPayload() {
       const recentKValue = document.getElementById("recent_k").value.trim();
       return {
-        user_input: document.getElementById("user_input").value.trim(),
-        memory_id: document.getElementById("memory_id").value.trim() || null,
-        thread_id: document.getElementById("thread_id").value.trim() || null,
-        conversation_name: document.getElementById("conversation_name").value.trim() || null,
-        recent_k: recentKValue === "" ? null : Number(recentKValue),
-        tool_strategy: document.getElementById("tool_strategy").value,
-        include_mcp_tools: document.getElementById("include_mcp_tools").checked,
-        mcp_modules: lineList(document.getElementById("mcp_modules").value.replaceAll(",", "\n")),
-        enabled_search_methods: searchMethodInputs.filter((input) => input.checked).map((input) => input.value),
-        use_persistent_memory: document.getElementById("use_persistent_memory").checked,
-        smart_tool_routing: document.getElementById("smart_tool_routing").checked,
-        forced_intent: document.getElementById("forced_intent").value || null,
-        file_ids: Array.from(attachedFiles.keys()),
+        // Node-style request fields (server also accepts legacy snake_case for back-compat)
+        userQuery: document.getElementById("user_input").value.trim(),
+        memoryId: document.getElementById("memory_id").value.trim() || null,
+        threadId: document.getElementById("thread_id").value.trim() || null,
+        conversationName: document.getElementById("conversation_name").value.trim() || null,
+        recentK: recentKValue === "" ? null : Number(recentKValue),
+        toolStrategy: document.getElementById("tool_strategy").value,
+        includeMcpTools: document.getElementById("include_mcp_tools").checked,
+        mcpModules: lineList(document.getElementById("mcp_modules").value.replaceAll(",", "\n")),
+        enabledSearchMethods: searchMethodInputs.filter((input) => input.checked).map((input) => input.value),
+        usePersistentMemory: document.getElementById("use_persistent_memory").checked,
+        smartToolRouting: document.getElementById("smart_tool_routing").checked,
+        forcedIntent: document.getElementById("forced_intent").value || null,
+        fileIds: Array.from(attachedFiles.keys()),
         verbose: document.getElementById("verbose").checked
       };
     }
@@ -613,8 +614,8 @@
     async function streamRequest(url, payload) {
       currentAbortController = new AbortController();
       statusChip.textContent = "connecting";
-      memoryChip.textContent = `memory: ${payload.memory_id || "auto"}`;
-      threadChip.textContent = `thread: ${payload.thread_id || "auto"}`;
+      memoryChip.textContent = `memory: ${payload.memoryId || "auto"}`;
+      threadChip.textContent = `thread: ${payload.threadId || "auto"}`;
       answerEl.textContent = "Waiting for streamed events...";
       docRefSet.clear();
       downloadableFiles.clear();
@@ -683,30 +684,25 @@
       renderDownloadFiles();
       appendTrace(eventName, payload, eventName === "error");
 
-      if (eventName === "status" && payload.stage) {
-        statusChip.textContent = payload.stage;
+      if (eventName === "status" && payload.status) {
+        statusChip.textContent = payload.status;
       }
-      if (eventName === "memory_loaded" && payload.memory_id) {
-        memoryChip.textContent = `memory: ${payload.memory_id}`;
-      }
-      if (eventName === "route_trace" && payload.allowed_tools) {
-        statusChip.textContent = `route: ${payload.intent || "unknown"}`;
-      }
-      if (eventName === "final_answer") {
+
+      if (eventName === "result") {
         answerEl.textContent = payload.answer || JSON.stringify(payload, null, 2);
-      }
-      if (eventName === "response") {
-        answerEl.textContent = payload.answer || answerEl.textContent;
-        if (payload.thread_id) {
-          threadChip.textContent = `thread: ${payload.thread_id}`;
+        if (payload.threadId) {
+          threadChip.textContent = `thread: ${payload.threadId}`;
         }
-        if (payload.memory_id) {
-          memoryChip.textContent = `memory: ${payload.memory_id}`;
+        if (payload.memoryId) {
+          memoryChip.textContent = `memory: ${payload.memoryId}`;
         }
         statusChip.textContent = "completed";
       }
       if (eventName === "error") {
         statusChip.textContent = "error";
+        if (payload && payload.error) {
+          answerEl.textContent = payload.error;
+        }
       }
     }
 

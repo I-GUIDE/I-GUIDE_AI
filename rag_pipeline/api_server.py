@@ -27,6 +27,108 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _coalesce(*values):
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
+
+
+def _normalize_agent_chat_request(data: dict) -> dict:
+    """
+    Normalize Node-style camelCase request fields to the internal snake_case names.
+
+    Accepts both formats to avoid breaking existing clients.
+    """
+    user_query = _coalesce(data.get("userQuery"), data.get("user_input"))
+    memory_id = _coalesce(data.get("memoryId"), data.get("memory_id"))
+    thread_id = _coalesce(data.get("threadId"), data.get("thread_id"))
+    conversation_name = _coalesce(data.get("conversationName"), data.get("conversation_name"))
+    recent_k = _coalesce(data.get("recentK"), data.get("recent_k"))
+    tool_strategy = _coalesce(data.get("toolStrategy"), data.get("tool_strategy"), "granular")
+    include_mcp_tools = bool(_coalesce(data.get("includeMcpTools"), data.get("include_mcp_tools"), False))
+    mcp_modules = _coalesce(data.get("mcpModules"), data.get("mcp_modules"))
+    enabled_search_methods = _coalesce(data.get("enabledSearchMethods"), data.get("enabled_search_methods"))
+    use_persistent_memory = bool(_coalesce(data.get("usePersistentMemory"), data.get("use_persistent_memory"), True))
+    smart_tool_routing = bool(_coalesce(data.get("smartToolRouting"), data.get("smart_tool_routing"), True))
+    forced_intent = _coalesce(data.get("forcedIntent"), data.get("forced_intent"))
+    file_paths = _coalesce(data.get("filePaths"), data.get("file_paths"))
+    file_ids = _coalesce(data.get("fileIds"), data.get("file_ids"))
+    verbose = bool(_coalesce(data.get("verbose"), False))
+
+    return {
+        "user_query": str(user_query).strip() if user_query is not None else "",
+        "memory_id": str(memory_id).strip() if memory_id is not None else None,
+        "thread_id": str(thread_id).strip() if thread_id is not None else None,
+        "conversation_name": str(conversation_name).strip() if conversation_name is not None else None,
+        "recent_k": recent_k,
+        "tool_strategy": str(tool_strategy).strip(),
+        "include_mcp_tools": include_mcp_tools,
+        "mcp_modules": mcp_modules,
+        "enabled_search_methods": enabled_search_methods,
+        "use_persistent_memory": use_persistent_memory,
+        "smart_tool_routing": smart_tool_routing,
+        "forced_intent": forced_intent,
+        "file_paths": file_paths,
+        "file_ids": file_ids,
+        "verbose": verbose,
+    }
+
+
+def _format_agent_chat_result(payload: dict) -> dict:
+    """
+    Align output shape to the legacy Node `/llm/search` result object.
+    """
+    answer = payload.get("answer") or ""
+    elements = payload.get("elements") or []
+    retrieval_steps = payload.get("retrievalSteps") or payload.get("retrieval_steps") or []
+    react_history = payload.get("reactHistory") or payload.get("react_history") or []
+
+    formatted = {
+        "answer": answer,
+        "message_id": payload.get("message_id"),
+        "elements": elements,
+        "count": int(payload.get("count") or (len(elements) if isinstance(elements, list) else 0)),
+        "retrievalSteps": retrieval_steps,
+        "reactHistory": react_history,
+        # Canonical camelCase ids
+        "memoryId": payload.get("memoryId") or payload.get("memory_id"),
+        "threadId": payload.get("threadId") or payload.get("thread_id"),
+        # Useful extras (kept for debugging/back-compat)
+        "routeTrace": payload.get("routeTrace") or payload.get("route_trace") or {},
+        "artifacts": payload.get("artifacts") or {},
+        "agent_result": payload.get("agent_result") or {},
+        "fileIds": payload.get("fileIds") or payload.get("file_ids") or [],
+        "filePaths": payload.get("filePaths") or payload.get("file_paths") or [],
+    }
+    warning = payload.get("warning")
+    if warning:
+        formatted["warning"] = warning
+    return formatted
+
+
+def _humanize_stage(value: str) -> str:
+    text = str(value or "").strip().replace("_", " ")
+    return text[:1].upper() + text[1:] if text else "Status"
+
+
+def _category_for_agent_role(role: object) -> str:
+    """
+    Map internal agent roles to the requested SSE categories.
+
+    Requested categories: routing, search, analysis, answer, file.
+    """
+    role_text = str(role or "").strip().lower()
+    if role_text == "search":
+        return "search"
+    if role_text in {"analysis", "code", "verification"}:
+        return "analysis"
+    return "analysis"
+
+
 def _format_elements(retrieved_documents):
     """
     Convert internal evidence entries into the simplified element payload expected by the UI.
@@ -453,62 +555,62 @@ def agent_chat():
 	    schema:
 	      type: object
 	      required:
-	        - user_input
+	        - userQuery
 	      properties:
-	        user_input:
+	        userQuery:
 	          type: string
 	          example: What datasets are available for Chicago crime?
-	        thread_id:
-	          type: string
-	          nullable: true
-	          example: chat-thread-1
-	        memory_id:
+	        memoryId:
 	          type: string
 	          nullable: true
 	          example: conversation-1
-	        conversation_name:
+	        threadId:
+	          type: string
+	          nullable: true
+	          example: chat-thread-1
+	        conversationName:
 	          type: string
 	          nullable: true
 	          example: Chicago agent chat
-	        recent_k:
+	        recentK:
 	          type: integer
 	          nullable: true
 	          example: 8
-	        tool_strategy:
+	        toolStrategy:
 	          type: string
 	          example: granular
-	        include_mcp_tools:
+	        includeMcpTools:
 	          type: boolean
 	          example: false
-	        mcp_modules:
+	        mcpModules:
 	          type: array
 	          items:
 	            type: string
 	          nullable: true
 	          example: ["search_tools", "data_tools"]
-	        enabled_search_methods:
+	        enabledSearchMethods:
 	          type: array
 	          items:
 	            type: string
 	          nullable: true
 	          example: ["keyword_search", "semantic_search"]
-	        use_persistent_memory:
+	        usePersistentMemory:
 	          type: boolean
 	          example: true
-	        smart_tool_routing:
+	        smartToolRouting:
 	          type: boolean
 	          example: true
-	        forced_intent:
+	        forcedIntent:
 	          type: string
 	          nullable: true
 	          example: null
-	        file_paths:
+	        filePaths:
 	          type: array
 	          items:
 	            type: string
 	          nullable: true
 	          example: ["./data/crime.csv"]
-	        file_ids:
+	        fileIds:
 	          type: array
 	          items:
 	            type: string
@@ -527,29 +629,30 @@ def agent_chat():
 	"""
     try:
         data = request.get_json() or {}
-        user_input = data.get('user_input')
-        if not user_input:
-            return jsonify({"error": "user_input is required"}), 400
+        normalized = _normalize_agent_chat_request(data)
+        user_query = normalized["user_query"]
+        if not user_query:
+            return jsonify({"error": "Missing userQuery in request body."}), 400
 
-        logger.info(f"Processing agent chat: {user_input[:100]}...")
-        response = run_agent_chat(
-            user_input=user_input,
-            thread_id=data.get('thread_id'),
-            memory_id=data.get('memory_id'),
-            conversation_name=data.get('conversation_name'),
-            recent_k=data.get('recent_k'),
-            tool_strategy=data.get('tool_strategy', 'granular'),
-            include_mcp_tools=bool(data.get('include_mcp_tools', False)),
-            mcp_modules=_parse_mcp_modules(data.get('mcp_modules')),
-            enabled_search_methods=_parse_enabled_search_methods(data.get('enabled_search_methods')),
-            use_persistent_memory=bool(data.get('use_persistent_memory', True)),
-            smart_tool_routing=bool(data.get('smart_tool_routing', True)),
-            forced_intent=data.get('forced_intent'),
-            file_paths=data.get('file_paths'),
-            file_ids=data.get('file_ids'),
-            verbose=bool(data.get('verbose', False)),
+        logger.info(f"Processing agent chat: {user_query[:100]}...")
+        raw = run_agent_chat(
+            user_input=user_query,
+            thread_id=normalized.get("thread_id"),
+            memory_id=normalized.get("memory_id"),
+            conversation_name=normalized.get("conversation_name"),
+            recent_k=normalized.get("recent_k"),
+            tool_strategy=normalized.get("tool_strategy", "granular"),
+            include_mcp_tools=bool(normalized.get("include_mcp_tools", False)),
+            mcp_modules=_parse_mcp_modules(normalized.get("mcp_modules")),
+            enabled_search_methods=_parse_enabled_search_methods(normalized.get("enabled_search_methods")),
+            use_persistent_memory=bool(normalized.get("use_persistent_memory", True)),
+            smart_tool_routing=bool(normalized.get("smart_tool_routing", True)),
+            forced_intent=normalized.get("forced_intent"),
+            file_paths=normalized.get("file_paths"),
+            file_ids=normalized.get("file_ids"),
+            verbose=bool(normalized.get("verbose", False)),
         )
-        return jsonify(response), 200
+        return jsonify(_format_agent_chat_result(raw)), 200
     except ValueError as e:
         logger.error(f"Agent chat validation error: {str(e)}")
         return jsonify({"error": str(e)}), 400
@@ -566,6 +669,17 @@ def agent_chat_stream():
     The response is `text/event-stream` with blocks of the form:
     `event: <name>\\ndata: <json>\\n\\n`
 
+    Compatibility events (Node-style):
+    - `status` with `{ "status": "<string>" }`
+    - `result` with the final result object
+    - `error` with `{ "error": "<string>" }`
+
+    Additional categorized events:
+    - `routing` (intent/policy/allowlist details)
+    - `search` / `analysis` (tool calls/results scoped to the active subagent)
+    - `answer` (completion + final answer)
+    - `file` (generated/downloadable files)
+
     ---
     tags:
       - Agent Chat
@@ -580,61 +694,61 @@ def agent_chat_stream():
         schema:
           type: object
           required:
-            - user_input
+            - userQuery
           properties:
-            user_input:
+            userQuery:
               type: string
               example: Inspect the attached CSV and summarize the main columns.
-            thread_id:
-              type: string
-              nullable: true
-              example: demo-thread-1
-            memory_id:
+            memoryId:
               type: string
               nullable: true
               example: demo-session-1
-            conversation_name:
+            threadId:
               type: string
               nullable: true
-            recent_k:
+              example: demo-thread-1
+            conversationName:
+              type: string
+              nullable: true
+            recentK:
               type: integer
               nullable: true
               example: 8
-            tool_strategy:
+            toolStrategy:
               type: string
               example: granular
-            include_mcp_tools:
+            includeMcpTools:
               type: boolean
               example: false
-            mcp_modules:
+            mcpModules:
               type: array
               items:
                 type: string
               nullable: true
               example: ["search_tools", "data_tools"]
-            enabled_search_methods:
+            enabledSearchMethods:
               type: array
               items:
                 type: string
               nullable: true
               example: ["keyword_search", "semantic_search"]
-            use_persistent_memory:
+            usePersistentMemory:
               type: boolean
               example: true
-            smart_tool_routing:
+            smartToolRouting:
               type: boolean
               example: true
-            forced_intent:
+            forcedIntent:
               type: string
               nullable: true
               example: null
-            file_paths:
+            filePaths:
               type: array
               items:
                 type: string
               nullable: true
               example: ["./data/crime.csv"]
-            file_ids:
+            fileIds:
               type: array
               items:
                 type: string
@@ -645,48 +759,141 @@ def agent_chat_stream():
               example: false
     responses:
       200:
-        description: SSE stream of agent events.
+        description: SSE stream of `status`, then `result` (or `error`) events.
       400:
-        description: Validation error (e.g., missing user_input).
+        description: Validation error (usually returned as an SSE `error` event).
       500:
         description: Internal server error.
     """
     try:
         data = request.get_json() or {}
-        user_input = data.get('user_input')
-        if not user_input:
-            return jsonify({"error": "user_input is required"}), 400
+        normalized = _normalize_agent_chat_request(data)
+        user_query = normalized["user_query"]
+        if not user_query:
+            def _single_error():
+                yield _sse_event("error", {"error": "Missing userQuery in request body."})
+            return Response(
+                stream_with_context(_single_error()),
+                mimetype="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                    "Connection": "keep-alive",
+                },
+            )
 
-        logger.info(f"Streaming agent chat: {user_input[:100]}...")
+        logger.info(f"Streaming agent chat: {user_query[:100]}...")
 
         @stream_with_context
         def generate():
             try:
                 for item in stream_agent_chat_events(
-                    user_input=user_input,
-                    thread_id=data.get('thread_id'),
-                    memory_id=data.get('memory_id'),
-                    conversation_name=data.get('conversation_name'),
-                    recent_k=data.get('recent_k'),
-                    tool_strategy=data.get('tool_strategy', 'granular'),
-                    include_mcp_tools=bool(data.get('include_mcp_tools', False)),
-                    mcp_modules=_parse_mcp_modules(data.get('mcp_modules')),
-                    enabled_search_methods=_parse_enabled_search_methods(data.get('enabled_search_methods')),
-                    use_persistent_memory=bool(data.get('use_persistent_memory', True)),
-                    smart_tool_routing=bool(data.get('smart_tool_routing', True)),
-                    forced_intent=data.get('forced_intent'),
-                    file_paths=data.get('file_paths'),
-                    file_ids=data.get('file_ids'),
-                    verbose=bool(data.get('verbose', False)),
+                    user_input=user_query,
+                    thread_id=normalized.get("thread_id"),
+                    memory_id=normalized.get("memory_id"),
+                    conversation_name=normalized.get("conversation_name"),
+                    recent_k=normalized.get("recent_k"),
+                    tool_strategy=normalized.get("tool_strategy", "granular"),
+                    include_mcp_tools=bool(normalized.get("include_mcp_tools", False)),
+                    mcp_modules=_parse_mcp_modules(normalized.get("mcp_modules")),
+                    enabled_search_methods=_parse_enabled_search_methods(normalized.get("enabled_search_methods")),
+                    use_persistent_memory=bool(normalized.get("use_persistent_memory", True)),
+                    smart_tool_routing=bool(normalized.get("smart_tool_routing", True)),
+                    forced_intent=normalized.get("forced_intent"),
+                    file_paths=normalized.get("file_paths"),
+                    file_ids=normalized.get("file_ids"),
+                    verbose=bool(normalized.get("verbose", False)),
                 ):
                     event_name = str(item.get("event") or "message")
-                    yield _sse_event(event_name, item.get("data") or {})
+                    payload = item.get("data") or {}
+                    agent_role = item.get("agent_role") or payload.get("role")
+                    node_name = item.get("node")
+
+                    # --- Categorized events (in addition to Node-style status/result/error) ---
+                    if event_name == "route_trace":
+                        yield _sse_event("routing", {"type": "route_trace", "detail": payload})
+
+                    if event_name == "status":
+                        stage = payload.get("stage")
+                        if stage in {"initialized", "intent_classified", "policy_resolved"}:
+                            yield _sse_event("routing", {"type": stage, "detail": payload})
+
+                    if event_name in {"subagent_started", "subagent_completed"}:
+                        role = payload.get("role") or agent_role
+                        category = _category_for_agent_role(role)
+                        yield _sse_event(
+                            category,
+                            {"type": event_name, "agent": str(role or ""), "node": node_name, "detail": payload},
+                        )
+
+                    if event_name in {"tool_call", "tool_result"}:
+                        category = _category_for_agent_role(agent_role)
+                        yield _sse_event(
+                            category,
+                            {
+                                "type": event_name,
+                                "agent": str(agent_role or ""),
+                                "node": node_name,
+                                "detail": payload,
+                            },
+                        )
+
+                    if event_name == "artifact":
+                        yield _sse_event("file", {"type": "artifact", "agent": str(agent_role or ""), "detail": payload})
+
+                    if event_name == "completed":
+                        yield _sse_event(
+                            "answer",
+                            {"type": "completed", "final_answer": payload.get("final_answer"), "detail": payload},
+                        )
+
+                    if event_name == "response":
+                        yield _sse_event("answer", {"type": "result", "answer": payload.get("answer"), "detail": payload})
+
+                    # Align to Node endpoint: only emit status/result/error.
+                    if event_name == "status":
+                        stage = payload.get("status") or payload.get("stage")
+                        if stage:
+                            yield _sse_event("status", {"status": _humanize_stage(stage)})
+                        continue
+
+                    if event_name == "memory_loaded":
+                        yield _sse_event("status", {"status": "Augmenting question"})
+                        continue
+
+                    if event_name == "memory_saved":
+                        yield _sse_event("status", {"status": "Updating memory..."})
+                        continue
+
+                    if event_name == "warning":
+                        message = payload.get("message") or "Warning"
+                        yield _sse_event("status", {"status": str(message)})
+                        continue
+
+                    if event_name in {"subagent_started", "subagent_completed"}:
+                        role = payload.get("role") or "agent"
+                        msg = f"{'Running' if event_name == 'subagent_started' else 'Completed'} {role}"
+                        yield _sse_event("status", {"status": msg})
+                        continue
+
+                    if event_name == "verification_result":
+                        yield _sse_event("status", {"status": "Verification"})
+                        continue
+
+                    if event_name == "response":
+                        yield _sse_event("result", _format_agent_chat_result(payload))
+                        continue
+
+                    if event_name == "error":
+                        message = payload.get("error") or payload.get("message") or "Unknown error"
+                        yield _sse_event("error", {"error": str(message)})
+                        continue
             except ValueError as e:
                 logger.error(f"Agent chat stream validation error: {str(e)}")
-                yield _sse_event("error", {"message": str(e), "type": "validation_error"})
+                yield _sse_event("error", {"error": str(e)})
             except Exception as e:
                 logger.error(f"Error streaming agent chat: {str(e)}", exc_info=True)
-                yield _sse_event("error", {"message": str(e), "type": "internal_error"})
+                yield _sse_event("error", {"error": str(e)})
 
         return Response(
             generate(),
