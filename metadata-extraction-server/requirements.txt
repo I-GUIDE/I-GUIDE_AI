@@ -1,0 +1,12 @@
+flask
+boto3
+botocore
+rasterio
+fiona
+nbformat
+shapely
+torch
+transformers
+python-dotenv
+requests
+
