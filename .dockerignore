@@ -93,8 +93,8 @@ docker-compose.override.yml
 *.swp
 *~
 
-# Tools and scripts (not needed in containers)
-tools/
+# Tools and scripts (not needed in containers — anchored to repo root only)
+/tools/
 run_integration_check.py
 
 # Results and data files
