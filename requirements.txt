@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 aiohttp
 boto3
 fiona
@@ -23,3 +24,8 @@ spacy
 torch
 transformers
 langchain-core
+=======
+-r embedding-server/requirements.txt
+-r metadata-extraction-server/requirements.txt
+
+>>>>>>> codex/install-requirements
