@@ -38,22 +38,21 @@ load_dotenv(dotenv_path=env_path)
 #     name="I-GUIDE Tools",
 #     json_response=True,
 # )
+def _hosts_from_env(var: str, defaults: list[str]) -> list[str]:
+    raw = os.getenv(var, "").strip()
+    return [h.strip() for h in raw.split(",") if h.strip()] if raw else defaults
+
+_default_allowed_hosts = ["127.0.0.1:*", "localhost:*", "mcp-server:*"]
+_default_allowed_origins = ["http://127.0.0.1:*", "http://localhost:*", "http://mcp-server:*"]
+
 mcp = FastMCP(
     name="I-GUIDE Tools",
     json_response=True,
     host="0.0.0.0",
     transport_security=TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
-        allowed_hosts=[
-            "149.165.147.219:*",
-            "127.0.0.1:*",
-            "localhost:*",
-        ],
-        allowed_origins=[
-            "http://149.165.147.219:*",
-            "http://127.0.0.1:*",
-            "http://localhost:*",
-        ],
+        allowed_hosts=_hosts_from_env("MCP_ALLOWED_HOSTS", _default_allowed_hosts),
+        allowed_origins=_hosts_from_env("MCP_ALLOWED_ORIGINS", _default_allowed_origins),
     ),
 )
 # MCP transport — ASGI app speaking the MCP streamable HTTP protocol.

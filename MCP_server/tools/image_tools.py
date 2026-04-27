@@ -5,10 +5,7 @@ import time
 from server import mcp_tool
 from fastapi import UploadFile, File
 
-API_URL = os.environ.get(
-    "VISION_API_URL",
-    "http://149.165.153.129:8000/v1/chat/completions"
-)
+API_URL = os.environ.get("VISION_API_URL")
 API_KEY = os.environ.get("VISION_API_KEY")
 MODEL_NAME = os.environ.get(
     "VISION_API_MODEL",
