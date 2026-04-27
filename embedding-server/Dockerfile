@@ -26,6 +26,9 @@ RUN npm install --production
 WORKDIR /app
 COPY embedding-server/ ./embedding-server/
 
+# Pre-download HuggingFace model so the container starts without network access
+RUN python -c "from transformers import AutoTokenizer, AutoModel; AutoTokenizer.from_pretrained('sentence-transformers/all-MiniLM-L6-v2'); AutoModel.from_pretrained('sentence-transformers/all-MiniLM-L6-v2')"
+
 # Create a non-root user
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser

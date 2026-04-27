@@ -20,8 +20,14 @@ COPY rag_pipeline/ ./rag_pipeline/
 COPY agent_runtime/ ./agent_runtime/
 COPY api/ ./api/
 
-# Create a non-root user
-RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+# Pre-download SentenceTransformer model so the container doesn't need
+# outbound network access to HuggingFace on first request
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+
+# Create writable upload directory and non-root user
+RUN useradd -m -u 1000 appuser \
+    && mkdir -p /app/agent_chat_files/uploads \
+    && chown -R appuser:appuser /app
 USER appuser
 
 # Expose port
