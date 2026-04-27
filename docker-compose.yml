@@ -1,9 +1,14 @@
+<<<<<<< HEAD
 version: '3.8'
 
+=======
+version: '3.9'
+>>>>>>> codex/install-requirements
 services:
   embedding-server:
     build:
       context: .
+<<<<<<< HEAD
       dockerfile: embedding-server/Dockerfile
     container_name: embedding-server
     ports:
@@ -25,10 +30,17 @@ services:
       start_period: 40s
     networks:
       - iguide-network
+=======
+      dockerfile: embedding-server/Dockerfile.embedding
+    ports:
+      - "5000:5000"
+    container_name: iguide-embedding-server
+>>>>>>> codex/install-requirements
 
   metadata-extraction-server:
     build:
       context: .
+<<<<<<< HEAD
       dockerfile: metadata-extraction-server/Dockerfile
     container_name: metadata-extraction-server
     ports:
@@ -105,3 +117,9 @@ services:
 networks:
   iguide-network:
     driver: bridge
+=======
+      dockerfile: metadata-extraction-server/Dockerfile.metadata
+    ports:
+      - "5001:5001"
+    container_name: iguide-metadata-server
+>>>>>>> codex/install-requirements
