@@ -50,14 +50,15 @@ def extract_metadata(bucket, key):
         # Initialize S3 client for Minio
         s3 = boto3.client(
             's3',
-            endpoint_url="http://i-guide-storage-dev.cis220065.projects.jetstream-cloud.org:9010",
+            endpoint_url=os.getenv("MINIO_ENDPOINT_URL", "http://i-guide-storage-dev.cis220065.projects.jetstream-cloud.org:9010"),
             aws_access_key_id=os.getenv('MINIO_ACCESS_KEY_ID', ''),
             aws_secret_access_key=os.getenv('MINIO_ACCESS_KEY', ''),
             config=boto3.session.Config(signature_version='s3v4')
         )
 
         # Download file to temporary storage
-        tmp_path = f"/tmp/{key}"
+        tmp_path = os.path.join("/tmp", key)
+        os.makedirs(os.path.dirname(tmp_path), exist_ok=True)
         logging.info(f"Downloading {key} from bucket {bucket}")
         s3.download_file(bucket, key, tmp_path)
         logging.info(f"Download complete: {tmp_path}")
