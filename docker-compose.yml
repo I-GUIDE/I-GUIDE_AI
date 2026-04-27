@@ -34,6 +34,7 @@ services:
     ports:
       - "5001:5001"
     environment:
+      - MINIO_ENDPOINT_URL=${MINIO_ENDPOINT_URL}
       - MINIO_ACCESS_KEY_ID=${MINIO_ACCESS_KEY_ID}
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
       - OPENSEARCH_NODE=${OPENSEARCH_NODE}
@@ -66,6 +67,8 @@ services:
       - OPENSEARCH_MEMORY_INDEX=${OPENSEARCH_MEMORY_INDEX:-chat_memory}
       # Embedding Service
       - FLASK_EMBEDDING_URL=http://embedding-server:5000
+      # MCP Tool Server
+      - MCP_SERVER_URL=http://mcp-server:8000/mcp
       # LLM Configuration
       - ANVILGPT_URL=${ANVILGPT_URL}
       - ANVILGPT_KEY=${ANVILGPT_KEY}
@@ -87,11 +90,16 @@ services:
       # Logging
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - PORT=5002
+      - AGENT_FILE_STORAGE_ROOT=/app/agent_chat_files
     env_file:
       - .env
+    volumes:
+      - agent_chat_files:/app/agent_chat_files
     restart: unless-stopped
     depends_on:
       embedding-server:
+        condition: service_healthy
+      mcp-server:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:5002/health', timeout=5)"]
@@ -102,6 +110,37 @@ services:
     networks:
       - iguide-network
 
+  mcp-server:
+    build:
+      context: .
+      dockerfile: MCP_server/Dockerfile
+    container_name: mcp-server
+    ports:
+      - "8000:8000"
+    environment:
+      - VISION_API_URL=${VISION_API_URL}
+      - VISION_API_KEY=${VISION_API_KEY}
+      - VISION_API_MODEL=${VISION_API_MODEL}
+      - MCP_ALLOWED_HOSTS=${MCP_ALLOWED_HOSTS:-mcp-server:*,127.0.0.1:*,localhost:*}
+      - MCP_ALLOWED_ORIGINS=${MCP_ALLOWED_ORIGINS:-http://mcp-server:*,http://127.0.0.1:*,http://localhost:*}
+      - AGENT_FILE_STORAGE_ROOT=/app/agent_chat_files
+    env_file:
+      - .env
+    volumes:
+      - agent_chat_files:/app/agent_chat_files
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - iguide-network
+
 networks:
   iguide-network:
     driver: bridge
+
+volumes:
+  agent_chat_files:
