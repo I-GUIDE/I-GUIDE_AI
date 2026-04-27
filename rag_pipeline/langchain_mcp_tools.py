@@ -344,7 +344,7 @@ def _make_image_tools(module: Any) -> List[Callable[..., Any]]:
     api_url = getattr(
         module,
         "API_URL",
-        os.getenv("VISION_API_URL", "http://149.165.153.129:8000/v1/chat/completions"),
+        os.getenv("VISION_API_URL"),
     )
     api_key = getattr(module, "API_KEY", os.getenv("VISION_API_KEY"))
     model_name = getattr(
