@@ -142,7 +142,8 @@ def _augment_user_input_with_file_ids(user_input: str, file_ids: Sequence[str]) 
     return (
         f"{user_input}\n\n"
         "Uploaded files are available to the agent via local file tools. "
-        "Use these uploaded file ids when inspecting files, and use `write_output_file` for downloadable outputs:\n"
+        "Use the exact uploaded file ids, not the display filenames, when inspecting files. "
+        "Use `write_output_file` for downloadable outputs:\n"
         f"{attachment_lines}"
     )
 
