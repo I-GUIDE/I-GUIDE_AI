@@ -11,9 +11,7 @@ import pandas as pd
 import geopandas as gpd
 
 from server import mcp_tool
-
-# In-memory cache for loaded data (used when called locally via adapter)
-_dataframe_cache: Dict[str, gpd.GeoDataFrame] = {}
+from tools.cache import _dataframe_cache
 
 
 @mcp_tool

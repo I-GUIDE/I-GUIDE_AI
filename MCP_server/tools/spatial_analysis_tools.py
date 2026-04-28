@@ -14,8 +14,7 @@ from ddgs import DDGS
 
 from server import mcp_tool
 
-# Import the cache from data_tools (module loaded without a package)
-from tools.data_tools import _dataframe_cache
+from tools.cache import _dataframe_cache
 
 
 @mcp_tool
@@ -51,8 +50,8 @@ def count_crimes_per_community(crime_type: str = None) -> Dict[str, Any]:
     gdf_points = gdf_points.to_crs(gdf_polygons.crs)
     joined_gdf = gpd.sjoin(gdf_polygons, gdf_points, how="left", predicate="contains")
     
-    # Count points per community
-    point_counts = joined_gdf.groupby("community").size()
+    # Count only matched points; left-join placeholder rows have null index_right.
+    point_counts = joined_gdf.groupby("community")["index_right"].count()
     point_counts.name = "crime_count"
     
     # Merge back to polygons
