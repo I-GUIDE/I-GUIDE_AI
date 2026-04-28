@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .file_store import create_output_file, get_file_record, resolve_file_id
+from .file_store import create_output_file, get_file_record, resolve_file_id, storage_root
 
 DEFAULT_MAX_CHARS = 12000
 DEFAULT_MAX_ROWS = 20
@@ -18,29 +18,59 @@ def _repo_root() -> Path:
 
 
 def _allowed_roots() -> List[Path]:
-    roots = {_repo_root().resolve()}
+    roots = {_repo_root().resolve(), storage_root().resolve()}
     upload_folder = os.getenv("UPLOAD_FOLDER")
     if upload_folder:
         roots.add(Path(upload_folder).expanduser().resolve())
     return sorted(roots)
 
 
+def _find_managed_file_by_name(filename: str) -> Optional[Path]:
+    if not filename or any(sep in filename for sep in ("/", "\\")):
+        return None
+
+    candidates: List[Path] = []
+    root = storage_root()
+    for folder in (root / "uploads", root / "outputs"):
+        if not folder.exists():
+            continue
+        for path in folder.iterdir():
+            if path.is_file() and path.name.endswith(f"__{filename}"):
+                candidates.append(path)
+
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: path.stat().st_mtime).resolve()
+
+
 def _resolve_local_allowed_path(path: str, *, must_exist: bool = True) -> Path:
-    candidate = Path(path).expanduser()
-    if not candidate.is_absolute():
-        candidate = (_repo_root() / candidate).resolve()
+    ref = str(path or "").strip()
+    matched_managed_file = _find_managed_file_by_name(ref)
+    if matched_managed_file is not None:
+        return matched_managed_file
+
+    raw_candidate = Path(ref).expanduser()
+    if raw_candidate.is_absolute():
+        candidates = [raw_candidate.resolve()]
     else:
-        candidate = candidate.resolve()
+        candidates = [
+            (storage_root() / raw_candidate).resolve(),
+            (_repo_root() / raw_candidate).resolve(),
+        ]
 
     allowed = _allowed_roots()
-    if not any(candidate == root or root in candidate.parents for root in allowed):
-        allowed_list = ", ".join(str(root) for root in allowed)
-        raise ValueError(f"path must be inside an allowed root: {allowed_list}")
+    for candidate in candidates:
+        if not any(candidate == root or root in candidate.parents for root in allowed):
+            continue
+        if must_exist and not candidate.exists():
+            continue
+        return candidate
 
-    if must_exist and not candidate.exists():
-        raise ValueError(f"file does not exist: {candidate}")
-
-    return candidate
+    allowed_list = ", ".join(str(root) for root in allowed)
+    if must_exist:
+        checked = ", ".join(str(candidate) for candidate in candidates)
+        raise ValueError(f"file does not exist: {ref}; checked: {checked}")
+    raise ValueError(f"path must be inside an allowed root: {allowed_list}")
 
 
 def _resolve_allowed_path(path: str, *, must_exist: bool = True) -> Tuple[Path, Optional[Dict[str, Any]]]:
@@ -57,6 +87,15 @@ def _resolve_allowed_path(path: str, *, must_exist: bool = True) -> Tuple[Path, 
 
 def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _display_filename(path: Path, record: Optional[Dict[str, Any]]) -> str:
+    if record and record.get("filename"):
+        return str(record["filename"])
+    name = path.name
+    if "__" in name:
+        return name.split("__", 1)[1] or name
+    return name
 
 
 def _truncate(text: str, max_chars: int) -> str:
@@ -97,7 +136,7 @@ def read_text_file_tool(path: str, max_chars: int = DEFAULT_MAX_CHARS) -> str:
     text = _read_text(resolved)
     payload = {
         "file_id": (record or {}).get("file_id"),
-        "filename": (record or {}).get("filename") or resolved.name,
+        "filename": _display_filename(resolved, record),
         "path": str(resolved),
         "size_bytes": resolved.stat().st_size,
         "content": _truncate(text, max_chars),
@@ -122,7 +161,7 @@ def inspect_file_for_analysis_tool(
     payload: Dict[str, Any] = {
         "file_id": (record or {}).get("file_id"),
         "path": str(resolved),
-        "filename": (record or {}).get("filename") or resolved.name,
+        "filename": _display_filename(resolved, record),
         "question": question or "",
         "size_bytes": resolved.stat().st_size,
     }
@@ -164,7 +203,7 @@ def write_text_file_tool(path: str, content: str, overwrite: bool = False) -> st
     resolved.write_text(content or "", encoding="utf-8")
     payload = {
         "file_id": (record or {}).get("file_id"),
-        "filename": (record or {}).get("filename") or resolved.name,
+        "filename": _display_filename(resolved, record),
         "path": str(resolved),
         "size_bytes": resolved.stat().st_size,
         "overwritten": bool(overwrite and existed_before),

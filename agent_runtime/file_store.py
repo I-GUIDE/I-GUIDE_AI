@@ -9,23 +9,28 @@ from uuid import uuid4
 from werkzeug.datastructures import FileStorage
 from werkzeug.utils import secure_filename
 
+DEFAULT_STORAGE_DIR = "agent_chat_files"
+
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def _resolve_configured_root(value: str) -> Path:
+    configured = Path(value).expanduser()
+    if configured.is_absolute():
+        return configured.resolve()
+    return (_repo_root() / configured).resolve()
+
+
 def storage_root() -> Path:
     configured = os.getenv("AGENT_FILE_STORAGE_ROOT")
     if configured:
-        root = Path(configured).expanduser().resolve()
+        root = _resolve_configured_root(configured)
         root.mkdir(parents=True, exist_ok=True)
         return root
 
-    candidates = []
-    upload_folder = os.getenv("UPLOAD_FOLDER")
-    if upload_folder:
-        candidates.append(Path(upload_folder).expanduser().resolve() / "agent_chat_files")
-    candidates.append((_repo_root() / "agent_chat_files").resolve())
+    candidates = [(_repo_root() / DEFAULT_STORAGE_DIR).resolve()]
 
     last_error: Optional[Exception] = None
     for root in candidates:
@@ -85,9 +90,12 @@ def require_file_record(file_id: str) -> Dict[str, Any]:
 
 def resolve_file_id(file_id: str) -> Path:
     record = require_file_record(file_id)
-    path = Path(record["path"]).resolve()
+    path = _record_path(record)
     if not path.exists():
-        raise ValueError(f"file for file_id does not exist: {file_id}")
+        raise ValueError(
+            f"file for file_id does not exist: {file_id}; "
+            f"expected under storage root: {storage_root()}"
+        )
     return path
 
 
@@ -96,16 +104,48 @@ def _write_record(record: Dict[str, Any]) -> Dict[str, Any]:
     return record
 
 
+def _record_path(record: Dict[str, Any]) -> Path:
+    root = storage_root()
+    relative_path = record.get("relative_path")
+    if relative_path:
+        return (root / str(relative_path)).resolve()
+
+    stored_path = record.get("path")
+    if stored_path:
+        candidate = Path(str(stored_path)).expanduser()
+        if candidate.is_absolute() and candidate.exists():
+            return candidate.resolve()
+        if not candidate.is_absolute():
+            relative_candidate = (root / candidate).resolve()
+            if relative_candidate.exists():
+                return relative_candidate
+
+    filename = record.get("filename")
+    file_id = record.get("file_id")
+    kind = record.get("kind") or "upload"
+    if filename and file_id:
+        folder = "outputs" if kind == "output" else "uploads"
+        return (root / folder / f"{file_id}__{filename}").resolve()
+
+    if stored_path:
+        candidate = Path(str(stored_path)).expanduser()
+        return candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
+    raise ValueError(f"file record missing path for file_id: {record.get('file_id')}")
+
+
 def save_uploaded_file(file_storage: FileStorage) -> Dict[str, Any]:
     original_name = secure_filename(file_storage.filename or "upload.bin") or "upload.bin"
     file_id = f"file_{uuid4().hex[:12]}"
-    target = _uploads_dir() / f"{file_id}__{original_name}"
+    relative_path = Path("uploads") / f"{file_id}__{original_name}"
+    target = storage_root() / relative_path
+    target.parent.mkdir(parents=True, exist_ok=True)
     file_storage.save(target)
     record = {
         "file_id": file_id,
         "filename": original_name,
         "kind": "upload",
-        "path": str(target),
+        "path": str(relative_path),
+        "relative_path": str(relative_path),
         "size_bytes": target.stat().st_size,
         "download_url": _build_download_url(file_id),
     }
@@ -131,13 +171,16 @@ def create_output_file(filename: str, content: str, overwrite: bool = False) -> 
     else:
         file_id = f"file_{uuid4().hex[:12]}"
 
-    target = _outputs_dir() / f"{file_id}__{safe_name}"
+    relative_path = Path("outputs") / f"{file_id}__{safe_name}"
+    target = storage_root() / relative_path
+    target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content or "", encoding="utf-8")
     record = {
         "file_id": file_id,
         "filename": safe_name,
         "kind": "output",
-        "path": str(target),
+        "path": str(relative_path),
+        "relative_path": str(relative_path),
         "size_bytes": target.stat().st_size,
         "download_url": _build_download_url(file_id),
     }
