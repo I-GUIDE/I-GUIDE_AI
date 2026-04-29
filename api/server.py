@@ -27,10 +27,132 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# API key auth
+# ---------------------------------------------------------------------------
+
+def _coalesce(*values):
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
+
+
+def _get_agent_chat_api_key() -> str:
+    return str(os.getenv("AGENT_CHAT_API_KEY") or "").strip()
+
+
+def _extract_presented_api_key() -> str:
+    header_key = str(request.headers.get("X-API-KEY") or "").strip()
+    if header_key:
+        return header_key
+    auth = str(request.headers.get("Authorization") or "").strip()
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return ""
+
+
+def _require_agent_chat_api_key() -> None:
+    expected = _get_agent_chat_api_key()
+    if not expected:
+        raise RuntimeError("AGENT_CHAT_API_KEY is not configured.")
+    presented = _extract_presented_api_key()
+    if not presented or presented != expected:
+        raise PermissionError("Forbidden: invalid API key.")
+
+
+# ---------------------------------------------------------------------------
+# Request / response normalization
+# ---------------------------------------------------------------------------
+
+def _normalize_agent_chat_request(data: dict) -> dict:
+    """Normalize camelCase frontend fields to internal snake_case, accepting both."""
+    user_query = _coalesce(data.get("userQuery"), data.get("user_input"))
+    memory_id = _coalesce(data.get("memoryId"), data.get("memory_id"))
+    thread_id = _coalesce(data.get("threadId"), data.get("thread_id"))
+    conversation_name = _coalesce(data.get("conversationName"), data.get("conversation_name"))
+    recent_k = _coalesce(data.get("recentK"), data.get("recent_k"))
+    tool_strategy = _coalesce(data.get("toolStrategy"), data.get("tool_strategy"), "granular")
+    include_mcp_tools = bool(_coalesce(data.get("includeMcpTools"), data.get("include_mcp_tools"), False))
+    mcp_modules = _coalesce(data.get("mcpModules"), data.get("mcp_modules"))
+    enabled_search_methods = _coalesce(data.get("enabledSearchMethods"), data.get("enabled_search_methods"))
+    use_persistent_memory = bool(_coalesce(data.get("usePersistentMemory"), data.get("use_persistent_memory"), True))
+    smart_tool_routing = bool(_coalesce(data.get("smartToolRouting"), data.get("smart_tool_routing"), True))
+    forced_intent = _coalesce(data.get("forcedIntent"), data.get("forced_intent"))
+    file_paths = _coalesce(data.get("filePaths"), data.get("file_paths"))
+    file_ids = _coalesce(data.get("fileIds"), data.get("file_ids"))
+    verbose = bool(_coalesce(data.get("verbose"), False))
+
+    return {
+        "user_query": str(user_query).strip() if user_query is not None else "",
+        "memory_id": str(memory_id).strip() if memory_id is not None else None,
+        "thread_id": str(thread_id).strip() if thread_id is not None else None,
+        "conversation_name": str(conversation_name).strip() if conversation_name is not None else None,
+        "recent_k": recent_k,
+        "tool_strategy": str(tool_strategy).strip(),
+        "include_mcp_tools": include_mcp_tools,
+        "mcp_modules": mcp_modules,
+        "enabled_search_methods": enabled_search_methods,
+        "use_persistent_memory": use_persistent_memory,
+        "smart_tool_routing": smart_tool_routing,
+        "forced_intent": forced_intent,
+        "file_paths": file_paths,
+        "file_ids": file_ids,
+        "verbose": verbose,
+    }
+
+
+def _format_agent_chat_result(payload: dict) -> dict:
+    """Align output shape to the legacy Node /llm/search result object."""
+    answer = payload.get("answer") or ""
+    elements = payload.get("elements") or []
+    retrieval_steps = payload.get("retrievalSteps") or payload.get("retrieval_steps") or []
+    react_history = payload.get("reactHistory") or payload.get("react_history") or []
+
+    formatted = {
+        "answer": answer,
+        "message_id": payload.get("message_id"),
+        "elements": elements,
+        "count": int(payload.get("count") or (len(elements) if isinstance(elements, list) else 0)),
+        "retrievalSteps": retrieval_steps,
+        "reactHistory": react_history,
+        "memoryId": payload.get("memoryId") or payload.get("memory_id"),
+        "threadId": payload.get("threadId") or payload.get("thread_id"),
+        "routeTrace": payload.get("routeTrace") or payload.get("route_trace") or {},
+        "artifacts": payload.get("artifacts") or {},
+        "agent_result": payload.get("agent_result") or {},
+        "fileIds": payload.get("fileIds") or payload.get("file_ids") or [],
+        "filePaths": payload.get("filePaths") or payload.get("file_paths") or [],
+    }
+    warning = payload.get("warning")
+    if warning:
+        formatted["warning"] = warning
+    return formatted
+
+
+def _humanize_stage(value: str) -> str:
+    text = str(value or "").strip().replace("_", " ")
+    return text[:1].upper() + text[1:] if text else "Status"
+
+
+def _category_for_agent_role(role: object) -> str:
+    role_text = str(role or "").strip().lower()
+    if role_text == "search":
+        return "search"
+    if role_text in {"analysis", "code", "verification"}:
+        return "analysis"
+    return "analysis"
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
 def _format_elements(retrieved_documents):
-    """
-    Convert internal evidence entries into the simplified element payload expected by the UI.
-    """
+    """Convert internal evidence entries into the simplified element payload expected by the UI."""
     elements = []
     opengeodata_count = 0
     for entry in retrieved_documents:
@@ -38,8 +160,7 @@ def _format_elements(retrieved_documents):
         metadata = (entry or {}).get("metadata") or {}
         source = entry.get("source", "unknown")
         resource_type = document.get("resource-type") or document.get("element_type")
-        
-        # Track opengeodata results
+
         if source == "opengeodata" or resource_type == "opengeodata":
             opengeodata_count += 1
 
@@ -54,7 +175,7 @@ def _format_elements(retrieved_documents):
                 "authors": document.get("authors") or [],
                 "tags": document.get("tags") or [],
                 "thumbnail-image": document.get("thumbnail-image") or document.get("thumbnail_image"),
-                "source": source,  # Include source field to identify opengeodata results
+                "source": source,
             }
         )
     if opengeodata_count > 0:
@@ -124,14 +245,96 @@ def _normalize_uploaded_files():
     return [item for item in files if getattr(item, "filename", None)]
 
 
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+
 @app.route('/health', methods=['GET'])
 def health():
-    """Health check endpoint"""
+    """
+    Health check endpoint.
+
+    ---
+    tags:
+      - Health
+    produces:
+      - application/json
+    responses:
+      200:
+        description: Service is healthy.
+        schema:
+          type: object
+          properties:
+            status:
+              type: string
+              example: healthy
+            service:
+              type: string
+              example: rag-pipeline
+    """
     return jsonify({"status": "healthy", "service": "rag-pipeline"}), 200
 
 
 @app.route('/agent/files/upload', methods=['POST'])
 def upload_agent_files():
+    """
+    Upload one or more files for the agent to inspect.
+
+    The returned `file_id` values can be passed to `/agent/chat` or
+    `/agent/chat/stream` via the JSON field `fileIds`.
+
+    ---
+    tags:
+      - Agent Files
+    consumes:
+      - multipart/form-data
+    produces:
+      - application/json
+    parameters:
+      - in: formData
+        name: file
+        type: file
+        required: false
+        description: Single file upload.
+      - in: formData
+        name: files
+        type: file
+        required: false
+        description: Multi-file upload (repeat this field per file).
+    responses:
+      200:
+        description: Upload succeeded.
+        schema:
+          type: object
+          properties:
+            files:
+              type: array
+              items:
+                type: object
+                properties:
+                  file_id:
+                    type: string
+                    example: file_0123456789ab
+                  filename:
+                    type: string
+                    example: data.csv
+                  kind:
+                    type: string
+                    example: upload
+                  size_bytes:
+                    type: integer
+                    example: 1234
+                  download_url:
+                    type: string
+                    example: /agent/files/file_0123456789ab/download
+            count:
+              type: integer
+              example: 2
+      400:
+        description: No files provided or invalid request.
+      500:
+        description: Internal server error.
+    """
     try:
         files = _normalize_uploaded_files()
         if not files:
@@ -149,6 +352,28 @@ def upload_agent_files():
 
 @app.route('/agent/files/<file_id>/download', methods=['GET'])
 def download_agent_file(file_id):
+    """
+    Download an uploaded (or generated) file by file_id.
+
+    ---
+    tags:
+      - Agent Files
+    produces:
+      - application/octet-stream
+    parameters:
+      - in: path
+        name: file_id
+        type: string
+        required: true
+        description: File identifier returned by `/agent/files/upload` or `write_output_file`.
+    responses:
+      200:
+        description: File bytes.
+      404:
+        description: Unknown file_id.
+      500:
+        description: Internal server error.
+    """
     try:
         record = require_file_record(file_id)
         path = resolve_file_id(file_id)
@@ -167,6 +392,7 @@ def download_agent_file(file_id):
     except Exception as e:
         logger.error(f"Error downloading agent file {file_id}: {str(e)}", exc_info=True)
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
 
 @app.route('/query', methods=['POST'])
 def query():
@@ -284,17 +510,15 @@ responses:
         error:
           type: string
 """
-
     try:
         data = request.get_json() or {}
         user_input = data.get('user_input')
-        
+
         if not user_input:
             return jsonify({"error": "user_input is required"}), 400
-        
+
         logger.info(f"Processing query: {user_input[:100]}...")
-        
-        # Run the full pipeline with LLM routing and reranker
+
         result = run_pipeline(
             user_input=user_input,
             memory_id=data.get('memory_id'),
@@ -304,10 +528,10 @@ responses:
             extra_state=data.get('extra_state', {})
         )
         response = _pipeline_response(result)
-        
+
         logger.info(f"Query processed successfully. Retrieved {response['count']} documents.")
         return jsonify(response), 200
-        
+
     except ValueError as e:
         logger.error(f"Validation error: {str(e)}")
         return jsonify({"error": str(e)}), 400
@@ -319,51 +543,137 @@ responses:
 @app.route('/agent/chat', methods=['POST'])
 def agent_chat():
     """
-Chat endpoint backed by the LangChain agent with optional persistent memory.
+    Chat endpoint backed by the LangChain agent with optional persistent memory.
 
-Request body:
-{
-    "user_input": "What datasets are available for Chicago crime?",
-    "thread_id": "chat-thread-1",
-    "memory_id": "conversation-1",
-    "conversation_name": "Chicago agent chat",
-    "recent_k": 8,
-    "tool_strategy": "granular",
-    "include_mcp_tools": false,
-    "mcp_modules": ["search_tools", "data_tools"],
-    "enabled_search_methods": ["keyword_search", "semantic_search"],
-    "use_persistent_memory": true,
-    "smart_tool_routing": true,
-    "forced_intent": null,
-    "file_paths": ["./data/crime.csv"],
-    "verbose": false
-}
-"""
+    Accepts both camelCase (frontend) and snake_case field names.
+
+    ---
+    tags:
+      - Agent Chat
+    consumes:
+      - application/json
+    produces:
+      - application/json
+    parameters:
+      - in: header
+        name: X-API-KEY
+        type: string
+        required: true
+        description: API key for agent chat endpoints (env var AGENT_CHAT_API_KEY).
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - userQuery
+          properties:
+            userQuery:
+              type: string
+              example: What datasets are available for Chicago crime?
+            memoryId:
+              type: string
+              nullable: true
+              example: conversation-1
+            threadId:
+              type: string
+              nullable: true
+              example: chat-thread-1
+            conversationName:
+              type: string
+              nullable: true
+              example: Chicago agent chat
+            recentK:
+              type: integer
+              nullable: true
+              example: 8
+            toolStrategy:
+              type: string
+              example: granular
+            includeMcpTools:
+              type: boolean
+              example: false
+            mcpModules:
+              type: array
+              items:
+                type: string
+              nullable: true
+              example: ["search_tools", "data_tools"]
+            enabledSearchMethods:
+              type: array
+              items:
+                type: string
+              nullable: true
+              example: ["keyword_search", "semantic_search"]
+            usePersistentMemory:
+              type: boolean
+              example: true
+            smartToolRouting:
+              type: boolean
+              example: true
+            forcedIntent:
+              type: string
+              nullable: true
+              example: null
+            filePaths:
+              type: array
+              items:
+                type: string
+              nullable: true
+              example: ["./data/crime.csv"]
+            fileIds:
+              type: array
+              items:
+                type: string
+              nullable: true
+              example: ["file_0123456789ab"]
+            verbose:
+              type: boolean
+              example: false
+    responses:
+      200:
+        description: Agent chat response payload.
+      400:
+        description: Validation error (e.g., missing userQuery).
+      403:
+        description: Forbidden — invalid or missing API key.
+      500:
+        description: Internal server error.
+    """
     try:
-        data = request.get_json() or {}
-        user_input = data.get('user_input')
-        if not user_input:
-            return jsonify({"error": "user_input is required"}), 400
+        try:
+            _require_agent_chat_api_key()
+        except PermissionError as exc:
+            return jsonify({"error": str(exc)}), 403
+        except RuntimeError as exc:
+            logger.error("Agent chat API key misconfigured: %s", exc)
+            return jsonify({"error": "Server misconfiguration: API key not set"}), 500
 
-        logger.info(f"Processing agent chat: {user_input[:100]}...")
-        response = run_agent_chat(
-            user_input=user_input,
-            thread_id=data.get('thread_id'),
-            memory_id=data.get('memory_id'),
-            conversation_name=data.get('conversation_name'),
-            recent_k=data.get('recent_k'),
-            tool_strategy=data.get('tool_strategy', 'granular'),
-            include_mcp_tools=bool(data.get('include_mcp_tools', False)),
-            mcp_modules=_parse_mcp_modules(data.get('mcp_modules')),
-            enabled_search_methods=_parse_enabled_search_methods(data.get('enabled_search_methods')),
-            use_persistent_memory=bool(data.get('use_persistent_memory', True)),
-            smart_tool_routing=bool(data.get('smart_tool_routing', True)),
-            forced_intent=data.get('forced_intent'),
-            file_paths=data.get('file_paths'),
-            file_ids=data.get('file_ids'),
-            verbose=bool(data.get('verbose', False)),
+        data = request.get_json() or {}
+        normalized = _normalize_agent_chat_request(data)
+        user_query = normalized["user_query"]
+        if not user_query:
+            return jsonify({"error": "Missing userQuery in request body."}), 400
+
+        logger.info(f"Processing agent chat: {user_query[:100]}...")
+        raw = run_agent_chat(
+            user_input=user_query,
+            thread_id=normalized.get("thread_id"),
+            memory_id=normalized.get("memory_id"),
+            conversation_name=normalized.get("conversation_name"),
+            recent_k=normalized.get("recent_k"),
+            tool_strategy=normalized.get("tool_strategy", "granular"),
+            include_mcp_tools=bool(normalized.get("include_mcp_tools", False)),
+            mcp_modules=_parse_mcp_modules(normalized.get("mcp_modules")),
+            enabled_search_methods=_parse_enabled_search_methods(normalized.get("enabled_search_methods")),
+            use_persistent_memory=bool(normalized.get("use_persistent_memory", True)),
+            smart_tool_routing=bool(normalized.get("smart_tool_routing", True)),
+            forced_intent=normalized.get("forced_intent"),
+            file_paths=normalized.get("file_paths"),
+            file_ids=normalized.get("file_ids"),
+            verbose=bool(normalized.get("verbose", False)),
         )
-        return jsonify(response), 200
+        return jsonify(_format_agent_chat_result(raw)), 200
     except ValueError as e:
         logger.error(f"Agent chat validation error: {str(e)}")
         return jsonify({"error": str(e)}), 400
@@ -374,42 +684,230 @@ Request body:
 
 @app.route('/agent/chat/stream', methods=['POST'])
 def agent_chat_stream():
-    try:
-        data = request.get_json() or {}
-        user_input = data.get('user_input')
-        if not user_input:
-            return jsonify({"error": "user_input is required"}), 400
+    """
+    Stream agent chat events using Server-Sent Events (SSE).
 
-        logger.info(f"Streaming agent chat: {user_input[:100]}...")
+    The response is `text/event-stream` with blocks of the form:
+    `event: <name>\\ndata: <json>\\n\\n`
+
+    Node-compatible events: `status`, `result`, `error`.
+    Additional categorized events: `routing`, `search`, `analysis`, `answer`, `file`.
+
+    ---
+    tags:
+      - Agent Chat
+    consumes:
+      - application/json
+    produces:
+      - text/event-stream
+    parameters:
+      - in: header
+        name: X-API-KEY
+        type: string
+        required: true
+        description: API key for agent chat endpoints (env var AGENT_CHAT_API_KEY).
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - userQuery
+          properties:
+            userQuery:
+              type: string
+              example: Inspect the attached CSV and summarize the main columns.
+            memoryId:
+              type: string
+              nullable: true
+              example: demo-session-1
+            threadId:
+              type: string
+              nullable: true
+              example: demo-thread-1
+            conversationName:
+              type: string
+              nullable: true
+            recentK:
+              type: integer
+              nullable: true
+              example: 8
+            toolStrategy:
+              type: string
+              example: granular
+            includeMcpTools:
+              type: boolean
+              example: false
+            mcpModules:
+              type: array
+              items:
+                type: string
+              nullable: true
+            enabledSearchMethods:
+              type: array
+              items:
+                type: string
+              nullable: true
+            usePersistentMemory:
+              type: boolean
+              example: true
+            smartToolRouting:
+              type: boolean
+              example: true
+            forcedIntent:
+              type: string
+              nullable: true
+            filePaths:
+              type: array
+              items:
+                type: string
+              nullable: true
+            fileIds:
+              type: array
+              items:
+                type: string
+              nullable: true
+            verbose:
+              type: boolean
+              example: false
+    responses:
+      200:
+        description: SSE stream of status / result (or error) events.
+      400:
+        description: Validation error (returned as an SSE error event).
+      403:
+        description: Forbidden — invalid or missing API key.
+      500:
+        description: Internal server error.
+    """
+    try:
+        try:
+            _require_agent_chat_api_key()
+        except PermissionError as exc:
+            return jsonify({"error": str(exc)}), 403
+        except RuntimeError as exc:
+            logger.error("Agent chat stream API key misconfigured: %s", exc)
+            return jsonify({"error": "Server misconfiguration: API key not set"}), 500
+
+        data = request.get_json() or {}
+        normalized = _normalize_agent_chat_request(data)
+        user_query = normalized["user_query"]
+        if not user_query:
+            def _single_error():
+                yield _sse_event("error", {"error": "Missing userQuery in request body."})
+            return Response(
+                stream_with_context(_single_error()),
+                mimetype="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+            )
+
+        logger.info(f"Streaming agent chat: {user_query[:100]}...")
 
         @stream_with_context
         def generate():
             try:
                 for item in stream_agent_chat_events(
-                    user_input=user_input,
-                    thread_id=data.get('thread_id'),
-                    memory_id=data.get('memory_id'),
-                    conversation_name=data.get('conversation_name'),
-                    recent_k=data.get('recent_k'),
-                    tool_strategy=data.get('tool_strategy', 'granular'),
-                    include_mcp_tools=bool(data.get('include_mcp_tools', False)),
-                    mcp_modules=_parse_mcp_modules(data.get('mcp_modules')),
-                    enabled_search_methods=_parse_enabled_search_methods(data.get('enabled_search_methods')),
-                    use_persistent_memory=bool(data.get('use_persistent_memory', True)),
-                    smart_tool_routing=bool(data.get('smart_tool_routing', True)),
-                    forced_intent=data.get('forced_intent'),
-                    file_paths=data.get('file_paths'),
-                    file_ids=data.get('file_ids'),
-                    verbose=bool(data.get('verbose', False)),
+                    user_input=user_query,
+                    thread_id=normalized.get("thread_id"),
+                    memory_id=normalized.get("memory_id"),
+                    conversation_name=normalized.get("conversation_name"),
+                    recent_k=normalized.get("recent_k"),
+                    tool_strategy=normalized.get("tool_strategy", "granular"),
+                    include_mcp_tools=bool(normalized.get("include_mcp_tools", False)),
+                    mcp_modules=_parse_mcp_modules(normalized.get("mcp_modules")),
+                    enabled_search_methods=_parse_enabled_search_methods(normalized.get("enabled_search_methods")),
+                    use_persistent_memory=bool(normalized.get("use_persistent_memory", True)),
+                    smart_tool_routing=bool(normalized.get("smart_tool_routing", True)),
+                    forced_intent=normalized.get("forced_intent"),
+                    file_paths=normalized.get("file_paths"),
+                    file_ids=normalized.get("file_ids"),
+                    verbose=bool(normalized.get("verbose", False)),
                 ):
                     event_name = str(item.get("event") or "message")
-                    yield _sse_event(event_name, item.get("data") or {})
+                    payload = item.get("data") or {}
+                    agent_role = item.get("agent_role") or payload.get("role")
+                    node_name = item.get("node")
+
+                    # Categorized events for richer frontend consumption
+                    if event_name == "route_trace":
+                        yield _sse_event("routing", {"type": "route_trace", "detail": payload})
+
+                    if event_name == "status":
+                        stage = payload.get("stage")
+                        if stage in {"initialized", "intent_classified", "policy_resolved"}:
+                            yield _sse_event("routing", {"type": stage, "detail": payload})
+
+                    if event_name in {"subagent_started", "subagent_completed"}:
+                        role = payload.get("role") or agent_role
+                        category = _category_for_agent_role(role)
+                        yield _sse_event(
+                            category,
+                            {"type": event_name, "agent": str(role or ""), "node": node_name, "detail": payload},
+                        )
+
+                    if event_name in {"tool_call", "tool_result"}:
+                        category = _category_for_agent_role(agent_role)
+                        yield _sse_event(
+                            category,
+                            {"type": event_name, "agent": str(agent_role or ""), "node": node_name, "detail": payload},
+                        )
+
+                    if event_name == "artifact":
+                        yield _sse_event("file", {"type": "artifact", "agent": str(agent_role or ""), "detail": payload})
+
+                    if event_name == "completed":
+                        yield _sse_event(
+                            "answer",
+                            {"type": "completed", "final_answer": payload.get("final_answer"), "detail": payload},
+                        )
+
+                    if event_name == "response":
+                        yield _sse_event("answer", {"type": "result", "answer": payload.get("answer"), "detail": payload})
+
+                    # Node-compatible events: status / result / error
+                    if event_name == "status":
+                        stage = payload.get("status") or payload.get("stage")
+                        if stage:
+                            yield _sse_event("status", {"status": _humanize_stage(stage)})
+                        continue
+
+                    if event_name == "memory_loaded":
+                        yield _sse_event("status", {"status": "Augmenting question"})
+                        continue
+
+                    if event_name == "memory_saved":
+                        yield _sse_event("status", {"status": "Updating memory..."})
+                        continue
+
+                    if event_name == "warning":
+                        yield _sse_event("status", {"status": str(payload.get("message") or "Warning")})
+                        continue
+
+                    if event_name in {"subagent_started", "subagent_completed"}:
+                        role = payload.get("role") or "agent"
+                        msg = f"{'Running' if event_name == 'subagent_started' else 'Completed'} {role}"
+                        yield _sse_event("status", {"status": msg})
+                        continue
+
+                    if event_name == "verification_result":
+                        yield _sse_event("status", {"status": "Verification"})
+                        continue
+
+                    if event_name == "response":
+                        yield _sse_event("result", _format_agent_chat_result(payload))
+                        continue
+
+                    if event_name == "error":
+                        message = payload.get("error") or payload.get("message") or "Unknown error"
+                        yield _sse_event("error", {"error": str(message)})
+                        continue
+
             except ValueError as e:
                 logger.error(f"Agent chat stream validation error: {str(e)}")
-                yield _sse_event("error", {"message": str(e), "type": "validation_error"})
+                yield _sse_event("error", {"error": str(e)})
             except Exception as e:
                 logger.error(f"Error streaming agent chat: {str(e)}", exc_info=True)
-                yield _sse_event("error", {"message": str(e), "type": "internal_error"})
+                yield _sse_event("error", {"error": str(e)})
 
         return Response(
             generate(),
@@ -431,23 +929,73 @@ def agent_chat_stream():
 @app.route('/query/batch', methods=['POST'])
 def batch_query():
     """
-    Batch query endpoint for processing multiple queries.
-    
-    Request body:
-    {
-        "queries": [
-            {"user_input": "query 1", "memory_id": "session-1"},
-            {"user_input": "query 2", "memory_id": "session-2"}
-        ]
-    }
+    Batch query endpoint for processing multiple queries in one call.
+
+    ---
+    tags:
+      - RAG
+      - Query
+    consumes:
+      - application/json
+    produces:
+      - application/json
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - queries
+          properties:
+            queries:
+              type: array
+              items:
+                type: object
+                properties:
+                  user_input:
+                    type: string
+                    example: What datasets are available for Chicago crime?
+                  memory_id:
+                    type: string
+                    nullable: true
+                  params:
+                    type: object
+                    nullable: true
+                  session_context:
+                    type: object
+                    nullable: true
+    responses:
+      200:
+        description: Batch query results.
+        schema:
+          type: object
+          properties:
+            results:
+              type: array
+              items:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  answer:
+                    type: object
+                  evidence:
+                    type: object
+                  error:
+                    type: string
+      400:
+        description: Validation error.
+      500:
+        description: Internal server error.
     """
     try:
         data = request.get_json() or {}
         queries = data.get('queries', [])
-        
+
         if not queries or not isinstance(queries, list):
             return jsonify({"error": "queries must be a non-empty list"}), 400
-        
+
         results = []
         for query_data in queries:
             try:
@@ -467,12 +1015,13 @@ def batch_query():
                     "success": False,
                     "error": str(e)
                 })
-        
+
         return jsonify({"results": results}), 200
-        
+
     except Exception as e:
         logger.error(f"Error processing batch query: {str(e)}", exc_info=True)
         return jsonify({"error": str(e)}), 500
+
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5002))
