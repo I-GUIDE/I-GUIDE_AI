@@ -58,7 +58,7 @@ def _extract_presented_api_key() -> str:
 def _require_agent_chat_api_key() -> None:
     expected = _get_agent_chat_api_key()
     if not expected:
-        raise RuntimeError("AGENT_CHAT_API_KEY is not configured.")
+        return  # auth disabled when key is not configured
     presented = _extract_presented_api_key()
     if not presented or presented != expected:
         raise PermissionError("Forbidden: invalid API key.")
