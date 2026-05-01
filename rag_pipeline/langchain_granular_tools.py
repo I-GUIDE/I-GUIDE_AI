@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 from .langchain_file_tools import make_langchain_file_tools
 from .search.opengeodata import get_opengeodata_results
 from .search.keyword import get_keyword_search_results
-from .search.neo4j import get_neo4j_search_results
+from .search.agents import get_neo4j_agent_results
 from .search.semantic import semantic_search as run_semantic_search
 from .search.spatial import get_spatial_search_results
 
@@ -61,7 +61,7 @@ def semantic_search_tool(query: str, limit: int = 8) -> str:
 
 
 def neo4j_search_tool(query: str, limit: int = 8) -> str:
-    hits = get_neo4j_search_results(query, limit=_safe_int(limit))
+    hits = get_neo4j_agent_results(query, limit=_safe_int(limit))
     return _build_payload(hits, source="neo4j")
 
 
@@ -111,7 +111,7 @@ def make_langchain_granular_tools(
         StructuredTool.from_function(
             func=neo4j_search_tool,
             name="neo4j_search",
-            description="Graph-aware Neo4j keyword search. Returns JSON with doc_ids and snippets.",
+            description="Graph-aware Neo4j search. Uses pattern-matched Cypher (authors, tags, resource types, collections), LLM-generated Cypher, then keyword fallback. Returns JSON with doc_ids and snippets.",
             metadata={"category": "retrieval_internal"},
         ),
         StructuredTool.from_function(
