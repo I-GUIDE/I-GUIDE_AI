@@ -250,12 +250,17 @@
         <form id="chat-form" class="controls">
           <label>
             Endpoint
-            <input id="endpoint" value="http://localhost:3500/agent/chat/stream">
+            <input id="endpoint" value="http://localhost:5002/agent/chat/stream">
           </label>
 
           <label>
             Upload Endpoint
-            <input id="upload_endpoint" value="http://localhost:3500/agent/files/upload">
+            <input id="upload_endpoint" value="http://localhost:5002/agent/files/upload">
+          </label>
+
+          <label>
+            API Key
+            <input id="api_key" type="password" placeholder="AGENT_CHAT_API_KEY">
           </label>
 
           <label>
@@ -623,9 +628,13 @@
       renderDownloadFiles();
       toolTraceEl.innerHTML = "";
 
+      const apiKey = document.getElementById("api_key").value.trim();
+      const headers = { "Content-Type": "application/json" };
+      if (apiKey) headers["X-API-KEY"] = apiKey;
+
       const response = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify(payload),
         signal: currentAbortController.signal
       });
