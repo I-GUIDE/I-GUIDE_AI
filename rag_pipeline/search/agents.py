@@ -36,6 +36,7 @@ from .neo4j_graph_tools import (
     build_tool_query,
     detect_pattern,
     run_user_author_fallback,
+    _get_internal_labels,
 )
 from ..state import EvidenceEntry, ensure_state_shapes, get_query_text, merge_retrieval
 
@@ -186,6 +187,25 @@ def _extract_node_from_record(rec: Dict[str, Any]) -> Optional[_Neo4jNode]:
     return None
 
 
+def _graph_context_prefix(record: Dict[str, Any]) -> str:
+    """
+    Build a human-readable prefix from relationship columns returned by pattern Cypher queries.
+    These fields are not node properties — they come from the graph traversal itself
+    (e.g. matched_author from CONTRIBUTED, collection_name from BELONGS_TO).
+    Injecting them into contents lets the reranker use graph context it wouldn't otherwise see.
+    """
+    parts: List[str] = []
+    if record.get("matched_author"):
+        parts.append(f"Author: {record['matched_author']}")
+    if record.get("matched_org"):
+        parts.append(f"Organization: {record['matched_org']}")
+    if record.get("seed_title"):
+        parts.append(f"Related to: {record['seed_title']}")
+    if record.get("collection_name"):
+        parts.append(f"Collection: {record['collection_name']}")
+    return "; ".join(parts)
+
+
 def _rows_to_hits(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Convert raw Neo4j records to the standard hit format."""
     hits: List[Dict[str, Any]] = []
@@ -196,20 +216,32 @@ def _rows_to_hits(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if node is not None:
             props = dict(node)
             ref_id = props.get("_id", getattr(node, "element_id", f"node:{idx}"))
+            node_labels = set(getattr(node, "labels", set())) - _get_internal_labels()
         else:
             props = {k: v for k, v in record.items() if isinstance(v, (str, int, float, list, dict))}
             ref_id = props.get("doc_id", f"row:{idx}")
+            node_labels = set()
 
         source = _normalize_source_fields(props, str(ref_id))
         doc_id = str(source.get("doc_id", ref_id))
+
+        resource_type = (
+            source.get("resource-type")
+            or source.get("element_type")
+            or (next(iter(node_labels)).lower() if node_labels else None)
+        )
+
+        prefix = _graph_context_prefix(record)
+        base_contents = source.get("contents") or ""
+        contents = f"[{prefix}] {base_contents}".strip() if prefix else base_contents or None
 
         hits.append({
             "_id": doc_id,
             "_score": score,
             "_source": {
                 "contributor":     source.get("contributor"),
-                "contents":        source.get("contents"),
-                "resource-type":   source.get("resource-type") or source.get("element_type"),
+                "contents":        contents,
+                "resource-type":   resource_type,
                 "title":           source.get("title"),
                 "authors":         _as_list(source.get("authors")),
                 "tags":            _as_list(source.get("tags")),
@@ -425,7 +457,7 @@ def get_neo4j_agent_results(user_query: str, limit: int = 12) -> List[Dict[str, 
                 log.warning("Pattern tool '%s' failed (%s); escalating to Text2Cypher.", pattern_name, exc)
 
     # ── Tier 2: Text2Cypher ───────────────────────────────────────────────
-    use_text2cypher = os.getenv("USE_TEXT2CYPHER", "true").lower() == "true"
+    use_text2cypher = os.getenv("USE_TEXT2CYPHER", "true").lower() in ("true", "1", "yes")
 
     if use_text2cypher:
         try:
