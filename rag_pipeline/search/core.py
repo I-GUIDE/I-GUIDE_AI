@@ -78,7 +78,7 @@ def _llm_route(query: str, decisions: List[RoutingDecision]) -> tuple[bool, bool
     Returns (use_graph, use_spatial, rationale_dict).
     Falls back to conservative heuristics on any error.
     """
-    use_llm_routing = os.getenv("USE_LLM_ROUTING", "true").lower() == "true"
+    use_llm_routing = os.getenv("USE_LLM_ROUTING", "true").lower() in ("true", "1", "yes")
 
     if use_llm_routing:
         try:
@@ -139,13 +139,13 @@ def run_retrieval(state: MutableMapping[str, Any]) -> AgentState:
     # ── 1. Keyword search (always) ────────────────────────────────────────
     keyword_hits = retrieve_keyword(state)
     _log_hits("📚 KEYWORD", keyword_hits)
-    appended = merge_retrieval(state, source="keyword", hits=keyword_hits, limit=limit)
+    appended = merge_retrieval(state, source="keyword", hits=keyword_hits, limit=None)
     _record_decision(decisions, "keyword", f"hits:{len(keyword_hits)} appended:{len(appended)}")
 
     # ── 2. Semantic search (always) ───────────────────────────────────────
     semantic_hits = retrieve_semantic(state)
     _log_hits("🔍 SEMANTIC", semantic_hits)
-    appended = merge_retrieval(state, source="semantic", hits=semantic_hits, limit=limit)
+    appended = merge_retrieval(state, source="semantic", hits=semantic_hits, limit=None)
     _record_decision(decisions, "semantic", f"hits:{len(semantic_hits)} appended:{len(appended)}")
 
     # ── 3. LLM routing for graph + spatial ───────────────────────────────
@@ -153,7 +153,7 @@ def run_retrieval(state: MutableMapping[str, Any]) -> AgentState:
 
     # ── 4. Neo4j graph search (LLM-routed) ───────────────────────────────
     if use_graph:
-        use_agent = os.getenv("USE_NEO4J_AGENT_SEARCH", "true").lower() == "true"
+        use_agent = os.getenv("USE_NEO4J_AGENT_SEARCH", "true").lower() in ("true", "1", "yes")
 
         if use_agent and NEO4J_AGENT_AVAILABLE:
             try:
@@ -169,7 +169,7 @@ def run_retrieval(state: MutableMapping[str, Any]) -> AgentState:
             search_method = "neo4j_basic"
 
         _log_hits("🕸️  NEO4J", neo_hits)
-        appended = merge_retrieval(state, source="neo4j", hits=neo_hits, limit=limit)
+        appended = merge_retrieval(state, source="neo4j", hits=neo_hits, limit=None)
         reason = rationale.get("graph", "enabled")
         _record_decision(
             decisions, "neo4j",
@@ -182,7 +182,7 @@ def run_retrieval(state: MutableMapping[str, Any]) -> AgentState:
     if use_spatial:
         spatial_hits = retrieve_spatial(state)
         _log_hits("🗺️  SPATIAL", spatial_hits)
-        appended = merge_retrieval(state, source="spatial", hits=spatial_hits, limit=limit)
+        appended = merge_retrieval(state, source="spatial", hits=spatial_hits, limit=None)
         reason = rationale.get("spatial", "enabled")
         _record_decision(
             decisions, "spatial",
