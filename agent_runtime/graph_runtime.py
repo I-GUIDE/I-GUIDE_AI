@@ -13,6 +13,7 @@ import json
 from typing import Any, Dict, Generator, List, Optional
 
 from agent_runtime.executor_factory import (
+    AgentInvocationError,
     DEFAULT_CHECKPOINTER,
     agent_config,
     build_code_agent_executor,
@@ -31,6 +32,7 @@ from agent_runtime.runtime_utils import (
     extract_final_answer,
     extract_search_artifacts,
 )
+from agent_runtime.skills import SkillRegistry
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +54,7 @@ def run_agent_query(
     forced_intent: Optional[str] = None,
     thread_id: Optional[str] = None,
     checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
+    skill_roots: Optional[List[str]] = None,
 ) -> dict:
     """Run one query through the orchestrator agent pipeline."""
     effective_thread_id = resolve_thread_id(thread_id, checkpointer)
@@ -69,6 +72,7 @@ def run_agent_query(
         forced_intent=forced_intent,
         thread_id=effective_thread_id,
         checkpointer=checkpointer,
+        skill_roots=skill_roots,
     )
     orchestrator = build_orchestrator_agent_executor(
         llm=llm,
@@ -76,6 +80,7 @@ def run_agent_query(
         return_intermediate_steps=return_intermediate_steps,
         tools=orchestration_tools,
         checkpointer=checkpointer,
+        skill_roots=skill_roots,
     )
     orchestration_result = invoke_agent_with_payload_fallback(
         orchestrator,
@@ -84,6 +89,7 @@ def run_agent_query(
         config=agent_config(child_thread_id(effective_thread_id, "orchestrator")),
     )
     available_agent_names = [getattr(tool, "name", "") for tool in orchestration_tools if getattr(tool, "name", "")]
+    skill_registry = SkillRegistry.discover(skill_roots)
     response: Dict[str, Any] = {
         "orchestration_result": orchestration_result,
         "route_trace": build_orchestration_trace(
@@ -92,6 +98,7 @@ def run_agent_query(
             available_agent_names=available_agent_names,
             orchestration_result=orchestration_result if isinstance(orchestration_result, dict) else {},
         ),
+        "available_skills": skill_registry.catalog(),
     }
     final_answer = extract_final_answer(orchestration_result)
     if final_answer:
@@ -120,6 +127,7 @@ def stream_agent_query_events(
     forced_intent: Optional[str] = None,
     thread_id: Optional[str] = None,
     checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
+    skill_roots: Optional[List[str]] = None,
 ) -> Generator[Dict[str, Any], None, None]:
     """Yield structured SSE events while running a query."""
     effective_thread_id = resolve_thread_id(thread_id, checkpointer)
@@ -145,8 +153,10 @@ def stream_agent_query_events(
         forced_intent=forced_intent,
         thread_id=effective_thread_id,
         checkpointer=checkpointer,
+        skill_roots=skill_roots,
     )
     available_agent_names = [getattr(tool, "name", "") for tool in orchestration_tools if getattr(tool, "name", "")]
+    skill_registry = SkillRegistry.discover(skill_roots)
     yield {
         "event": "status",
         "data": {
@@ -154,6 +164,7 @@ def stream_agent_query_events(
             "thread_id": effective_thread_id or thread_id,
             "tool_strategy": tool_strategy,
             "available_agents": available_agent_names,
+            "available_skills": skill_registry.catalog(),
         },
     }
     yield {"event": "status", "data": {"stage": "orchestration_agent_started"}}
@@ -164,6 +175,7 @@ def stream_agent_query_events(
             return_intermediate_steps=return_intermediate_steps,
             tools=orchestration_tools,
             checkpointer=checkpointer,
+            skill_roots=skill_roots,
         )
         orchestration_result = invoke_agent_with_payload_fallback(
             orchestrator,
@@ -187,6 +199,7 @@ def stream_agent_query_events(
                 "route": route_trace.get("route"),
                 "called_tools": route_trace.get("called_tools") or [],
                 "analysis_called_tools": route_trace.get("analysis_called_tools") or [],
+                "selected_skills": route_trace.get("selected_skills") or [],
                 "chat_history_available": route_trace.get("chat_history_available"),
             },
         }
@@ -215,14 +228,32 @@ def stream_agent_query_events(
         response: Dict[str, Any] = {
             "orchestration_result": orchestration_result,
             "route_trace": route_trace,
+            "available_skills": skill_registry.catalog(),
         }
         if final_answer:
             response["final_answer"] = final_answer
         if effective_thread_id:
             response["thread_id"] = effective_thread_id
         yield {"event": "completed", "data": response}
+    except AgentInvocationError as exc:
+        readable_trace = exc.diagnostics.get("readable_trace") if exc.diagnostics else None
+        yield {
+            "event": "error",
+            "data": {
+                "message": str(exc),
+                "diagnosticText": readable_trace,
+                "diagnostics": exc.diagnostics,
+            },
+        }
+        raise
     except Exception as exc:
-        yield {"event": "error", "data": {"message": str(exc)}}
+        diagnostics = getattr(exc, "diagnostics", None)
+        payload = {"message": str(exc)}
+        if diagnostics:
+            payload["diagnostics"] = diagnostics
+            if isinstance(diagnostics, dict) and diagnostics.get("readable_trace"):
+                payload["diagnosticText"] = diagnostics.get("readable_trace")
+        yield {"event": "error", "data": payload}
         raise
 
 
@@ -244,6 +275,7 @@ def run_code_agent_query(
     forced_intent: Optional[str] = None,
     thread_id: Optional[str] = None,
     checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
+    skill_roots: Optional[List[str]] = None,
 ) -> dict:
     """Run one query through CodeAgent, with SearchAgent available as a tool."""
     effective_thread_id = resolve_thread_id(thread_id, checkpointer)
@@ -261,13 +293,18 @@ def run_code_agent_query(
         search_invocations=search_invocations,
         thread_id=effective_thread_id,
         checkpointer=checkpointer,
+        skill_roots=skill_roots,
     )
+    from agent_runtime.skills import make_skill_tools
+
+    code_tools = [*make_skill_tools(skill_roots=skill_roots), search_tool]
     code_executor = build_code_agent_executor(
         llm=llm,
         verbose=verbose,
         return_intermediate_steps=return_intermediate_steps,
-        tools=[search_tool],
+        tools=code_tools,
         checkpointer=checkpointer,
+        skill_roots=skill_roots,
     )
     code_response = invoke_agent_with_payload_fallback(
         code_executor,
@@ -279,6 +316,7 @@ def run_code_agent_query(
     response: Dict[str, Any] = {
         "code_result": code_response,
         "code_agent_search_invocations": search_invocations,
+        "available_skills": SkillRegistry.discover(skill_roots).catalog(),
     }
     final_answer = extract_final_answer(code_response)
     if final_answer:
@@ -377,6 +415,7 @@ def _print_route_trace(result: Any) -> None:
     print(f"- code_hits: {route.get('code_hits')}")
     print(f"- discovery_hits: {route.get('discovery_hits')}")
     print(f"- allowed_tools: {route.get('allowed_tools')}")
+    print(f"- selected_skills: {route.get('selected_skills')}")
 
 
 def main() -> None:
@@ -422,20 +461,42 @@ def main() -> None:
         choices=["general_discovery", "analysis_task", "code_task", "hybrid"],
         help="Force routing intent instead of automatic classification.",
     )
+    parser.add_argument(
+        "--skill-paths",
+        default=None,
+        help="Comma-separated directories containing SKILL.md skill bundles. Defaults to skills/ and .agents/skills/.",
+    )
     args = parser.parse_args()
     selected_mcp_modules = [item.strip() for item in args.mcp_modules.split(",") if item.strip()]
+    selected_skill_paths = None
+    if args.skill_paths:
+        selected_skill_paths = [item.strip() for item in args.skill_paths.split(",") if item.strip()]
 
     runner = run_code_agent_query if args.agent_mode == "code" else run_agent_query
-    result = runner(
-        args.query,
-        verbose=args.verbose,
-        thread_id=args.thread_id,
-        tool_strategy=args.tool_strategy,
-        include_mcp_tools=args.include_mcp_tools,
-        mcp_modules=selected_mcp_modules,
-        smart_tool_routing=not args.no_smart_routing,
-        forced_intent=args.force_intent,
-    )
+    try:
+        result = runner(
+            args.query,
+            verbose=args.verbose,
+            thread_id=args.thread_id,
+            tool_strategy=args.tool_strategy,
+            include_mcp_tools=args.include_mcp_tools,
+            mcp_modules=selected_mcp_modules,
+            smart_tool_routing=not args.no_smart_routing,
+            forced_intent=args.force_intent,
+            skill_roots=selected_skill_paths,
+        )
+    except AgentInvocationError as exc:
+        print("\nAgent invocation failed.")
+        print(str(exc))
+        if exc.diagnostics:
+            readable_trace = exc.diagnostics.get("readable_trace")
+            if readable_trace:
+                print("\nInteraction trace:")
+                print(readable_trace)
+            else:
+                print("\nDiagnostics:")
+                print(json.dumps(exc.diagnostics, ensure_ascii=True, indent=2, default=str))
+        raise
     print(result)
     _print_route_trace(result)
     _print_tool_trace(result)

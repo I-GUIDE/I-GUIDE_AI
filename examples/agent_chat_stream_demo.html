@@ -234,6 +234,19 @@
       color: var(--accent);
     }
 
+    .trace-message {
+      margin-top: 6px;
+      white-space: pre-wrap;
+      overflow-wrap: break-word;
+      word-break: break-word;
+    }
+
+    .trace-meta {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 0.78rem;
+    }
+
     .muted {
       color: var(--muted);
     }
@@ -458,15 +471,38 @@
 
       const header = document.createElement("div");
       header.className = `event-name ${isError ? "error" : ""}`;
-      header.textContent = eventName;
-
-      const body = document.createElement("pre");
-      body.textContent = JSON.stringify(payload, null, 2);
-      body.style.margin = "6px 0 0";
-      body.style.whiteSpace = "pre-wrap";
+      header.textContent = payload && payload.label ? payload.label : eventName;
 
       wrapper.appendChild(header);
-      wrapper.appendChild(body);
+
+      if (eventName === "agent_trace") {
+        const body = document.createElement("div");
+        body.className = "trace-message";
+        body.textContent = payload.message || "";
+        wrapper.appendChild(body);
+
+        const metaParts = [];
+        if (payload.agent) metaParts.push(`agent: ${payload.agent}`);
+        if (payload.type) metaParts.push(`type: ${payload.type}`);
+        if (payload.sequence) metaParts.push(`step: ${payload.sequence}`);
+        if (metaParts.length) {
+          const meta = document.createElement("div");
+          meta.className = "trace-meta";
+          meta.textContent = metaParts.join(" · ");
+          wrapper.appendChild(meta);
+        }
+      } else if (eventName === "error" && payload.diagnosticText) {
+        const body = document.createElement("div");
+        body.className = "trace-message error";
+        body.textContent = payload.error || "Stream error";
+        wrapper.appendChild(body);
+      } else {
+        const body = document.createElement("pre");
+        body.textContent = JSON.stringify(payload, null, 2);
+        body.style.margin = "6px 0 0";
+        body.style.whiteSpace = "pre-wrap";
+        wrapper.appendChild(body);
+      }
       toolTraceEl.appendChild(wrapper);
       toolTraceEl.scrollTop = toolTraceEl.scrollHeight;
     }
@@ -700,7 +736,11 @@
       maybeCollectDownloads(payload);
       renderDocRefs();
       renderDownloadFiles();
-      appendTrace(eventName, payload, eventName === "error");
+      const lowLevelToolEvent = ["search", "analysis"].includes(eventName)
+        && ["tool_call", "tool_result"].includes(payload.type);
+      if (!lowLevelToolEvent) {
+        appendTrace(eventName, payload, eventName === "error");
+      }
 
       if (eventName === "status" && payload.status) {
         statusChip.textContent = payload.status;
@@ -730,6 +770,9 @@
       }
       if (eventName === "error") {
         statusChip.textContent = "error";
+        if (payload.error) {
+          answerEl.textContent = payload.error;
+        }
       }
     }
 

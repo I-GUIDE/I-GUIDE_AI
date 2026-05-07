@@ -13,6 +13,7 @@ from agent_runtime.graph_state import (
     DISCOVERY_TOOL_NAMES,
     FILE_TOOL_NAMES,
     RAG_COMPONENT_TOOL_NAMES,
+    SKILL_TOOL_NAMES,
 )
 
 
@@ -40,6 +41,9 @@ def select_allowed_tools(intent: str, available_tool_names: Sequence[str]) -> Li
     for file_tool_name in FILE_TOOL_NAMES:
         if file_tool_name in available and file_tool_name not in selected:
             selected.append(file_tool_name)
+    for skill_tool_name in SKILL_TOOL_NAMES:
+        if skill_tool_name in available and skill_tool_name not in selected:
+            selected.append(skill_tool_name)
 
     if not selected:
         selected = list(available_tool_names)
@@ -57,6 +61,7 @@ def collect_tools(
     mcp_modules: Optional[List[str]],
     enabled_search_methods: Optional[List[str]] = None,
     include_file_tools: bool = True,
+    skill_roots: Optional[List[str]] = None,
 ) -> List[Any]:
     """Build the concrete list of LangChain ``StructuredTool`` objects.
 
@@ -67,6 +72,7 @@ def collect_tools(
     from rag_pipeline.langchain_granular_tools import make_langchain_granular_tools
     from rag_pipeline.langchain_mcp_tools import make_langchain_mcp_tools
     from rag_pipeline.langchain_tool import make_langchain_rag_tool
+    from agent_runtime.skills import make_skill_tools
 
     strategy = (tool_strategy or "full_pipeline").strip().lower()
     if strategy == "granular":
@@ -80,4 +86,5 @@ def collect_tools(
         raise ValueError("tool_strategy must be either 'full_pipeline' or 'granular'.")
     if include_mcp_tools:
         tools.extend(make_langchain_mcp_tools(include_modules=mcp_modules))
+    tools.extend(make_skill_tools(skill_roots=skill_roots))
     return tools

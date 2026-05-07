@@ -140,6 +140,11 @@ def _ensure_fastapi_stub() -> None:
     existing = sys.modules.get("fastapi")
     if existing is not None:
         return
+    try:
+        importlib.import_module("fastapi")
+        return
+    except Exception:
+        pass
 
     stub = ModuleType("fastapi")
 

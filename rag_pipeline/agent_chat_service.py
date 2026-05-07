@@ -156,6 +156,23 @@ def _normalize_enabled_search_methods(enabled_search_methods: Optional[Sequence[
     return normalized or []
 
 
+def _normalize_skill_roots(skill_roots: Optional[Sequence[Any]]) -> Optional[List[str]]:
+    if skill_roots is None:
+        return None
+    if isinstance(skill_roots, (str, bytes)):
+        skill_roots = [item.strip() for item in str(skill_roots).split(",")]
+    normalized: List[str] = []
+    for value in skill_roots or []:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        try:
+            normalized.append(str(Path(text).expanduser()))
+        except Exception:
+            normalized.append(text)
+    return normalized
+
+
 def run_agent_chat(
     *,
     user_input: str,
@@ -172,6 +189,7 @@ def run_agent_chat(
     forced_intent: Optional[str] = None,
     file_paths: Optional[Sequence[Any]] = None,
     file_ids: Optional[Sequence[Any]] = None,
+    skill_roots: Optional[Sequence[Any]] = None,
     verbose: bool = False,
 ) -> Dict[str, Any]:
     effective_thread_id = thread_id or memory_id
@@ -181,6 +199,7 @@ def run_agent_chat(
     normalized_file_paths = _normalize_file_paths(file_paths)
     normalized_file_ids = _normalize_file_ids(file_ids)
     normalized_enabled_search_methods = _normalize_enabled_search_methods(enabled_search_methods)
+    normalized_skill_roots = _normalize_skill_roots(skill_roots)
 
     if use_persistent_memory:
         try:
@@ -212,6 +231,7 @@ def run_agent_chat(
         smart_tool_routing=smart_tool_routing,
         forced_intent=forced_intent,
         thread_id=effective_thread_id,
+        skill_roots=normalized_skill_roots,
     )
 
     answer = _extract_agent_answer(result)
@@ -237,6 +257,8 @@ def run_agent_chat(
         "thread_id": result.get("thread_id") or effective_thread_id,
         "file_paths": normalized_file_paths,
         "file_ids": normalized_file_ids,
+        "skill_roots": normalized_skill_roots,
+        "available_skills": result.get("available_skills") or [],
         "enabled_search_methods": normalized_enabled_search_methods,
         "use_persistent_memory": use_persistent_memory,
         "route_trace": result.get("route_trace") or {},
@@ -263,6 +285,7 @@ def stream_agent_chat_events(
     forced_intent: Optional[str] = None,
     file_paths: Optional[Sequence[Any]] = None,
     file_ids: Optional[Sequence[Any]] = None,
+    skill_roots: Optional[Sequence[Any]] = None,
     verbose: bool = False,
 ) -> Generator[Dict[str, Any], None, None]:
     effective_thread_id = thread_id or memory_id
@@ -272,6 +295,7 @@ def stream_agent_chat_events(
     normalized_file_paths = _normalize_file_paths(file_paths)
     normalized_file_ids = _normalize_file_ids(file_ids)
     normalized_enabled_search_methods = _normalize_enabled_search_methods(enabled_search_methods)
+    normalized_skill_roots = _normalize_skill_roots(skill_roots)
 
     yield {
         "event": "status",
@@ -281,6 +305,7 @@ def stream_agent_chat_events(
             "thread_id": effective_thread_id,
             "file_paths": normalized_file_paths,
             "file_ids": normalized_file_ids,
+            "skill_roots": normalized_skill_roots,
             "enabled_search_methods": normalized_enabled_search_methods,
             "use_persistent_memory": use_persistent_memory,
         },
@@ -337,6 +362,7 @@ def stream_agent_chat_events(
         smart_tool_routing=smart_tool_routing,
         forced_intent=forced_intent,
         thread_id=effective_thread_id,
+        skill_roots=normalized_skill_roots,
     ):
         if event.get("event") == "completed" and isinstance(event.get("data"), Mapping):
             completed_response = dict(event["data"])
@@ -379,6 +405,8 @@ def stream_agent_chat_events(
         "thread_id": (completed_response or {}).get("thread_id") or effective_thread_id,
         "file_paths": normalized_file_paths,
         "file_ids": normalized_file_ids,
+        "skill_roots": normalized_skill_roots,
+        "available_skills": (completed_response or {}).get("available_skills") or [],
         "enabled_search_methods": normalized_enabled_search_methods,
         "use_persistent_memory": use_persistent_memory,
         "route_trace": (completed_response or {}).get("route_trace") or {},

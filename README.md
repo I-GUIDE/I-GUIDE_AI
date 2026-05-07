@@ -44,6 +44,7 @@ User query
 ```
 agent_runtime/                   Multi-agent orchestration
   graph_state.py                 Type definitions, tool-name constants
+  skills.py                      Filesystem-backed SKILL.md skill discovery/loading
   intent_classifier.py           Query intent classification (analysis/code/discovery/hybrid)
   tool_policy.py                 Tool filtering by intent
   executor_factory.py            Agent prompts, LLM config, executor builders
@@ -186,6 +187,52 @@ See [.env.example](.env.example) for all configuration options. Key variables:
 | `NEO4J_URI` | No | Neo4j connection (enables graph search) |
 | `GOOGLE_MAPS_API_KEY` | No | Enables NLP-based spatial search |
 | `MCP_SERVER_URL` | No | MCP tool server URL (default: http://127.0.0.1:8000/mcp) |
+| `AGENT_SKILLS_ENABLED` | No | Enables native filesystem skill discovery (default: `1`) |
+| `AGENT_SKILL_PATHS` | No | Comma-separated extra skill roots; defaults also scan `skills/` and `.agents/skills/` |
+| `AGENT_SKILL_MAX_RESOURCE_BYTES` | No | Max bytes loaded from a skill resource (default: `65536`) |
+
+## Agent Skills
+
+Native skills are filesystem bundles that add reusable workflow guidance without
+loading the full instructions into every prompt. Put skills under `skills/` or
+`.agents/skills/`, or pass explicit roots via `AGENT_SKILL_PATHS`, CLI
+`--skill-paths`, or API `skillPaths`.
+
+Each skill lives in its own directory:
+
+```text
+skills/
+  geospatial-report/
+    SKILL.md
+    references/
+      style-guide.md
+    scripts/
+      validate.py
+```
+
+`SKILL.md` requires YAML-style front matter:
+
+```md
+---
+name: geospatial-report
+description: Use when producing a cited geospatial analysis report.
+allowed-tools: keyword_search, semantic_search, spatial_search
+tags: [geospatial, reporting]
+---
+
+# Geospatial Report
+
+Follow this workflow when the user asks for a report...
+```
+
+At runtime, agents see only skill names and descriptions through the
+`list_available_skills` and `load_skill` tools. When a skill is relevant, the
+agent calls `load_skill(skill_name=...)` to load the full instructions, and can
+call it again with `resource_path` for listed reference files.
+
+Treat skills as trusted developer-controlled assets. The native loader reads
+instructions and text resources only; executable actions should still be exposed
+as MCP or LangChain tools with schemas, permissions, and audit logging.
 
 ## Testing
 

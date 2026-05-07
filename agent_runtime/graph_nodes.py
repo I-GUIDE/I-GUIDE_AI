@@ -38,6 +38,7 @@ from agent_runtime.tool_policy import (
     collect_tools,
     select_allowed_tools,
 )
+from agent_runtime.skills import make_skill_tools
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +158,7 @@ def make_search_agent_evidence_tool(
     allow_file_tools: bool = False,
     thread_id: Optional[str] = None,
     checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
+    skill_roots: Optional[List[str]] = None,
 ) -> Any:
     """Create a ``search_agent_evidence`` tool that invokes SearchAgent."""
     from langchain_core.tools import StructuredTool
@@ -172,6 +174,7 @@ def make_search_agent_evidence_tool(
             mcp_modules=mcp_modules,
             enabled_search_methods=enabled_search_methods,
             include_file_tools=allow_file_tools,
+            skill_roots=skill_roots,
         )
         route_trace: Optional[Dict[str, Any]] = None
         allowed_tool_names: Optional[List[str]] = None
@@ -197,6 +200,7 @@ def make_search_agent_evidence_tool(
             allowed_tool_names=allowed_tool_names,
             preloaded_tools=all_tools,
             checkpointer=checkpointer,
+            skill_roots=skill_roots,
         )
         search_response = invoke_agent_with_payload_fallback(
             search_executor,
@@ -241,6 +245,7 @@ def make_analysis_agent_answer_tool(
     allow_file_tools: bool = False,
     thread_id: Optional[str] = None,
     checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
+    skill_roots: Optional[List[str]] = None,
 ) -> Any:
     """Create an ``analysis_agent_answer`` tool that invokes AnalysisAgent."""
     from langchain_core.tools import StructuredTool
@@ -265,6 +270,7 @@ def make_analysis_agent_answer_tool(
         allow_file_tools=allow_file_tools,
         thread_id=child_thread_id(thread_id, "analysis_search"),
         checkpointer=checkpointer,
+        skill_roots=skill_roots,
     )
 
     def code_agent_answer(query: str, search_evidence_json: str = "") -> str:
@@ -289,6 +295,7 @@ def make_analysis_agent_answer_tool(
             forced_intent=forced_intent,
             thread_id=nested_thread_id,
             checkpointer=checkpointer,
+            skill_roots=skill_roots,
         )
         code_search_invocations.extend(code_response.get("code_agent_search_invocations") or [])
         return json.dumps(
@@ -307,7 +314,7 @@ def make_analysis_agent_answer_tool(
         description="Use CodeAgent to provide runnable code and a Dependencies section when analysis alone is insufficient.",
     )
 
-    analysis_tools: List[Any] = [search_tool, code_tool]
+    analysis_tools: List[Any] = [*make_skill_tools(skill_roots=skill_roots), search_tool, code_tool]
     if include_mcp_tools:
         analysis_tools = [
             *make_langchain_mcp_tools(include_modules=mcp_modules),
@@ -325,6 +332,7 @@ def make_analysis_agent_answer_tool(
         system_prompt_override=ANALYSIS_AGENT_PROMPT,
         agent_name="analysis_agent",
         checkpointer=checkpointer,
+        skill_roots=skill_roots,
     )
 
     def analysis_agent_answer(query: str, search_evidence_json: str = "") -> str:
@@ -386,6 +394,7 @@ def collect_orchestration_tools(
     forced_intent: Optional[str],
     thread_id: Optional[str],
     checkpointer: Optional[Any],
+    skill_roots: Optional[List[str]] = None,
 ) -> List[Any]:
     """Assemble the tool set for the OrchestratorAgent."""
     from rag_pipeline.langchain_file_tools import make_langchain_file_tools
@@ -394,6 +403,7 @@ def collect_orchestration_tools(
     allow_file_tools = query_has_file_context(query)
     if allow_file_tools:
         tools.extend(make_langchain_file_tools())
+    tools.extend(make_skill_tools(skill_roots=skill_roots))
     if chat_history:
         tools.append(make_answer_from_memory_tool(llm=llm, chat_history=chat_history))
     tools.append(
@@ -411,6 +421,7 @@ def collect_orchestration_tools(
             allow_file_tools=False,
             thread_id=child_thread_id(thread_id, "search"),
             checkpointer=checkpointer,
+            skill_roots=skill_roots,
         )
     )
     tools.append(
@@ -428,6 +439,7 @@ def collect_orchestration_tools(
             allow_file_tools=allow_file_tools,
             thread_id=child_thread_id(thread_id, "analysis"),
             checkpointer=checkpointer,
+            skill_roots=skill_roots,
         )
     )
     return tools
