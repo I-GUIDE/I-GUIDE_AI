@@ -36,7 +36,7 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parents[2] / ".env")
 logging.basicConfig(level=logging.WARNING)
 
 from rag_pipeline.search.keyword import get_keyword_search_results
-from rag_pipeline.langchain_granular_tools import keyword_search_tool
+from services.langchain_granular_tools import keyword_search_tool
 
 
 def _banner(title: str) -> None:

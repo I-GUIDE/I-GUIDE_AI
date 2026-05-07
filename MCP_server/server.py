@@ -85,7 +85,7 @@ _tool_registry: dict[str, Callable] = {}
 # Any new tool from any domain should fit into exactly one of these.
 # Intent → category mapping lives in agent_runtime.tool_policy.
 # Remote/external MCP tools are auto-classified into this same taxonomy
-# by rag_pipeline.langchain_mcp_tools at import time.
+# by services.langchain_mcp_tools at import time.
 MCP_TOOL_CATEGORIES = frozenset({
     "retrieval_internal",  # I-GUIDE's own indices (keyword, semantic, Neo4j)
     "retrieval_external",  # federated third-party catalogs (STAC, OGC, web)

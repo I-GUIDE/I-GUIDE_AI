@@ -9,8 +9,8 @@ import os, logging
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
-from rag_pipeline.search.agents import get_neo4j_agent_results
-from rag_pipeline.search.neo4j_graph_tools import detect_pattern, _get_internal_labels, _get_resource_labels
+from rag_pipeline.search.neo4j import get_neo4j_agent_results
+from rag_pipeline.search.neo4j import detect_pattern, _get_internal_labels, _get_resource_labels
 
 # ---------------------------------------------------------------------------
 # Test 1: Pattern detection

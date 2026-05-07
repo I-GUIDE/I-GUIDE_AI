@@ -41,7 +41,7 @@ from rag_pipeline.search.spatial import (
     get_spatial_search_results,
     spatial_search,
 )
-from rag_pipeline.langchain_granular_tools import spatial_search_tool
+from services.langchain_granular_tools import spatial_search_tool
 
 
 def _banner(title: str) -> None:

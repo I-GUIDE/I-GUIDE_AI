@@ -42,7 +42,7 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parents[2] / ".env")
 logging.basicConfig(level=logging.WARNING)
 
 from rag_pipeline.search.opengeodata import get_opengeodata_results, search_cmr_collections
-from rag_pipeline.langchain_granular_tools import opengeodata_search_tool
+from services.langchain_granular_tools import opengeodata_search_tool
 
 
 def _banner(title: str) -> None:

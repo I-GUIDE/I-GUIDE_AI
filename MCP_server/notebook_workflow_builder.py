@@ -21,7 +21,7 @@ def _ensure_repo_root_on_path() -> Path:
 
 REPO_ROOT = _ensure_repo_root_on_path()
 
-from rag_pipeline.agent_file_store import get_file_record, resolve_file_id, storage_root
+from services.file_store import get_file_record, resolve_file_id, storage_root
 
 
 ENTRYPOINT_PRIORITY = ("run_workflow", "main", "run")

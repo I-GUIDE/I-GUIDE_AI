@@ -38,7 +38,7 @@ logging.basicConfig(level=logging.WARNING)
 import requests
 
 from rag_pipeline.search.semantic import get_embedding, semantic_search
-from rag_pipeline.langchain_granular_tools import semantic_search_tool
+from services.langchain_granular_tools import semantic_search_tool
 
 
 def _banner(title: str) -> None:

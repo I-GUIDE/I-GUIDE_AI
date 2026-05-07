@@ -37,9 +37,9 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parents[2] / ".env")
 logging.basicConfig(level=logging.WARNING)
 
 from rag_pipeline.search.neo4j import get_neo4j_search_results
-from rag_pipeline.search.agents import explore_neo4j_related_nodes, get_neo4j_element_by_id_results
-from rag_pipeline.search.neo4j_graph_tools import detect_pattern, _get_internal_labels, _get_resource_labels
-from rag_pipeline.langchain_granular_tools import neo4j_explore_related_nodes_tool, neo4j_search_tool
+from rag_pipeline.search.neo4j import explore_neo4j_related_nodes, get_neo4j_element_by_id_results
+from rag_pipeline.search.neo4j import detect_pattern, _get_internal_labels, _get_resource_labels
+from services.langchain_granular_tools import neo4j_explore_related_nodes_tool, neo4j_search_tool
 
 
 def _banner(title: str) -> None:
