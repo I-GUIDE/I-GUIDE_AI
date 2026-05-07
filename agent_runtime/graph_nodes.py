@@ -249,7 +249,7 @@ def make_analysis_agent_answer_tool(
 ) -> Any:
     """Create an ``analysis_agent_answer`` tool that invokes AnalysisAgent."""
     from langchain_core.tools import StructuredTool
-    from rag_pipeline.langchain_mcp_tools import make_langchain_mcp_tools
+    from agent_runtime.langchain_mcp_tools import make_langchain_mcp_tools
 
     # Avoid circular import — import sibling at call time
     from agent_runtime.graph_runtime import run_code_agent_query
@@ -397,7 +397,7 @@ def collect_orchestration_tools(
     skill_roots: Optional[List[str]] = None,
 ) -> List[Any]:
     """Assemble the tool set for the OrchestratorAgent."""
-    from rag_pipeline.langchain_file_tools import make_langchain_file_tools
+    from agent_runtime.langchain_file_tools import make_langchain_file_tools
 
     tools: List[Any] = []
     allow_file_tools = query_has_file_context(query)
