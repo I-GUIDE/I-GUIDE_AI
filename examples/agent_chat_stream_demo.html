@@ -182,6 +182,8 @@
 
     .answer {
       white-space: pre-wrap;
+      overflow-wrap: break-word;
+      word-break: break-word;
       line-height: 1.55;
       min-height: 120px;
       padding: 14px;
@@ -198,7 +200,8 @@
 
     .event-log {
       max-height: 480px;
-      overflow: auto;
+      overflow-x: hidden;
+      overflow-y: auto;
       border: 1px solid var(--line);
       border-radius: 14px;
       background: #fff;
@@ -206,6 +209,12 @@
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
       font-size: 0.84rem;
       line-height: 1.45;
+    }
+
+    .event-log pre {
+      white-space: pre-wrap;
+      overflow-wrap: break-word;
+      word-break: break-all;
     }
 
     .event-item {
@@ -693,25 +702,29 @@
       renderDownloadFiles();
       appendTrace(eventName, payload, eventName === "error");
 
-      if (eventName === "status" && payload.stage) {
-        statusChip.textContent = payload.stage;
+      if (eventName === "status" && payload.status) {
+        statusChip.textContent = payload.status;
       }
-      if (eventName === "memory_loaded" && payload.memory_id) {
-        memoryChip.textContent = `memory: ${payload.memory_id}`;
+      if (eventName === "routing" && payload.type === "route_trace") {
+        const detail = payload.detail || {};
+        statusChip.textContent = `route: ${detail.intent || "unknown"}`;
       }
-      if (eventName === "route_trace" && payload.allowed_tools) {
-        statusChip.textContent = `route: ${payload.intent || "unknown"}`;
-      }
-      if (eventName === "final_answer") {
-        answerEl.textContent = payload.answer || JSON.stringify(payload, null, 2);
-      }
-      if (eventName === "response") {
-        answerEl.textContent = payload.answer || answerEl.textContent;
-        if (payload.thread_id) {
-          threadChip.textContent = `thread: ${payload.thread_id}`;
+      if (eventName === "answer") {
+        const text = payload.answer || payload.final_answer;
+        if (text) {
+          answerEl.textContent = text;
+          statusChip.textContent = "completed";
         }
-        if (payload.memory_id) {
-          memoryChip.textContent = `memory: ${payload.memory_id}`;
+      }
+      if (eventName === "result") {
+        if (payload.answer) {
+          answerEl.textContent = payload.answer;
+        }
+        if (payload.threadId) {
+          threadChip.textContent = `thread: ${payload.threadId}`;
+        }
+        if (payload.memoryId) {
+          memoryChip.textContent = `memory: ${payload.memoryId}`;
         }
         statusChip.textContent = "completed";
       }

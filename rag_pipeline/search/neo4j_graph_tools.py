@@ -151,6 +151,19 @@ ORDER BY score DESC
 LIMIT $limit
 """.replace("{SCORE_EXPR}", _SCORE_EXPR)
 
+# Sorts purely by click_count DESC. Optionally filtered by resource type label.
+# $rtype = '' means no type filter (return all resource types).
+_CYPHER_BY_POPULARITY = """
+MATCH (r)
+WHERE ($rtype = '' OR any(label IN labels(r) WHERE toLower(label) CONTAINS toLower($rtype)))
+  AND NOT any(label IN labels(r) WHERE label IN $internal_labels)
+WITH r, coalesce(toFloat(r.click_count), 0) AS clicks
+WHERE clicks > 0
+RETURN r AS node, clicks AS score
+ORDER BY score DESC
+LIMIT $limit
+"""
+
 
 
 
@@ -161,15 +174,30 @@ LIMIT $limit
 # Each entry: (pattern_name, compiled_regex, list_of_capture_group_names)
 #
 # ORDER MATTERS — first match wins. Rules:
-#   1. by_author        — must come before by_organization (both can match "by X")
-#   2. in_collection    — must come before by_resource_type ("resources in X collection"
+#   1. by_popularity    — must be first; "by click count" would otherwise match by_author
+#   2. by_author        — must come before by_organization (both can match "by X")
+#   3. in_collection    — must come before by_resource_type ("resources in X collection"
 #                         would otherwise match "resources" as a resource type)
-#   3. related_to       — must come before by_resource_type for the same reason
-#   4. by_organization  — before by_resource_type (org names can look like type words)
-#   5. by_tag           — explicit trigger words, safe anywhere
-#   6. by_resource_type — last resort; only fires on explicit verb + type word
+#   4. related_to       — must come before by_resource_type for the same reason
+#   5. by_organization  — before by_resource_type (org names can look like type words)
+#   6. by_tag           — explicit trigger words, safe anywhere
+#   7. by_resource_type — last resort; only fires on explicit verb + type word
+
 _PATTERNS: List[Tuple[str, re.Pattern, List[str]]] = [
-    # 1. Author / person — matches "Firstname Lastname" or "Firstname Middle Lastname"
+    # 1. Popularity — must be first so "by click count" isn't parsed as an author name
+    (
+        "by_popularity",
+        re.compile(
+            r"\b(?:most\s+popular|most\s+clicked|most\s+viewed|most\s+visited|"
+            r"most\s+accessed|top\s+clicked|top\s+viewed|top\s+rated|"
+            r"highest\s+clicks?|highest\s+click\s+count|trending|popular)\b"
+            r"(?:\s+(datasets?|notebooks?|publications?|maps?|code|oers?|"
+            r"documentation|collections?))?",
+            re.I,
+        ),
+        ["rtype"],
+    ),
+    # 2. Author / person — matches "Firstname Lastname" or "Firstname Middle Lastname"
     #    Excludes institutional trigger words so "University of Illinois" routes to
     #    by_organization instead.
     (
@@ -232,7 +260,7 @@ _PATTERNS: List[Tuple[str, re.Pattern, List[str]]] = [
         ),
         ["tag"],
     ),
-    # 6. Resource type — requires an explicit action verb before the type word
+    # 7. Resource type — requires an explicit action verb before the type word
     #    so bare mentions like "resources" or "datasets from NASA" don't trigger it
     (
         "by_resource_type",
@@ -273,9 +301,10 @@ def detect_pattern(query: str) -> Optional[Tuple[str, Dict[str, str]]]:
                     val = ""
                 captured[key] = (val or "").strip()
 
-            # Skip if the captured value is empty or too short
+            # Skip if the captured value is empty or too short.
+            # by_popularity allows an empty rtype (means "all resource types").
             main_val = captured.get(group_names[0], "")
-            if len(main_val) < 2:
+            if len(main_val) < 2 and pattern_name != "by_popularity":
                 continue
 
             log.debug("Pattern '%s' matched query '%s' → %s", pattern_name, query, captured)
@@ -293,6 +322,7 @@ _TOOL_MAP: Dict[str, str] = {
     "by_organization": _CYPHER_BY_ORGANIZATION,
     "by_tag": _CYPHER_BY_TAG,
     "by_resource_type": _CYPHER_BY_RESOURCE_TYPE,
+    "by_popularity": _CYPHER_BY_POPULARITY,
     "related_to": _CYPHER_RELATED_TO,
     "in_collection": _CYPHER_IN_COLLECTION,
 }
@@ -348,6 +378,12 @@ def build_tool_query(
         params["title"] = captured.get("title", "")
     elif pattern_name == "in_collection":
         params["collection"] = captured.get("collection", "")
+    elif pattern_name == "by_popularity":
+        rtype = captured.get("rtype") or ""
+        if rtype.endswith("s") and not rtype.endswith("ss"):
+            rtype = rtype[:-1]
+        params["rtype"] = rtype.lower()
+        params["internal_labels"] = list(_get_internal_labels())
 
     return cypher, params
 
