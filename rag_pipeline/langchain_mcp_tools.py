@@ -92,6 +92,7 @@ def get_mcp_cache_stats() -> Dict[str, Any]:
 def _mcp_tool(
     _func=None,
     *,
+    category: str | None = None,
     summary: str | None = None,
     description: str | None = None,
     tool_description: str | None = None,
@@ -99,6 +100,8 @@ def _mcp_tool(
 ):
     def decorator(func):
         func._is_mcp_tool = True
+        if category:
+            func._mcp_category = category
         if summary:
             func._mcp_summary = summary
             func._tool_summary = summary
