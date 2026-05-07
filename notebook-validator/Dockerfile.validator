@@ -1,0 +1,34 @@
+FROM python:3.12-slim
+
+# docker CLI is needed so validator.py can launch papermill containers
+RUN apt-get update && apt-get install -y \
+    git \
+    curl \
+    cron \
+    docker.io \
+    && rm -rf /var/lib/apt/lists/*
+
+# Clone the notebook-validation repo (contains validator.py + papermill logic)
+WORKDIR /opt/notebook-validator
+RUN git clone https://github.com/I-GUIDE/notebook-validation .
+
+# Install Python dependencies for the API service
+# (papermill/nbformat live in the separate notebook-validator execution image)
+RUN pip install --no-cache-dir \
+    flask \
+    requests \
+    psutil
+
+# Copy the Flask API wrapper into the repo directory so it can import from it
+COPY notebook-validator/validator_api.py .
+
+# Install weekly re-validation cron job
+COPY notebook-validator/crontab /etc/cron.d/notebook-validator
+RUN chmod 0644 /etc/cron.d/notebook-validator \
+    && crontab /etc/cron.d/notebook-validator
+
+# Expose Flask port
+EXPOSE 5003
+
+# Start cron in the background, then run the Flask API
+CMD cron && python validator_api.py

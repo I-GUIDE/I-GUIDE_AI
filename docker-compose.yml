@@ -30,3 +30,12 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       # CVMFS mount for conda environment resolution
       - /cvmfs:/cvmfs:ro
+
+  # Papermill execution image — not a running service; built so it is available
+  # on the host for validator.py to launch via `docker run notebook-validator-runner`.
+  notebook-validator-runner:
+    build:
+      context: .
+      dockerfile: notebook-validator/Dockerfile.runner
+    image: notebook-validator
+    restart: "no"

@@ -1,0 +1,2 @@
+# Weekly re-validation of all platform notebooks — every Sunday at 2 AM
+0 2 * * 0 root cd /opt/notebook-validator && python validator.py --download >> /var/log/weekly_revalidation.log 2>&1

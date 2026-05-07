@@ -1,0 +1,22 @@
+FROM python:3.9-slim
+
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+
+# Clone notebook-validation repo to get docker-requirements.txt and entrypoint.sh
+WORKDIR /opt/notebook-validation
+RUN git clone https://github.com/I-GUIDE/notebook-validation .
+
+WORKDIR /workspace
+
+RUN pip install --no-cache-dir -r /opt/notebook-validation/docker-requirements.txt
+
+RUN mkdir -p /workspace/input /workspace/output
+
+RUN cp /opt/notebook-validation/entrypoint.sh /entrypoint.sh \
+    && sed -i 's/\r//' /entrypoint.sh \
+    && chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["echo", "Notebook validator runner ready"]
