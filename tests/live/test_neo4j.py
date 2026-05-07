@@ -10,6 +10,7 @@ Live test for the Neo4j graph search layer.
   TEST 4: Resource type queries — searches targeting specific element types
   TEST 5: Internal label guard — no internal system nodes leak into results
   TEST 6: LangChain wrapper — neo4j_search_tool() returns a valid JSON payload
+  TEST 7: Optional element ID tools — gated by TEST_NEO4J_ELEMENT_ID
 
 Run from repo root:
     python tests/live/test_neo4j.py
@@ -36,8 +37,9 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parents[2] / ".env")
 logging.basicConfig(level=logging.WARNING)
 
 from rag_pipeline.search.neo4j import get_neo4j_search_results
+from rag_pipeline.search.agents import explore_neo4j_related_nodes, get_neo4j_element_by_id_results
 from rag_pipeline.search.neo4j_graph_tools import detect_pattern, _get_internal_labels, _get_resource_labels
-from rag_pipeline.langchain_granular_tools import neo4j_search_tool
+from rag_pipeline.langchain_granular_tools import neo4j_explore_related_nodes_tool, neo4j_search_tool
 
 
 def _banner(title: str) -> None:
@@ -187,6 +189,34 @@ def test_langchain_wrapper() -> None:
         print(f"   First doc: {payload['documents'][0].get('title', '<untitled>')[:70]}")
 
 
+def test_optional_element_id_tools() -> None:
+    _banner("TEST 7: Optional element ID tools")
+    element_id = os.getenv("TEST_NEO4J_ELEMENT_ID", "").strip()
+    if not element_id:
+        print("⚠️   Skipping — set TEST_NEO4J_ELEMENT_ID to test exact ID lookup and traversal")
+        return
+
+    hits = get_neo4j_element_by_id_results(element_id)
+    if not hits:
+        print(f"❌  No public element found for TEST_NEO4J_ELEMENT_ID={element_id!r}")
+        return
+    assert hits[0]["_id"] == element_id
+    print(f"✅  Exact ID lookup returned: {(hits[0].get('_source') or {}).get('title', '<untitled>')[:70]}")
+
+    payload = explore_neo4j_related_nodes(element_id, depth=1, limit=10)
+    expected_keys = {"source", "count", "seed", "documents", "edges", "citation_ids"}
+    missing = expected_keys - set(payload.keys())
+    if missing:
+        print(f"❌  Missing keys in related-node payload: {missing}")
+        return
+    assert payload["seed"]["doc_id"] == element_id
+    print(f"✅  Related-node payload shape OK — related={payload['count']} edges={len(payload['edges'])}")
+
+    wrapper_payload = json.loads(neo4j_explore_related_nodes_tool(element_id, depth=1, limit=10))
+    assert wrapper_payload["seed"]["doc_id"] == element_id
+    print("✅  LangChain related-node wrapper returned valid JSON")
+
+
 def main() -> None:
     if not test_env_check():
         return
@@ -199,6 +229,7 @@ def main() -> None:
     test_resource_type_queries()
     test_internal_label_guard()
     test_langchain_wrapper()
+    test_optional_element_id_tools()
     _banner("SUMMARY")
     print("All tests executed. Check ✅/❌/⚠️ above for failures.")
 

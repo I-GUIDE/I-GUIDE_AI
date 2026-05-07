@@ -6,7 +6,11 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 from .langchain_file_tools import make_langchain_file_tools
 from .search.opengeodata import get_opengeodata_results
 from .search.keyword import get_keyword_search_results
-from .search.agents import get_neo4j_agent_results
+from .search.agents import (
+    explore_neo4j_related_nodes,
+    get_neo4j_agent_results,
+    get_neo4j_element_by_id_results,
+)
 from .search.semantic import semantic_search as run_semantic_search
 from .search.spatial import get_spatial_search_results
 
@@ -65,6 +69,20 @@ def neo4j_search_tool(query: str, limit: int = 8) -> str:
     return _build_payload(hits, source="neo4j")
 
 
+def neo4j_get_element_by_id_tool(element_id: str) -> str:
+    hits = get_neo4j_element_by_id_results(element_id)
+    return _build_payload(hits, source="neo4j")
+
+
+def neo4j_explore_related_nodes_tool(element_id: str, depth: int = 2, limit: int = 50) -> str:
+    payload = explore_neo4j_related_nodes(
+        element_id,
+        depth=_safe_int(depth, default=2, maximum=3),
+        limit=_safe_int(limit, default=50),
+    )
+    return json.dumps(payload, ensure_ascii=True, default=str)
+
+
 def spatial_search_tool(query: str, limit: int = 8) -> str:
     hits = get_spatial_search_results(query, size=_safe_int(limit))
     return _build_payload(hits, source="spatial")
@@ -115,6 +133,18 @@ def make_langchain_granular_tools(
             metadata={"category": "retrieval_internal"},
         ),
         StructuredTool.from_function(
+            func=neo4j_get_element_by_id_tool,
+            name="neo4j_get_element_by_id",
+            description="Fetch one public I-GUIDE knowledge element by exact Neo4j id. Use when the user provides an element id. Returns JSON with doc_ids and snippets.",
+            metadata={"category": "retrieval_internal"},
+        ),
+        StructuredTool.from_function(
+            func=neo4j_explore_related_nodes_tool,
+            name="neo4j_explore_related_nodes",
+            description="Explore public RELATED nodes from an exact I-GUIDE knowledge element id. Returns JSON with seed, related documents, edges, and citation_ids.",
+            metadata={"category": "retrieval_internal"},
+        ),
+        StructuredTool.from_function(
             func=spatial_search_tool,
             name="spatial_search",
             description="Spatially-biased search inferred from location mentions. Returns JSON with doc_ids and snippets.",
@@ -132,7 +162,12 @@ def make_langchain_granular_tools(
     ]
     if enabled_search_methods is not None:
         enabled = {str(name).strip() for name in enabled_search_methods if str(name).strip()}
-        search_tools = [tool for tool in search_tools if getattr(tool, "name", "") in enabled]
+        neo4j_companion_tools = {"neo4j_get_element_by_id", "neo4j_explore_related_nodes"}
+        search_tools = [
+            tool for tool in search_tools
+            if getattr(tool, "name", "") in enabled
+            or ("neo4j_search" in enabled and getattr(tool, "name", "") in neo4j_companion_tools)
+        ]
 
     tools = list(search_tools)
     if include_file_tools:
@@ -144,6 +179,8 @@ __all__ = [
     "keyword_search_tool",
     "semantic_search_tool",
     "neo4j_search_tool",
+    "neo4j_get_element_by_id_tool",
+    "neo4j_explore_related_nodes_tool",
     "spatial_search_tool",
     "opengeodata_search_tool",
     "make_langchain_granular_tools",

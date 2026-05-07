@@ -47,6 +47,10 @@ _DEFAULT_INTERNAL_LABELS = {
     "Contributor", "User", "Alias", "Temp", "Notification",
 }
 
+_PUBLIC_VISIBILITY = "public"
+_MAX_RELATED_DEPTH = 3
+_DEFAULT_RELATED_DEPTH = 2
+
 
 def _get_resource_labels() -> set:
     env_val = os.getenv("NEO4J_RESOURCE_LABELS", "").strip()
@@ -151,6 +155,18 @@ ORDER BY score DESC
 LIMIT $limit
 """.replace("{SCORE_EXPR}", _SCORE_EXPR)
 
+_CYPHER_GET_ELEMENT_BY_ID = """
+MATCH (n {id: $element_id})
+WHERE n.visibility = $public_visibility
+OPTIONAL MATCH (c)-[:CONTRIBUTED]-(n)
+RETURN n AS node,
+       1.0 AS score,
+       CASE
+         WHEN c IS NULL THEN null
+         ELSE trim(coalesce(c.display_first_name, '') + ' ' + coalesce(c.display_last_name, ''))
+       END AS matched_author
+LIMIT 1
+"""
 
 
 
@@ -168,7 +184,34 @@ LIMIT $limit
 #   4. by_organization  — before by_resource_type (org names can look like type words)
 #   5. by_tag           — explicit trigger words, safe anywhere
 #   6. by_resource_type — last resort; only fires on explicit verb + type word
+_ID_TOKEN = r"([A-Za-z0-9][A-Za-z0-9_.:/-]{1,120})"
+
 _PATTERNS: List[Tuple[str, re.Pattern, List[str]]] = [
+    # 0. Exact ID lookup / neighborhood exploration. These are deterministic
+    # graph operations and should not fall through to Text2Cypher.
+    (
+        "explore_related_by_id",
+        re.compile(
+            r"\b(?:neighbors?|related(?:\s+(?:nodes?|elements?|resources?))?|"
+            r"explore(?:\s+(?:related|neighbors?|graph))?|graph(?:\s+around)?|"
+            r"connections?)\s+(?:for|of|from|around|to)?\s*"
+            r"(?:knowledge\s+element|element|resource)?\s*"
+            r"(?:id[:#]?\s*)?"
+            + _ID_TOKEN,
+            re.I,
+        ),
+        ["element_id"],
+    ),
+    (
+        "element_by_id",
+        re.compile(
+            r"\b(?:(?:knowledge\s+element|element|resource)\s+(?:id[:#]?\s*)?|"
+            r"id[:#]\s*)"
+            + _ID_TOKEN,
+            re.I,
+        ),
+        ["element_id"],
+    ),
     # 1. Author / person — matches "Firstname Lastname" or "Firstname Middle Lastname"
     #    Excludes institutional trigger words so "University of Illinois" routes to
     #    by_organization instead.
@@ -277,6 +320,9 @@ def detect_pattern(query: str) -> Optional[Tuple[str, Dict[str, str]]]:
             main_val = captured.get(group_names[0], "")
             if len(main_val) < 2:
                 continue
+            if pattern_name in {"element_by_id", "explore_related_by_id"}:
+                if not _looks_like_element_id(main_val):
+                    continue
 
             log.debug("Pattern '%s' matched query '%s' → %s", pattern_name, query, captured)
             return pattern_name, captured
@@ -312,6 +358,77 @@ def _split_name(full_name: str) -> Tuple[str, str]:
     return parts[0], parts[-1]       # first word = first name, last word = last name
 
 
+def _looks_like_element_id(value: str) -> bool:
+    value = (value or "").strip()
+    if len(value) < 2:
+        return False
+    if re.search(r"[\d_:/.-]", value):
+        return True
+    return len(value) >= 8
+
+
+def _normalize_element_id(element_id: str) -> str:
+    normalized = str(element_id or "").strip()
+    if not normalized:
+        raise ValueError("element_id must not be empty")
+    return normalized
+
+
+def _clamp_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(parsed, maximum))
+
+
+def build_element_by_id_query(element_id: str) -> Tuple[str, Dict[str, Any]]:
+    """
+    Return a deterministic public-only lookup query for a knowledge element ID.
+    """
+    return _CYPHER_GET_ELEMENT_BY_ID, {
+        "element_id": _normalize_element_id(element_id),
+        "public_visibility": _PUBLIC_VISIBILITY,
+    }
+
+
+def build_explore_related_nodes_query(
+    element_id: str,
+    depth: int = _DEFAULT_RELATED_DEPTH,
+    limit: int = 50,
+) -> Tuple[str, Dict[str, Any]]:
+    """
+    Return a deterministic public-only RELATED traversal query.
+
+    The relationship-depth bound is sanitized before interpolation because
+    Neo4j variable-length relationship bounds cannot be parameterized reliably.
+    """
+    safe_depth = _clamp_int(depth, _DEFAULT_RELATED_DEPTH, 1, _MAX_RELATED_DEPTH)
+    safe_limit = _clamp_int(limit, 50, 1, 100)
+    cypher = f"""
+MATCH (seed {{id: $element_id}})
+WHERE seed.visibility = $public_visibility
+CALL {{
+  WITH seed
+  MATCH path = (seed)-[:RELATED*1..{safe_depth}]-(related)
+  WHERE all(path_node IN nodes(path) WHERE path_node.visibility = $public_visibility)
+  WITH related, relationships(path) AS rels, length(path) AS path_depth
+  ORDER BY path_depth ASC
+  LIMIT $limit
+  WITH collect(DISTINCT related) AS nodes, collect(rels) AS rel_lists
+  WITH nodes, reduce(all_rels = [], rel_list IN rel_lists | all_rels + rel_list) AS flattened_rels
+  RETURN nodes,
+         [rel IN flattened_rels | {{src: startNode(rel).id, dst: endNode(rel).id, type: type(rel)}}] AS edges
+}}
+RETURN seed, nodes, edges
+"""
+    return cypher, {
+        "element_id": _normalize_element_id(element_id),
+        "public_visibility": _PUBLIC_VISIBILITY,
+        "limit": safe_limit,
+    }
+
+
 def build_tool_query(
     pattern_name: str,
     captured: Dict[str, str],
@@ -322,6 +439,9 @@ def build_tool_query(
     Author queries search Contributor nodes first; User nodes are the fallback
     handled by run_user_author_fallback.
     """
+    if pattern_name == "element_by_id":
+        return build_element_by_id_query(captured.get("element_id", ""))
+
     cypher = _TOOL_MAP.get(pattern_name)
     if not cypher:
         return None
