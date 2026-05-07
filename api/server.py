@@ -84,6 +84,7 @@ def _normalize_agent_chat_request(data: dict) -> dict:
     forced_intent = _coalesce(data.get("forcedIntent"), data.get("forced_intent"))
     file_paths = _coalesce(data.get("filePaths"), data.get("file_paths"))
     file_ids = _coalesce(data.get("fileIds"), data.get("file_ids"))
+    skill_roots = _coalesce(data.get("skillPaths"), data.get("skill_paths"), data.get("skillRoots"), data.get("skill_roots"))
     verbose = bool(_coalesce(data.get("verbose"), False))
 
     return {
@@ -101,6 +102,7 @@ def _normalize_agent_chat_request(data: dict) -> dict:
         "forced_intent": forced_intent,
         "file_paths": file_paths,
         "file_ids": file_ids,
+        "skill_roots": skill_roots,
         "verbose": verbose,
     }
 
@@ -126,6 +128,8 @@ def _format_agent_chat_result(payload: dict) -> dict:
         "agent_result": payload.get("agent_result") or {},
         "fileIds": payload.get("fileIds") or payload.get("file_ids") or [],
         "filePaths": payload.get("filePaths") or payload.get("file_paths") or [],
+        "skillPaths": payload.get("skillPaths") or payload.get("skill_roots") or [],
+        "availableSkills": payload.get("availableSkills") or payload.get("available_skills") or [],
     }
     warning = payload.get("warning")
     if warning:
@@ -145,6 +149,151 @@ def _category_for_agent_role(role: object) -> str:
     if role_text in {"analysis", "code", "verification"}:
         return "analysis"
     return "analysis"
+
+
+def _short_text(value: object, limit: int = 900) -> str:
+    text = value if isinstance(value, str) else str(value or "")
+    text = " ".join(text.split())
+    return text if len(text) <= limit else f"{text[:limit]}..."
+
+
+def _agent_trace_event(payload: dict) -> dict:
+    """Convert low-level LLM/tool payloads into browser-friendly trace events."""
+    kind = str(payload.get("kind") or payload.get("type") or "").strip()
+    if kind == "llm_tool_decision":
+        calls = payload.get("tool_calls") or []
+        if not calls and payload.get("name"):
+            calls = [{"name": payload.get("name"), "args": payload.get("args") or {}}]
+        return {
+            "type": "tool_call",
+            "agent": payload.get("agent") or "",
+            "label": "LLM tool decision",
+            "message": "; ".join(
+                f"{call.get('name', 'unknown_tool')}({json.dumps(call.get('args') or {}, ensure_ascii=True, default=str)})"
+                for call in calls
+                if isinstance(call, dict)
+            ),
+            "tool_calls": calls,
+            "detail": payload,
+        }
+    if kind == "tool_result":
+        tool_name = payload.get("tool_name") or payload.get("name") or ""
+        content = payload.get("content")
+        parsed = payload.get("parsed")
+        return {
+            "type": "tool_result",
+            "agent": payload.get("agent") or "",
+            "label": f"Tool result {tool_name}".strip(),
+            "message": _short_text(parsed if parsed is not None else content),
+            "tool_name": tool_name,
+            "detail": payload,
+        }
+    if kind == "llm_message":
+        return {
+            "type": "llm_message",
+            "agent": payload.get("agent") or "",
+            "label": "LLM message",
+            "message": _short_text(payload.get("content") or ""),
+            "detail": payload,
+        }
+    if kind == "agent_route_decision":
+        route_trace = payload.get("route_trace") or {}
+        return {
+            "type": "route_decision",
+            "agent": payload.get("agent") or "",
+            "label": "Route decision",
+            "message": f"route={route_trace.get('route') or 'unknown'}; intent={route_trace.get('intent') or 'unknown'}",
+            "detail": payload,
+        }
+    return {
+        "type": kind or "message",
+        "agent": payload.get("agent") or "",
+        "label": kind or "Trace",
+        "message": _short_text(payload.get("content") or payload.get("message") or payload),
+        "detail": payload,
+    }
+
+
+def _diagnostic_agent_trace_events(diagnostics: object) -> list[dict]:
+    """Expand recursion diagnostics into readable SSE trace events."""
+    if not isinstance(diagnostics, dict):
+        return []
+    events: list[dict] = []
+    call_counts = diagnostics.get("tool_call_counts")
+    if isinstance(call_counts, dict) and call_counts:
+        events.append(
+            {
+                "type": "diagnostic_summary",
+                "agent": "agent",
+                "label": "Recursion diagnostic",
+                "message": "Tool calls observed: "
+                + ", ".join(f"{name} x{count}" for name, count in sorted(call_counts.items())),
+                "detail": {
+                    "thread_id": diagnostics.get("thread_id"),
+                    "recursion_limit": diagnostics.get("recursion_limit"),
+                    "tool_call_counts": call_counts,
+                },
+            }
+        )
+
+    for idx, item in enumerate(diagnostics.get("recent_messages") or [], start=1):
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").lower()
+        content = _short_text(item.get("content") or "")
+        tool_calls = item.get("tool_calls")
+        name = str(item.get("name") or "").strip()
+        if role in {"human", "humanmessage", "user"}:
+            events.append(
+                {
+                    "type": "user_message",
+                    "agent": "",
+                    "label": "User",
+                    "message": content,
+                    "sequence": idx,
+                    "detail": item,
+                }
+            )
+        elif isinstance(tool_calls, list) and tool_calls:
+            events.append(
+                {
+                    "type": "tool_call",
+                    "agent": "llm",
+                    "label": "LLM tool decision",
+                    "message": "; ".join(
+                        f"{call.get('name', 'unknown_tool')}({json.dumps(call.get('args') or {}, ensure_ascii=True, default=str)})"
+                        for call in tool_calls
+                        if isinstance(call, dict)
+                    ),
+                    "sequence": idx,
+                    "tool_calls": tool_calls,
+                    "detail": item,
+                }
+            )
+        elif role in {"tool", "toolmessage"} or name:
+            events.append(
+                {
+                    "type": "tool_result",
+                    "agent": "tool",
+                    "label": f"Tool result {name}".strip(),
+                    "message": content,
+                    "sequence": idx,
+                    "tool_name": name,
+                    "detail": item,
+                }
+            )
+        elif role in {"ai", "aimessage", "assistant"}:
+            events.append(
+                {
+                    "type": "llm_message",
+                    "agent": "llm",
+                    "label": "LLM message",
+                    "message": content or "(empty message)",
+                    "sequence": idx,
+                    "detail": item,
+                }
+            )
+    return events
 
 
 # ---------------------------------------------------------------------------
@@ -627,6 +776,12 @@ def agent_chat():
                 type: string
               nullable: true
               example: ["file_0123456789ab"]
+            skillPaths:
+              type: array
+              items:
+                type: string
+              nullable: true
+              example: ["./skills"]
             verbose:
               type: boolean
               example: false
@@ -671,6 +826,7 @@ def agent_chat():
             forced_intent=normalized.get("forced_intent"),
             file_paths=normalized.get("file_paths"),
             file_ids=normalized.get("file_ids"),
+            skill_roots=normalized.get("skill_roots"),
             verbose=bool(normalized.get("verbose", False)),
         )
         return jsonify(_format_agent_chat_result(raw)), 200
@@ -679,7 +835,14 @@ def agent_chat():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logger.error(f"Error processing agent chat: {str(e)}", exc_info=True)
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        payload = {"error": f"Internal server error: {str(e)}"}
+        diagnostics = getattr(e, "diagnostics", None)
+        if diagnostics:
+            payload["diagnostics"] = diagnostics
+            diagnostic_text = diagnostics.get("readable_trace") if isinstance(diagnostics, dict) else None
+            if diagnostic_text:
+                payload["diagnosticText"] = diagnostic_text
+        return jsonify(payload), 500
 
 
 @app.route('/agent/chat/stream', methods=['POST'])
@@ -691,7 +854,7 @@ def agent_chat_stream():
     `event: <name>\\ndata: <json>\\n\\n`
 
     Node-compatible events: `status`, `result`, `error`.
-    Additional categorized events: `routing`, `search`, `analysis`, `answer`, `file`.
+    Additional categorized events: `routing`, `search`, `analysis`, `agent_trace`, `answer`, `file`.
 
     ---
     tags:
@@ -767,6 +930,11 @@ def agent_chat_stream():
               items:
                 type: string
               nullable: true
+            skillPaths:
+              type: array
+              items:
+                type: string
+              nullable: true
             verbose:
               type: boolean
               example: false
@@ -805,6 +973,7 @@ def agent_chat_stream():
 
         @stream_with_context
         def generate():
+            error_emitted = False
             try:
                 for item in stream_agent_chat_events(
                     user_input=user_query,
@@ -821,6 +990,7 @@ def agent_chat_stream():
                     forced_intent=normalized.get("forced_intent"),
                     file_paths=normalized.get("file_paths"),
                     file_ids=normalized.get("file_ids"),
+                    skill_roots=normalized.get("skill_roots"),
                     verbose=bool(normalized.get("verbose", False)),
                 ):
                     event_name = str(item.get("event") or "message")
@@ -851,6 +1021,19 @@ def agent_chat_stream():
                             category,
                             {"type": event_name, "agent": str(agent_role or ""), "node": node_name, "detail": payload},
                         )
+                        yield _sse_event(
+                            "agent_trace",
+                            _agent_trace_event(
+                                {
+                                    **payload,
+                                    "kind": "llm_tool_decision" if event_name == "tool_call" else "tool_result",
+                                    "agent": str(agent_role or ""),
+                                }
+                            ),
+                        )
+
+                    if event_name == "llm_interaction":
+                        yield _sse_event("agent_trace", _agent_trace_event(payload))
 
                     if event_name == "artifact":
                         yield _sse_event("file", {"type": "artifact", "agent": str(agent_role or ""), "detail": payload})
@@ -899,7 +1082,19 @@ def agent_chat_stream():
 
                     if event_name == "error":
                         message = payload.get("error") or payload.get("message") or "Unknown error"
-                        yield _sse_event("error", {"error": str(message)})
+                        diagnostic_text = payload.get("diagnosticText")
+                        error_text = str(message)
+                        if diagnostic_text:
+                            error_text = f"{error_text}\n\n{diagnostic_text}"
+                        error_payload = {"error": error_text}
+                        if diagnostic_text:
+                            error_payload["diagnosticText"] = diagnostic_text
+                        if payload.get("diagnostics"):
+                            error_payload["diagnostics"] = payload.get("diagnostics")
+                            for trace_event in _diagnostic_agent_trace_events(payload.get("diagnostics")):
+                                yield _sse_event("agent_trace", trace_event)
+                        error_emitted = True
+                        yield _sse_event("error", error_payload)
                         continue
 
             except ValueError as e:
@@ -907,7 +1102,19 @@ def agent_chat_stream():
                 yield _sse_event("error", {"error": str(e)})
             except Exception as e:
                 logger.error(f"Error streaming agent chat: {str(e)}", exc_info=True)
-                yield _sse_event("error", {"error": str(e)})
+                if error_emitted:
+                    return
+                error_payload = {"error": str(e)}
+                diagnostics = getattr(e, "diagnostics", None)
+                if diagnostics:
+                    error_payload["diagnostics"] = diagnostics
+                    diagnostic_text = diagnostics.get("readable_trace") if isinstance(diagnostics, dict) else None
+                    if diagnostic_text:
+                        error_payload["diagnosticText"] = diagnostic_text
+                        error_payload["error"] = f"{error_payload['error']}\n\n{diagnostic_text}"
+                    for trace_event in _diagnostic_agent_trace_events(diagnostics):
+                        yield _sse_event("agent_trace", trace_event)
+                yield _sse_event("error", error_payload)
 
         return Response(
             generate(),

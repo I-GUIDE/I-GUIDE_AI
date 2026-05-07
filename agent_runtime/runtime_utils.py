@@ -117,6 +117,30 @@ def _nested_called_tools_from_analysis_payload(artifacts: Dict[str, Any]) -> Lis
     return [str(item.get("name") or "") for item in nested_artifacts.get("tool_calls") or []]
 
 
+def _selected_skill_names(artifacts: Dict[str, Any]) -> List[str]:
+    selected: List[str] = []
+
+    def _collect_from_tool_results(tool_results: Sequence[Dict[str, Any]]) -> None:
+        for item in tool_results:
+            if str(item.get("name") or "") != "load_skill":
+                continue
+            payload = parse_tool_result_payload(item)
+            if not isinstance(payload, dict) or payload.get("status") != "ok":
+                continue
+            skill = payload.get("skill")
+            if isinstance(skill, dict):
+                name = str(skill.get("name") or "").strip()
+                if name and name not in selected:
+                    selected.append(name)
+
+    _collect_from_tool_results(artifacts.get("tool_results") or [])
+    analysis_payload = extract_tool_result_json(artifacts, "analysis_agent_answer") or {}
+    analysis_result = analysis_payload.get("analysis_result")
+    nested_artifacts = extract_search_artifacts(analysis_result if isinstance(analysis_result, dict) else {})
+    _collect_from_tool_results(nested_artifacts.get("tool_results") or [])
+    return selected
+
+
 def build_orchestration_trace(
     *,
     query: str,
@@ -131,6 +155,7 @@ def build_orchestration_trace(
     called_set = set(called_tools)
     nested_analysis_called_tools = _nested_called_tools_from_analysis_payload(artifacts)
     nested_analysis_called_set = set(nested_analysis_called_tools)
+    selected_skills = _selected_skill_names(artifacts)
     if "answer_from_memory" in called_set:
         memory_payload = extract_tool_result_json(artifacts, "answer_from_memory") or {}
         if memory_payload.get("can_answer") and memory_payload.get("answer"):
@@ -165,6 +190,7 @@ def build_orchestration_trace(
         "available_agents": list(available_agent_names),
         "called_tools": called_tools,
         "analysis_called_tools": nested_analysis_called_tools,
+        "selected_skills": selected_skills,
         "chat_history_available": bool(chat_history),
     }
 
