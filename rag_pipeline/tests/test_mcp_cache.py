@@ -12,8 +12,8 @@ from unittest.mock import patch
 
 import pytest
 
-from rag_pipeline import langchain_mcp_tools as mcp_tools_module
-from rag_pipeline.langchain_mcp_tools import (
+from services import langchain_mcp_tools as mcp_tools_module
+from services.langchain_mcp_tools import (
     clear_mcp_cache,
     get_mcp_cache_stats,
     make_langchain_mcp_tools,

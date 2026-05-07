@@ -6,7 +6,7 @@ Orchestrates all retrieval strategies for the I-GUIDE RAG pipeline.
 Search order:
   1. Keyword search      (always)
   2. Semantic search     (always)
-  3. Neo4j graph search  (LLM-routed — uses 3-tier agent in search_agents.py)
+  3. Neo4j graph search  (LLM-routed — uses 3-tier agent in neo4j/text2cypher.py)
   4. Spatial search      (LLM-routed)
   5. OpenGeoData         (always)
 """
@@ -36,7 +36,7 @@ logger = get_logger("search_core")
 
 # Neo4j agent (3-tier: pattern tools → Text2Cypher → keyword fallback)
 try:
-    from .agents import get_neo4j_agent_results
+    from .neo4j import get_neo4j_agent_results
     NEO4J_AGENT_AVAILABLE = True
 except ImportError as exc:
     logger.warning("Neo4j agent search unavailable: %s", exc)
@@ -117,7 +117,7 @@ def _llm_route(query: str, decisions: List[RoutingDecision]) -> tuple[bool, bool
 
     # Simple heuristic fallback — uses pattern detection so author/org/tag
     # queries still trigger graph search even when the LLM router is unavailable
-    from .neo4j_graph_tools import detect_pattern  # noqa: F811
+    from .neo4j import detect_pattern  # noqa: F811
     use_graph = detect_pattern(query) is not None
     use_spatial = False
     _record_decision(decisions, "heuristic_routing", "LLM routing disabled or errored")

@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from rag_pipeline.search import agents
-from rag_pipeline.search.neo4j_graph_tools import (
+from rag_pipeline.search import neo4j as agents
+from rag_pipeline.search.neo4j import (
     build_element_by_id_query,
     build_explore_related_nodes_query,
     detect_pattern,
@@ -142,7 +142,7 @@ def test_agent_id_route_does_not_fall_through_to_text2cypher(monkeypatch):
 def test_neo4j_search_enables_id_companion_tools():
     pytest.importorskip("langchain_core.tools")
 
-    from rag_pipeline.langchain_granular_tools import (
+    from services.langchain_granular_tools import (
         make_langchain_granular_tools,
         neo4j_explore_related_nodes_tool,
     )

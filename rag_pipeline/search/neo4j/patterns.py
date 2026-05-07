@@ -1,6 +1,6 @@
 """
-neo4j_graph_tools.py
---------------------
+patterns.py
+-----------
 Prewritten, parameterized Cypher tools for common relational query patterns
 in the I-GUIDE knowledge graph.
 
@@ -8,13 +8,10 @@ These are deterministic, schema-aware queries that cover high-frequency
 graph traversal patterns. They run BEFORE Text2Cypher and are much faster,
 cheaper, and more reliable for known query shapes.
 
-Hierarchy (called in order by GraphQueryDispatcher):
+Tier 1 of the Neo4j search hierarchy:
   1. Pattern match  → one of the tools below (deterministic, no LLM)
-  2. Text2Cypher    → LLM-generated Cypher (flexible, catches everything else)
-  3. Basic fallback → search_neo4j.get_neo4j_search_results (keyword-only)
-
-Each tool returns List[Dict] in the same raw-hit shape expected by
-_records_to_hits() in search_neo4j.py.
+  2. Text2Cypher    → LLM-generated Cypher (text2cypher.py)
+  3. Keyword search → keyword_fallback.get_neo4j_search_results
 """
 
 from __future__ import annotations
@@ -24,7 +21,7 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-log = logging.getLogger("neo4j_graph_tools")
+log = logging.getLogger("neo4j.patterns")
 
 
 # ---------------------------------------------------------------------------

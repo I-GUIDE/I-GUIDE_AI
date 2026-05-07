@@ -1,67 +1,15 @@
 from __future__ import annotations
 
-from functools import lru_cache
 from typing import Any, Dict, List, MutableMapping, Optional
 
-from .utils import get_logger, getenv, normalize_source_fields, safe_score
-from ..state import EvidenceEntry, ensure_state_shapes, get_query_text, merge_retrieval
+from ._client import get_node_class, run_query
+from ..utils import get_logger, normalize_source_fields, safe_score
+from ...state import EvidenceEntry, ensure_state_shapes, get_query_text, merge_retrieval
 
-log = get_logger("search_neo4j")
-
-
-@lru_cache(maxsize=1)
-def _neo4j_components() -> Optional[Dict[str, Any]]:
-    try:
-        from neo4j import GraphDatabase
-        from neo4j.graph import Node as Neo4jNode
-    except Exception as exc:  # pragma: no cover - optional dependency
-        log.debug("Neo4j driver unavailable: %s", exc)
-        return None
-    return {"GraphDatabase": GraphDatabase, "Node": Neo4jNode}
+log = get_logger("neo4j.keyword_fallback")
 
 
-@lru_cache(maxsize=1)
-def _neo4j_driver() -> Optional[Any]:
-    components = _neo4j_components()
-    if not components:
-        return None
-
-    uri = (
-        getenv("NEO4J_CONNECTION_STRING", required=False)
-        or getenv("NEO4J_URI", required=False)
-        or getenv("NEO4J_CONNECTION_STRING")
-    )
-    user = (
-        getenv("NEO4J_USER", required=False)
-        or getenv("NEO4J_USERNAME", required=False)
-        or getenv("NEO4J_USER")
-    )
-    password = getenv("NEO4J_PASSWORD")
-    GraphDatabase = components["GraphDatabase"]
-    try:
-        return GraphDatabase.driver(uri, auth=(user, password), max_connection_lifetime=300)
-    except Exception as exc:
-        log.error("Failed to create Neo4j driver: %s", exc)
-        return None
-
-
-def _neo4j_db() -> Optional[str]:
-    value = getenv("NEO4J_DB", required=False, default="").strip()
-    return value or None
-
-
-def _neo4j_run(cypher: str, params: Dict[str, Any], driver: Optional[Any] = None) -> List[Dict[str, Any]]:
-    db_driver = driver or _neo4j_driver()
-    if db_driver is None:
-        return []
-
-    database = _neo4j_db()
-    session_factory = db_driver.session
-    with (session_factory(database=database) if database else session_factory()) as session:
-        return list(session.run(cypher, **params))
-
-
-def _build_neo4j_keyword_cypher() -> str:
+def _build_keyword_cypher() -> str:
     return """
     MATCH (r)
     WHERE
@@ -95,29 +43,19 @@ def _extract_node_from_record(record: Dict[str, Any], node_cls: Optional[type]) 
 
 
 def _records_to_hits(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    components = _neo4j_components()
-    node_cls = components["Node"] if components else None
-
+    node_cls = get_node_class()
     hits: List[Dict[str, Any]] = []
     for idx, record in enumerate(records):
         node = _extract_node_from_record(record, node_cls)
         score = safe_score(record.get("score", 1.0))
-
         if node is not None:
             properties = dict(node)
             doc_id = properties.get("_id", getattr(node, "element_id", f"node:{idx}"))
         else:
             properties = {k: v for k, v in record.items() if isinstance(v, (str, int, float, list, dict))}
             doc_id = properties.get("doc_id", f"row:{idx}")
-
         source = normalize_source_fields(properties, str(doc_id))
-        hits.append(
-            {
-                "_id": str(doc_id),
-                "_score": score,
-                "_source": source,
-            }
-        )
+        hits.append({"_id": str(doc_id), "_score": score, "_source": source})
     return hits
 
 
@@ -128,53 +66,31 @@ def get_neo4j_search_results(
     driver: Optional[Any] = None,
     cypher: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """
-    Perform a keyword-style search against Neo4j without any LLM dependency.
-
-    Environment variables used when `driver` is not supplied:
-    - NEO4J_CONNECTION_STRING / NEO4J_URI
-    - NEO4J_USER (or NEO4J_USERNAME)
-    - NEO4J_PASSWORD
-    - NEO4J_DB (optional)
-
-    For testing, pass a mocked `driver` or override the `cypher`.
-    Returns hits in the same shape as `get_keyword_search_results`.
-    """
+    """Keyword-style Neo4j search with no LLM dependency. Tier 3 fallback."""
     query = (user_query or "").strip()
     if not query:
         return []
-
     params = {"q": query, "limit": max(1, min(int(limit or 0), 100))}
-    cypher_stmt = cypher or _build_neo4j_keyword_cypher()
-
+    cypher_stmt = cypher or _build_keyword_cypher()
     try:
-        records = _neo4j_run(cypher_stmt, params, driver=driver)
+        records = run_query(cypher_stmt, params, driver=driver)
     except Exception as exc:
         log.error("Neo4j keyword query failed: %s", exc)
         return []
-
-    if not records:
-        return []
-
-    return _records_to_hits(records)
+    return _records_to_hits(records) if records else []
 
 
 def retrieve_neo4j(state: MutableMapping[str, Any]) -> List[Dict[str, Any]]:
-    """
-    Execute the Neo4j retriever and return raw hits.
-    """
     ensure_state_shapes(state)
     query = get_query_text(state).strip()
     if not query:
         log.debug("Neo4j retriever skipped: empty query.")
         return []
-
     params = state.get("params") or {}
     try:
         limit = int(params.get("top_k", 8))
     except (TypeError, ValueError):
         limit = 8
-
     return get_neo4j_search_results(query, limit=limit)
 
 
@@ -192,18 +108,10 @@ def run_neo4j_search(
     if not actual_query:
         log.debug("Neo4j search skipped: empty query.")
         return []
-
     hits = get_neo4j_search_results(actual_query, limit=limit)
     if not hits:
         return []
-
-    return merge_retrieval(
-        state,
-        source=source,
-        hits=hits,
-        limit=max_total,
-        dedupe=dedupe,
-    )
+    return merge_retrieval(state, source=source, hits=hits, limit=max_total, dedupe=dedupe)
 
 
-__all__ = ["get_neo4j_search_results", "run_neo4j_search", "retrieve_neo4j"]
+__all__ = ["get_neo4j_search_results", "retrieve_neo4j", "run_neo4j_search"]
