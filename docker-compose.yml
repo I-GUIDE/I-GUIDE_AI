@@ -1,0 +1,32 @@
+version: '3.9'
+services:
+  embedding-server:
+    build:
+      context: .
+      dockerfile: embedding-server/Dockerfile.embedding
+    ports:
+      - "5000:5000"
+    container_name: iguide-embedding-server
+
+  metadata-extraction-server:
+    build:
+      context: .
+      dockerfile: metadata-extraction-server/Dockerfile.metadata
+    ports:
+      - "5001:5001"
+    container_name: iguide-metadata-server
+
+  notebook-validator:
+    build:
+      context: .
+      dockerfile: notebook-validator/Dockerfile.validator
+    ports:
+      - "5003:5003"
+    container_name: iguide-notebook-validator
+    env_file:
+      - .env
+    volumes:
+      # Docker socket so validator.py can launch papermill containers on the host
+      - /var/run/docker.sock:/var/run/docker.sock
+      # CVMFS mount for conda environment resolution
+      - /cvmfs:/cvmfs:ro
