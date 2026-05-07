@@ -4,16 +4,27 @@ A multi-agent RAG (Retrieval-Augmented Generation) system for geospatial researc
 
 ## Architecture
 
-The codebase has four main packages:
+The codebase has five main packages with a strict unidirectional dependency flow:
 
 ```
-api/                   Flask REST API layer (thin routing over the services)
-rag_pipeline/          Search, retrieval, generation (the RAG engine)
+api/                   Flask REST API layer (thin HTTP routing)
 agent_runtime/         Multi-agent orchestration (decides how to answer)
+services/              Agent/chat infrastructure shared by api/ and agent_runtime/
+rag_pipeline/          Pure RAG engine (search, retrieval, generation)
 MCP_server/            Geospatial analysis tools exposed via Model Context Protocol
 ```
 
-Plus supporting services:
+Dependency direction (no upward imports):
+
+```
+api/             ──→ rag_pipeline/, services/
+agent_runtime/   ──→ services/, rag_pipeline/
+services/        ──→ rag_pipeline/
+MCP_server/      ──→ services/
+rag_pipeline/    ──→ (foundation)
+```
+
+Plus supporting infrastructure:
 
 ```
 embedding-server/              Dense embedding generation (port 5000)
@@ -22,20 +33,39 @@ metadata-extraction-server/    Spatial metadata extraction (port 5001)
 
 ### How a query flows
 
+There are two execution paths through the system, serving different purposes:
+
+**Agent path** — flexible, multi-agent orchestration (used by `/agent/chat`):
+
 ```
 User query
+  -> services.chat_service: session memory, file context
   -> agent_runtime: OrchestratorAgent decides which sub-agents to invoke
        -> SearchAgent: retrieves evidence using search tools
        -> AnalysisAgent: synthesizes answer from evidence
        -> CodeAgent: generates executable code when needed
        -> DirectAnswerAgent: answers from chat history alone
-  -> rag_pipeline: search backends + generation
-       -> search/keyword.py:          BM25 via OpenSearch
-       -> search/semantic.py:         Vector kNN via embedding service
-       -> search/neo4j.py:            Knowledge graph (3-tier: pattern tools -> Text2Cypher -> keyword)
-       -> search/spatial.py:          Geographic filtering via NLP + Google Maps geocoding
-       -> search/opengeodata.py:      Federated STAC/OGC/CKAN/NASA CMR catalog search
-       -> generation.py:              LLM answer synthesis with citations
+  -> services.langchain_*: LangChain tool wrappers around the capabilities
+  -> rag_pipeline.search: individual search backends invoked by tools
+  -> Response with answer, citations, and evidence
+```
+
+**Pipeline path** — fixed orchestrated flow (used by `/query`):
+
+```
+User query
+  -> rag_pipeline.pipeline.run_pipeline
+  -> rag_pipeline.routing: state setup
+  -> rag_pipeline.search.core: runs all search methods, merges results
+       -> search/keyword.py:        BM25 via OpenSearch
+       -> search/semantic.py:       Vector kNN via embedding service
+       -> search/neo4j/:            Knowledge graph (3-tier package)
+                                      patterns.py     -> deterministic Cypher
+                                      text2cypher.py  -> LLM-generated Cypher
+                                      keyword_fallback.py -> keyword Cypher
+       -> search/spatial.py:        Geographic filtering via NLP + Google Maps geocoding
+       -> search/opengeodata.py:    Federated STAC/OGC/CKAN/NASA CMR catalog search
+  -> rag_pipeline.reranker_llm + generation: rerank then synthesize answer with citations
   -> Response with answer, citations, and evidence
 ```
 
@@ -54,7 +84,14 @@ agent_runtime/                   Multi-agent orchestration
 api/                             Flask REST API layer
   server.py                      All HTTP routes (/query, /agent/chat, /agent/files/*) (port 5002)
 
-rag_pipeline/                    RAG engine
+services/                        Agent/chat infrastructure (shared by api/ and agent_runtime/)
+  chat_service.py                Chat session management (memory + file context)
+  file_store.py                  File upload/download storage
+  langchain_granular_tools.py    Individual search backends as LangChain tools
+  langchain_mcp_tools.py         MCP server bridge into LangChain
+  langchain_file_tools.py        File I/O tools for agents
+
+rag_pipeline/                    Pure RAG engine (retrieval + generation)
   pipeline.py                    Pipeline orchestration (memory -> search -> rerank -> generate)
   routing.py                     Retrieval -> reranking -> generation glue
   state.py                       Shared AgentState schema
@@ -65,22 +102,20 @@ rag_pipeline/                    RAG engine
   router_llm.py                  LLM-based search method selection
   memory_module.py               Chat history, follow-up detection, query augmentation
   llm_utils.py                   LLM client wrapper (OpenAI-compatible)
-  agent_chat_service.py          Chat session management
-  agent_file_store.py            File upload/download storage
-  langchain_tool.py              RAG pipeline as a LangChain StructuredTool
-  langchain_granular_tools.py    Individual search backends as LangChain tools
-  langchain_mcp_tools.py         MCP server bridge into LangChain
-  langchain_file_tools.py        File I/O tools for agents
+  rag_tool.py                    RAG pipeline as a LangChain StructuredTool
   search/                        Search backends
     core.py                      Search orchestrator (runs all backends)
     keyword.py                   OpenSearch BM25 keyword search
     semantic.py                  Vector embedding kNN search
-    neo4j.py                     Neo4j knowledge graph search
-    neo4j_graph_tools.py         Prewritten Cypher templates + pattern detection
-    agents.py                    3-tier Neo4j dispatcher + LLM-generated OpenSearch DSL
     spatial.py                   Geographic search (NLP + geocoding + geo_shape)
     opengeodata.py               Federated search (STAC, OGC, CKAN, NASA CMR)
+    opensearch_llm.py            LLM-generated OpenSearch DSL (reserved, not wired)
     utils.py                     Logging, env parsing, normalization
+    neo4j/                       3-tier knowledge graph search package
+      patterns.py                Tier 1: deterministic Cypher pattern tools
+      text2cypher.py             Tier 2: LLM-generated Cypher
+      keyword_fallback.py        Tier 3: keyword Cypher fallback
+      _client.py                 Shared driver/connection helpers
 
 MCP_server/                      Model Context Protocol tool server
   server.py                      FastMCP server with auto-discovery (port 8000)
