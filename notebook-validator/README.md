@@ -135,7 +135,7 @@ curl http://localhost:5003/jobs/<job_id>
 
 ---
 
-## Running via Docker Compose
+## Running via Docker Compose (local)
 
 ```bash
 # Build all images including the runner
@@ -146,3 +146,52 @@ docker compose up notebook-validator
 ```
 
 Requires `/cvmfs` to be mounted on the host and a populated `.env` file.
+
+---
+
+## Production deployment
+
+### 1. CVMFS on the host
+
+CVMFS must be mounted on the production server before starting the stack. On Linux it is managed via autofs and starts automatically after running the setup script once:
+
+```bash
+cd /path/to/notebook-validation
+sudo bash setup_cvmfs_client.sh
+```
+
+Verify:
+```bash
+ls /cvmfs/cybergis.illinois.edu
+ls /cvmfs/iguide.purdue.edu
+```
+
+### 2. Configure the backend
+
+In the Node.js backend's `.env`, set:
+
+```
+NOTEBOOK_VALIDATOR_URL=http://notebook-validator:5003
+```
+
+`notebook-validator` is the Docker Compose service name and resolves automatically on the internal Docker network.
+
+### 3. Configure the validator
+
+In this repo's `.env` (copied from `.env.example`), set:
+
+```
+BACKEND_URL=http://<backend-service-name>:3501
+AUTH_API_KEY=x-auth-key
+AUTH_API_KEY_VALUE=<secret>          # must match the backend's AUTH_API_KEY_VALUE
+PORT=5003
+```
+
+### 4. Build and start
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+This starts the validator API and registers the weekly cron job inside the container. No further setup is needed — notebooks are validated automatically on upload and re-validated every Sunday at 2 AM.
