@@ -65,11 +65,13 @@ def count_crimes_per_community(crime_type: str = None) -> Dict[str, Any]:
             - top_communities: Top 10 communities by crime count
             - filtered_by: Crime type if filtered
     """
+    from tools.data_tools import load_chicago_community_areas, load_chicago_crime_data
+
     if 'chicago_community_areas' not in _dataframe_cache:
-        return {"error": "Community areas not loaded. Call load_chicago_community_areas() first."}
+        load_chicago_community_areas()
     
     if 'chicago_crime_data' not in _dataframe_cache:
-        return {"error": "Crime data not loaded. Call load_chicago_crime_data() first."}
+        load_chicago_crime_data()
     
     gdf_polygons = _dataframe_cache['chicago_community_areas']
     gdf_points = _dataframe_cache['chicago_crime_data']

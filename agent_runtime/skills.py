@@ -405,6 +405,8 @@ def make_skill_tools(*, skill_roots: Optional[Sequence[str | Path]] = None) -> L
         ) from exc
 
     catalog = skill_catalog_for_prompt(registry)
+    loaded_skills: set[str] = set()
+    loaded_resources: set[tuple[str, str]] = set()
 
     def list_available_skills() -> str:
         """List local skills available to this agent run."""
@@ -412,7 +414,72 @@ def make_skill_tools(*, skill_roots: Optional[Sequence[str | Path]] = None) -> L
 
     def load_skill(skill_name: str, resource_path: str = "") -> str:
         """Load a skill's instructions or one resource inside that skill."""
-        return registry.load_skill_json(skill_name=skill_name, resource_path=resource_path)
+        normalized_name = str(skill_name or "").strip()
+        normalized_resource = str(resource_path or "").strip()
+
+        # Some models pass the skill directory as resource_path after the main
+        # skill is already loaded. Treat that as a repeat main-skill load rather
+        # than an unsafe resource lookup.
+        if normalized_resource:
+            try:
+                skill = registry.get(normalized_name)
+                candidate = Path(normalized_resource).expanduser()
+                if candidate.is_absolute() and candidate.resolve() in {
+                    skill.skill_path.resolve(),
+                    skill.skill_file.resolve(),
+                }:
+                    normalized_resource = ""
+            except Exception:
+                pass
+
+        if not normalized_resource:
+            if normalized_name in loaded_skills:
+                try:
+                    skill = registry.get(normalized_name)
+                    allowed_tools = list(skill.allowed_tools)
+                except Exception:
+                    allowed_tools = []
+                return json.dumps(
+                    {
+                        "status": "already_loaded",
+                        "skill_name": normalized_name,
+                        "allowed_tools": allowed_tools,
+                        "next_action": (
+                            "Do not call load_skill for this skill again in this request. "
+                            "Use the loaded instructions and call the relevant allowed tool, "
+                            "or produce the final answer if the required tool output is already available."
+                        ),
+                    },
+                    ensure_ascii=True,
+                )
+            payload = json.loads(registry.load_skill_json(skill_name=normalized_name))
+            if isinstance(payload, dict):
+                if payload.get("status") == "ok":
+                    loaded_skills.add(normalized_name)
+                payload["next_action"] = (
+                    "This skill is now loaded. Do not call load_skill for this skill again in this request. "
+                    "Proceed to the relevant allowed tool or final answer."
+                )
+                payload["already_loaded"] = False
+                return json.dumps(payload, ensure_ascii=True, default=str)
+            return json.dumps(payload, ensure_ascii=True, default=str)
+
+        resource_key = (normalized_name, normalized_resource)
+        if resource_key in loaded_resources:
+            return json.dumps(
+                {
+                    "status": "already_loaded",
+                    "skill_name": normalized_name,
+                    "resource_path": normalized_resource,
+                    "next_action": (
+                        "Do not call load_skill for this resource again in this request. "
+                        "Use the already loaded resource content."
+                    ),
+                },
+                ensure_ascii=True,
+            )
+        loaded_resources.add(resource_key)
+        return registry.load_skill_json(skill_name=normalized_name, resource_path=normalized_resource)
 
     return [
         StructuredTool.from_function(
@@ -430,6 +497,9 @@ def make_skill_tools(*, skill_roots: Optional[Sequence[str | Path]] = None) -> L
             description=(
                 "Load instructions for a relevant local agent skill by skill_name, "
                 "or load a listed skill resource by also passing resource_path. "
+                "Call this at most once per skill per user request; after it returns status ok "
+                "or already_loaded, use the loaded instructions and do not call load_skill for "
+                "the same skill again. "
                 "Available skills:\n"
                 f"{catalog}"
             ),

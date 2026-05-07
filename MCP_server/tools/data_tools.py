@@ -14,11 +14,33 @@ from server import mcp_tool
 from tools.cache import _dataframe_cache
 
 
+def _community_areas_summary(gdf: gpd.GeoDataFrame, *, cache_hit: bool) -> Dict[str, Any]:
+    sample_cols = [c for c in ["community", "area_num_1"] if c in gdf.columns]
+    sample_rows = (
+        gdf[sample_cols].head(3).to_dict(orient="records")
+        if sample_cols
+        else gdf.head(3).drop(columns="geometry", errors="ignore").to_dict(orient="records")
+    )
+    return {
+        "type": "FeatureCollection",
+        "feature_count": len(gdf),
+        "columns": list(gdf.columns),
+        "bounds": gdf.total_bounds.tolist(),
+        "crs": str(gdf.crs),
+        "community_names": gdf["community"].tolist() if "community" in gdf.columns else [],
+        "sample_rows": sample_rows,
+        "_note": "Full data cached. Use spatial analysis tools to work with complete dataset.",
+        "_cache_key": "chicago_community_areas",
+        "_cache_hit": cache_hit,
+    }
+
+
 @mcp_tool(category="data_loading")
-def load_chicago_community_areas() -> Dict[str, Any]:
+def load_chicago_community_areas(force_reload: bool = False) -> Dict[str, Any]:
     """
     Loads the official boundaries for Chicago's 77 community areas.
     Returns a compact summary with metadata and sample features to avoid context overflow.
+    Reuses the in-process cache unless force_reload is true.
     
     Returns:
         dict: Summary containing:
@@ -30,6 +52,9 @@ def load_chicago_community_areas() -> Dict[str, Any]:
             - community_names: List of all community area names
             - sample_features: First 3 community areas as examples
     """
+    if not force_reload and "chicago_community_areas" in _dataframe_cache:
+        return _community_areas_summary(_dataframe_cache["chicago_community_areas"], cache_hit=True)
+
     url = (
         "https://raw.githubusercontent.com/RandomFractals/ChicagoCrimes/refs/heads/"
         "master/data/chicago-community-areas.geojson"
@@ -38,33 +63,68 @@ def load_chicago_community_areas() -> Dict[str, Any]:
     
     # Cache for local use
     _dataframe_cache['chicago_community_areas'] = gdf
-    
-    # Return compact summary without full GeoJSON to avoid huge payloads
-    sample_cols = [c for c in ["community", "area_num_1"] if c in gdf.columns]
+    return _community_areas_summary(gdf, cache_hit=False)
+
+
+def _crime_data_summary(gdf: gpd.GeoDataFrame, *, cache_hit: bool) -> Dict[str, Any]:
+    # Convert datetime columns to strings
+    safe_gdf = gdf.copy()
+    datetime_cols = safe_gdf.select_dtypes(include=["datetime64[ns]", "datetimetz"]).columns
+    for col in datetime_cols:
+        safe_gdf[col] = safe_gdf[col].astype("datetime64[ns]").dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+    # Replace NaN/inf values with None
+    safe_gdf = safe_gdf.replace([float("inf"), float("-inf")], None)
+    safe_gdf = safe_gdf.where(safe_gdf.notna(), None)
+
+    # Return compact sample rows without full GeoJSON to avoid huge payloads
+    sample_cols = [
+        c
+        for c in ["id", "date", "primary_type", "description", "location_description", "arrest"]
+        if c in safe_gdf.columns
+    ]
     sample_rows = (
-        gdf[sample_cols].head(3).to_dict(orient="records")
+        safe_gdf[sample_cols].head(5).to_dict(orient="records")
         if sample_cols
-        else gdf.head(3).drop(columns="geometry", errors="ignore").to_dict(orient="records")
+        else safe_gdf.head(5).drop(columns="geometry", errors="ignore").to_dict(orient="records")
     )
-    
+
+    # Get crime type distribution
+    crime_types = {}
+    if "primary_type" in gdf.columns:
+        crime_counts = gdf["primary_type"].value_counts().head(10)
+        crime_types = crime_counts.to_dict()
+
+    # Get date range
+    date_range = {"start": None, "end": None}
+    if "date" in gdf.columns:
+        date_col = pd.to_datetime(gdf["date"], errors='coerce')
+        date_range = {
+            "start": date_col.min().isoformat() if not pd.isna(date_col.min()) else None,
+            "end": date_col.max().isoformat() if not pd.isna(date_col.max()) else None
+        }
+
     return {
         "type": "FeatureCollection",
         "feature_count": len(gdf),
         "columns": list(gdf.columns),
         "bounds": gdf.total_bounds.tolist(),
         "crs": str(gdf.crs),
-        "community_names": gdf["community"].tolist() if "community" in gdf.columns else [],
+        "crime_types": crime_types,
+        "date_range": date_range,
         "sample_rows": sample_rows,
         "_note": "Full data cached. Use spatial analysis tools to work with complete dataset.",
-        "_cache_key": "chicago_community_areas"
+        "_cache_key": "chicago_crime_data",
+        "_cache_hit": cache_hit,
     }
 
 
 @mcp_tool(category="data_loading")
-def load_chicago_crime_data() -> Dict[str, Any]:
+def load_chicago_crime_data(force_reload: bool = False) -> Dict[str, Any]:
     """
     Loads reported crime incidents in Chicago from the last 365 days.
     Returns a compact summary with statistics and sample records to avoid context overflow.
+    Reuses the in-process cache unless force_reload is true.
     
     Returns:
         dict: Summary containing:
@@ -77,7 +137,10 @@ def load_chicago_crime_data() -> Dict[str, Any]:
             - date_range: Earliest and latest crime dates
             - sample_features: First 5 crime records as examples
     """
-    start_date = (_dt.datetime.utcnow() - _dt.timedelta(days=365)).strftime(
+    if not force_reload and "chicago_crime_data" in _dataframe_cache:
+        return _crime_data_summary(_dataframe_cache["chicago_crime_data"], cache_hit=True)
+
+    start_date = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=365)).strftime(
         "%Y-%m-%dT00:00:00.000"
     )
     url = (
@@ -91,56 +154,7 @@ def load_chicago_crime_data() -> Dict[str, Any]:
     
     # Cache for local use
     _dataframe_cache['chicago_crime_data'] = gdf
-    
-    # Convert datetime columns to strings
-    safe_gdf = gdf.copy()
-    datetime_cols = safe_gdf.select_dtypes(include=["datetime64[ns]", "datetimetz"]).columns
-    for col in datetime_cols:
-        safe_gdf[col] = safe_gdf[col].astype("datetime64[ns]").dt.strftime("%Y-%m-%dT%H:%M:%S")
-    
-    # Replace NaN/inf values with None
-    safe_gdf = safe_gdf.replace([float("inf"), float("-inf")], None)
-    safe_gdf = safe_gdf.where(safe_gdf.notna(), None)
-    
-    # Return compact sample rows without full GeoJSON to avoid huge payloads
-    sample_cols = [
-        c
-        for c in ["id", "date", "primary_type", "description", "location_description", "arrest"]
-        if c in safe_gdf.columns
-    ]
-    sample_rows = (
-        safe_gdf[sample_cols].head(5).to_dict(orient="records")
-        if sample_cols
-        else safe_gdf.head(5).drop(columns="geometry", errors="ignore").to_dict(orient="records")
-    )
-    
-    # Get crime type distribution
-    crime_types = {}
-    if "primary_type" in gdf.columns:
-        crime_counts = gdf["primary_type"].value_counts().head(10)
-        crime_types = crime_counts.to_dict()
-    
-    # Get date range
-    date_range = {"start": None, "end": None}
-    if "date" in gdf.columns:
-        date_col = pd.to_datetime(gdf["date"], errors='coerce')
-        date_range = {
-            "start": date_col.min().isoformat() if not pd.isna(date_col.min()) else None,
-            "end": date_col.max().isoformat() if not pd.isna(date_col.max()) else None
-        }
-    
-    return {
-        "type": "FeatureCollection",
-        "feature_count": len(gdf),
-        "columns": list(gdf.columns),
-        "bounds": gdf.total_bounds.tolist(),
-        "crs": str(gdf.crs),
-        "crime_types": crime_types,
-        "date_range": date_range,
-        "sample_rows": sample_rows,
-        "_note": "Full data cached. Use spatial analysis tools to work with complete dataset.",
-        "_cache_key": "chicago_crime_data"
-    }
+    return _crime_data_summary(gdf, cache_hit=False)
 
 
 @mcp_tool(category="computation")
@@ -160,7 +174,7 @@ def get_crime_statistics(crime_type: str = None) -> Dict[str, Any]:
             - arrest_rate: Percentage of crimes resulting in arrest
     """
     if 'chicago_crime_data' not in _dataframe_cache:
-        return {"error": "Crime data not loaded. Call load_chicago_crime_data() first."}
+        load_chicago_crime_data()
     
     gdf = _dataframe_cache['chicago_crime_data']
     

@@ -128,6 +128,50 @@ def test_make_skill_tools_returns_loader_tools(tmp_path):
     payload = json.loads(load_tool.invoke({"skill_name": "analysis-skill"}))
     assert payload["status"] == "ok"
     assert payload["skill"]["name"] == "analysis-skill"
+    assert payload["already_loaded"] is False
+    assert "Do not call load_skill" in payload["next_action"]
+
+
+def test_load_skill_is_single_use_per_tool_instance(tmp_path):
+    _write_skill(tmp_path, "analysis-skill")
+
+    load_tool = next(tool for tool in make_skill_tools(skill_roots=[tmp_path]) if tool.name == "load_skill")
+
+    first = json.loads(load_tool.invoke({"skill_name": "analysis-skill"}))
+    second = json.loads(load_tool.invoke({"skill_name": "analysis-skill"}))
+
+    assert first["status"] == "ok"
+    assert "instructions" in first
+    assert second == {
+        "status": "already_loaded",
+        "skill_name": "analysis-skill",
+        "allowed_tools": ["keyword_search", "semantic_search"],
+        "next_action": (
+            "Do not call load_skill for this skill again in this request. "
+            "Use the loaded instructions and call the relevant allowed tool, "
+            "or produce the final answer if the required tool output is already available."
+        ),
+    }
+
+
+def test_load_skill_treats_skill_directory_resource_as_repeat_load(tmp_path):
+    _write_skill(tmp_path, "analysis-skill")
+    skill_dir = tmp_path / "analysis-skill"
+
+    load_tool = next(tool for tool in make_skill_tools(skill_roots=[tmp_path]) if tool.name == "load_skill")
+    first = json.loads(load_tool.invoke({"skill_name": "analysis-skill"}))
+    repeated = json.loads(
+        load_tool.invoke(
+            {
+                "skill_name": "analysis-skill",
+                "resource_path": str(skill_dir),
+            }
+        )
+    )
+
+    assert first["status"] == "ok"
+    assert repeated["status"] == "already_loaded"
+    assert repeated["skill_name"] == "analysis-skill"
 
 
 def test_make_skill_tools_empty_when_no_skills(tmp_path):

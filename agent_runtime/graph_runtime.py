@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import queue
+import threading
 from typing import Any, Dict, Generator, List, Optional
 
 from agent_runtime.executor_factory import (
@@ -33,6 +35,7 @@ from agent_runtime.runtime_utils import (
     extract_search_artifacts,
 )
 from agent_runtime.skills import SkillRegistry
+from agent_runtime.streaming_trace import trace_context
 
 
 # ---------------------------------------------------------------------------
@@ -168,93 +171,137 @@ def stream_agent_query_events(
         },
     }
     yield {"event": "status", "data": {"stage": "orchestration_agent_started"}}
-    try:
-        orchestrator = build_orchestrator_agent_executor(
-            llm=llm,
-            verbose=verbose,
-            return_intermediate_steps=return_intermediate_steps,
-            tools=orchestration_tools,
-            checkpointer=checkpointer,
-            skill_roots=skill_roots,
-        )
-        orchestration_result = invoke_agent_with_payload_fallback(
-            orchestrator,
-            query=query,
-            chat_history=chat_history,
-            config=agent_config(child_thread_id(effective_thread_id, "orchestrator")),
-        )
-        artifacts = extract_search_artifacts(orchestration_result if isinstance(orchestration_result, dict) else {})
-        route_trace = build_orchestration_trace(
-            query=query,
-            chat_history=chat_history,
-            available_agent_names=available_agent_names,
-            orchestration_result=orchestration_result if isinstance(orchestration_result, dict) else {},
-        )
-        yield {"event": "route_trace", "data": route_trace}
-        yield {
-            "event": "decision",
-            "data": {
-                "agent": "orchestrator_agent",
-                "query": query,
-                "route": route_trace.get("route"),
-                "called_tools": route_trace.get("called_tools") or [],
-                "analysis_called_tools": route_trace.get("analysis_called_tools") or [],
-                "selected_skills": route_trace.get("selected_skills") or [],
-                "chat_history_available": route_trace.get("chat_history_available"),
-            },
-        }
-        for interaction in build_llm_interaction_trace(
-            orchestration_result if isinstance(orchestration_result, dict) else {},
-            agent_name="orchestrator_agent",
-        ):
-            yield {"event": "llm_interaction", "data": interaction}
-        for tool_call in artifacts.get("tool_calls") or []:
-            yield {"event": "tool_call", "data": tool_call}
-        for tool_result in artifacts.get("tool_results") or []:
-            yield {"event": "tool_result", "data": tool_result}
-        if "search_agent_evidence" in route_trace.get("called_tools", []):
-            yield {
-                "event": "search_complete",
-                "data": {
-                    "summary": extract_final_answer(orchestration_result) or "",
-                    "tool_call_count": len(artifacts.get("tool_calls") or []),
-                    "tool_result_count": len(artifacts.get("tool_results") or []),
-                },
-            }
-        final_answer = extract_final_answer(orchestration_result)
-        if final_answer:
-            yield {"event": "final_answer", "data": {"answer": final_answer}}
-        yield {"event": "status", "data": {"stage": "orchestration_agent_completed"}}
-        response: Dict[str, Any] = {
-            "orchestration_result": orchestration_result,
-            "route_trace": route_trace,
-            "available_skills": skill_registry.catalog(),
-        }
-        if final_answer:
-            response["final_answer"] = final_answer
-        if effective_thread_id:
-            response["thread_id"] = effective_thread_id
-        yield {"event": "completed", "data": response}
-    except AgentInvocationError as exc:
-        readable_trace = exc.diagnostics.get("readable_trace") if exc.diagnostics else None
-        yield {
-            "event": "error",
-            "data": {
-                "message": str(exc),
-                "diagnosticText": readable_trace,
-                "diagnostics": exc.diagnostics,
-            },
-        }
-        raise
-    except Exception as exc:
-        diagnostics = getattr(exc, "diagnostics", None)
-        payload = {"message": str(exc)}
-        if diagnostics:
-            payload["diagnostics"] = diagnostics
-            if isinstance(diagnostics, dict) and diagnostics.get("readable_trace"):
-                payload["diagnosticText"] = diagnostics.get("readable_trace")
-        yield {"event": "error", "data": payload}
-        raise
+
+    outbox: "queue.Queue[Dict[str, Any]]" = queue.Queue()
+    worker_error: List[BaseException] = []
+
+    def _enqueue(item: Dict[str, Any]) -> None:
+        outbox.put(item)
+
+    def _worker() -> None:
+        try:
+            with trace_context(_enqueue, agent_role="orchestrator_agent"):
+                orchestrator = build_orchestrator_agent_executor(
+                    llm=llm,
+                    verbose=verbose,
+                    return_intermediate_steps=return_intermediate_steps,
+                    tools=orchestration_tools,
+                    checkpointer=checkpointer,
+                    skill_roots=skill_roots,
+                )
+                orchestration_result = invoke_agent_with_payload_fallback(
+                    orchestrator,
+                    query=query,
+                    chat_history=chat_history,
+                    config=agent_config(child_thread_id(effective_thread_id, "orchestrator")),
+                )
+                artifacts = extract_search_artifacts(orchestration_result if isinstance(orchestration_result, dict) else {})
+                route_trace = build_orchestration_trace(
+                    query=query,
+                    chat_history=chat_history,
+                    available_agent_names=available_agent_names,
+                    orchestration_result=orchestration_result if isinstance(orchestration_result, dict) else {},
+                )
+                _enqueue({"event": "route_trace", "data": route_trace})
+                _enqueue(
+                    {
+                        "event": "decision",
+                        "data": {
+                            "kind": "agent_route_decision",
+                            "agent": "orchestrator_agent",
+                            "query": query,
+                            "route": route_trace.get("route"),
+                            "called_tools": route_trace.get("called_tools") or [],
+                            "analysis_called_tools": route_trace.get("analysis_called_tools") or [],
+                            "selected_skills": route_trace.get("selected_skills") or [],
+                            "chat_history_available": route_trace.get("chat_history_available"),
+                            "route_trace": route_trace,
+                        },
+                    }
+                )
+                for interaction in build_llm_interaction_trace(
+                    orchestration_result if isinstance(orchestration_result, dict) else {},
+                    agent_name="orchestrator_agent",
+                ):
+                    interaction.setdefault("replay", True)
+                    _enqueue({"event": "llm_interaction", "data": interaction})
+                for tool_call in artifacts.get("tool_calls") or []:
+                    tool_call.setdefault("replay", True)
+                    _enqueue({"event": "tool_call", "data": tool_call})
+                for tool_result in artifacts.get("tool_results") or []:
+                    tool_result.setdefault("replay", True)
+                    _enqueue({"event": "tool_result", "data": tool_result})
+                if "search_agent_evidence" in route_trace.get("called_tools", []):
+                    _enqueue(
+                        {
+                            "event": "search_complete",
+                            "data": {
+                                "summary": extract_final_answer(orchestration_result) or "",
+                                "tool_call_count": len(artifacts.get("tool_calls") or []),
+                                "tool_result_count": len(artifacts.get("tool_results") or []),
+                            },
+                        }
+                    )
+                final_answer = extract_final_answer(orchestration_result)
+                if final_answer:
+                    _enqueue({"event": "final_answer", "data": {"answer": final_answer}})
+                _enqueue({"event": "status", "data": {"stage": "orchestration_agent_completed"}})
+                response: Dict[str, Any] = {
+                    "orchestration_result": orchestration_result,
+                    "route_trace": route_trace,
+                    "available_skills": skill_registry.catalog(),
+                }
+                if final_answer:
+                    response["final_answer"] = final_answer
+                if effective_thread_id:
+                    response["thread_id"] = effective_thread_id
+                _enqueue({"event": "completed", "data": response})
+        except AgentInvocationError as exc:
+            readable_trace = exc.diagnostics.get("readable_trace") if exc.diagnostics else None
+            _enqueue(
+                {
+                    "event": "error",
+                    "data": {
+                        "message": str(exc),
+                        "diagnosticText": readable_trace,
+                        "diagnostics": exc.diagnostics,
+                    },
+                }
+            )
+            worker_error.append(exc)
+        except Exception as exc:
+            diagnostics = getattr(exc, "diagnostics", None)
+            payload = {"message": str(exc)}
+            if diagnostics:
+                payload["diagnostics"] = diagnostics
+                if isinstance(diagnostics, dict) and diagnostics.get("readable_trace"):
+                    payload["diagnosticText"] = diagnostics.get("readable_trace")
+            _enqueue({"event": "error", "data": payload})
+            worker_error.append(exc)
+        finally:
+            _enqueue({"event": "__worker_done__", "data": {}})
+
+    worker = threading.Thread(target=_worker, name="agent-stream-worker", daemon=True)
+    worker.start()
+
+    while True:
+        try:
+            item = outbox.get(timeout=0.25)
+        except queue.Empty:
+            if worker.is_alive():
+                continue
+            break
+        if item.get("event") == "__worker_done__":
+            break
+        yield item
+
+    worker.join(timeout=0)
+    while not outbox.empty():
+        item = outbox.get()
+        if item.get("event") != "__worker_done__":
+            yield item
+    if worker_error:
+        raise worker_error[0]
 
 
 # ---------------------------------------------------------------------------

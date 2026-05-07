@@ -15,6 +15,8 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Type
 import requests
 from pydantic import create_model
 
+from agent_runtime.streaming_trace import emit_trace_event
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_MCP_MODULES = (
@@ -25,7 +27,7 @@ DEFAULT_MCP_MODULES = (
     "notebook_workflow_tools",
     "generated_notebook_tools",
 )
-DEFAULT_REMOTE_MCP_URL = os.getenv("MCP_SERVER_URL", "http://127.0.0.1:8000/mcp")
+DEFAULT_REMOTE_MCP_URL = os.getenv("MCP_SERVER_URL", "http://127.0.0.1:8000/mcp/")
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +191,8 @@ def _tool_metadata(func: Callable[..., Any]) -> Dict[str, Any]:
 
 
 def _remote_mcp_url() -> str:
-    return (os.getenv("MCP_SERVER_URL") or DEFAULT_REMOTE_MCP_URL).strip()
+    url = (os.getenv("MCP_SERVER_URL") or DEFAULT_REMOTE_MCP_URL).strip()
+    return f"{url.rstrip('/')}/" if url.rstrip("/").endswith("/mcp") else url
 
 
 def _json_schema_type(schema: Dict[str, Any]) -> Type[Any]:
@@ -276,14 +279,53 @@ async def _remote_mcp_call_tool_async(url: str, tool_name: str, arguments: Dict[
     from mcp.client.session import ClientSession
     from mcp.client.streamable_http import streamablehttp_client
 
+    payload = dict(arguments or {})
+    if "payload" in payload and isinstance(payload["payload"], dict) and len(payload) == 1:
+        payload = payload["payload"]
+    emit_trace_event(
+        "mcp_call_start",
+        {
+            "kind": "mcp_call_start",
+            "label": "MCP call started",
+            "tool_name": f"mcp_{tool_name}",
+            "mcp_tool_name": tool_name,
+            "mcp_url": url,
+            "args": payload,
+            "message": f"Calling MCP tool mcp_{tool_name}",
+        },
+    )
     async with streamablehttp_client(url) as (read_stream, write_stream, _):
         async with ClientSession(read_stream, write_stream) as session:
-            await session.initialize()
-            payload = dict(arguments or {})
-            if "payload" in payload and isinstance(payload["payload"], dict) and len(payload) == 1:
-                payload = payload["payload"]
-            result = await session.call_tool(tool_name, payload)
-            return _serialize_remote_tool_result(result)
+            try:
+                await session.initialize()
+                result = await session.call_tool(tool_name, payload)
+                serialized = _serialize_remote_tool_result(result)
+                emit_trace_event(
+                    "mcp_call_end",
+                    {
+                        "kind": "mcp_call_end",
+                        "label": "MCP call completed",
+                        "tool_name": f"mcp_{tool_name}",
+                        "mcp_tool_name": tool_name,
+                        "mcp_url": url,
+                        "content": serialized,
+                        "message": f"MCP tool mcp_{tool_name} completed",
+                    },
+                )
+                return serialized
+            except Exception as exc:
+                emit_trace_event(
+                    "mcp_call_error",
+                    {
+                        "kind": "mcp_call_error",
+                        "label": "MCP call failed",
+                        "tool_name": f"mcp_{tool_name}",
+                        "mcp_tool_name": tool_name,
+                        "mcp_url": url,
+                        "message": f"{type(exc).__name__}: {exc}",
+                    },
+                )
+                raise
 
 
 def _make_remote_mcp_tools(url: str) -> List[Any]:
