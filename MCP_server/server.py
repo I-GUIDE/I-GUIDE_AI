@@ -49,6 +49,7 @@ mcp = FastMCP(
     name="I-GUIDE Tools",
     json_response=True,
     host="0.0.0.0",
+    streamable_http_path="/",
     transport_security=TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=_hosts_from_env("MCP_ALLOWED_HOSTS", _default_allowed_hosts),
