@@ -68,10 +68,10 @@ def collect_tools(
     Imports are deferred so that this module stays lightweight when only
     ``select_allowed_tools`` is needed.
     """
-    from rag_pipeline.langchain_file_tools import make_langchain_file_tools
-    from rag_pipeline.langchain_granular_tools import make_langchain_granular_tools
-    from rag_pipeline.langchain_mcp_tools import make_langchain_mcp_tools
-    from rag_pipeline.langchain_tool import make_langchain_rag_tool
+    from agent_runtime.langchain_file_tools import make_langchain_file_tools
+    from agent_runtime.langchain_granular_tools import make_langchain_granular_tools
+    from agent_runtime.langchain_mcp_tools import make_langchain_mcp_tools
+    from agent_runtime.langchain_tool import make_langchain_rag_tool
     from agent_runtime.skills import make_skill_tools
 
     strategy = (tool_strategy or "full_pipeline").strip().lower()
