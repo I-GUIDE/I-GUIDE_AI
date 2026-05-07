@@ -51,11 +51,11 @@ services:
     networks:
       - iguide-network
 
-  rag-pipeline:
+  api-server:
     build:
       context: .
-      dockerfile: rag_pipeline/Dockerfile
-    container_name: rag-pipeline
+      dockerfile: Dockerfile
+    container_name: api-server
     ports:
       - "5002:5002"
     environment:

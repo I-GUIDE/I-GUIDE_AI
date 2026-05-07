@@ -23,6 +23,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY MCP_server/ ./MCP_server/
 COPY rag_pipeline/ ./rag_pipeline/
 COPY agent_runtime/ ./agent_runtime/
+COPY services/ ./services/
 
 # Create non-root user with writable upload dir
 RUN useradd -m -u 1000 appuser \

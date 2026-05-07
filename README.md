@@ -193,7 +193,7 @@ python -m agent_runtime.graph_runtime \
 docker-compose up
 ```
 
-Starts three services: embedding-server (5000), metadata-extraction-server (5001), rag-pipeline (5002).
+Starts four services: embedding-server (5000), metadata-extraction-server (5001), api-server (5002), mcp-server (8000).
 
 ## API Endpoints
 

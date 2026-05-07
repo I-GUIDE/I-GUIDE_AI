@@ -270,9 +270,9 @@ def health():
               example: healthy
             service:
               type: string
-              example: rag-pipeline
+              example: api-server
     """
-    return jsonify({"status": "healthy", "service": "rag-pipeline"}), 200
+    return jsonify({"status": "healthy", "service": "api-server"}), 200
 
 
 @app.route('/agent/files/upload', methods=['POST'])

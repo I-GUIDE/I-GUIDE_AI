@@ -18,6 +18,7 @@ RUN python -m spacy download en_core_web_sm
 # Copy application packages
 COPY rag_pipeline/ ./rag_pipeline/
 COPY agent_runtime/ ./agent_runtime/
+COPY services/ ./services/
 COPY api/ ./api/
 
 # Pre-download SentenceTransformer model so the container doesn't need
