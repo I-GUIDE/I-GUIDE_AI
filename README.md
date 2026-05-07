@@ -186,7 +186,7 @@ See [.env.example](.env.example) for all configuration options. Key variables:
 | `FLASK_EMBEDDING_URL` | Yes | Embedding service URL |
 | `NEO4J_URI` | No | Neo4j connection (enables graph search) |
 | `GOOGLE_MAPS_API_KEY` | No | Enables NLP-based spatial search |
-| `MCP_SERVER_URL` | No | MCP tool server URL (default: http://127.0.0.1:8000/mcp) |
+| `MCP_SERVER_URL` | No | MCP tool server URL (default: http://127.0.0.1:8000/mcp/) |
 | `AGENT_SKILLS_ENABLED` | No | Enables native filesystem skill discovery (default: `1`) |
 | `AGENT_SKILL_PATHS` | No | Comma-separated extra skill roots; defaults also scan `skills/` and `.agents/skills/` |
 | `AGENT_SKILL_MAX_RESOURCE_BYTES` | No | Max bytes loaded from a skill resource (default: `65536`) |

@@ -144,9 +144,9 @@ def _humanize_stage(value: str) -> str:
 
 def _category_for_agent_role(role: object) -> str:
     role_text = str(role or "").strip().lower()
-    if role_text == "search":
+    if role_text in {"search", "search_agent"} or "search" in role_text:
         return "search"
-    if role_text in {"analysis", "code", "verification"}:
+    if role_text in {"analysis", "analysis_agent", "code", "code_agent", "verification"}:
         return "analysis"
     return "analysis"
 
@@ -196,13 +196,58 @@ def _agent_trace_event(payload: dict) -> dict:
             "message": _short_text(payload.get("content") or ""),
             "detail": payload,
         }
+    if kind == "llm_start":
+        return {
+            "type": "llm_start",
+            "agent": payload.get("agent") or "",
+            "label": payload.get("label") or "LLM request",
+            "message": _short_text(payload.get("message") or "LLM request started"),
+            "detail": payload,
+        }
+    if kind == "llm_error":
+        return {
+            "type": "llm_error",
+            "agent": payload.get("agent") or "",
+            "label": payload.get("label") or "LLM error",
+            "message": _short_text(payload.get("message") or payload),
+            "detail": payload,
+        }
+    if kind in {"mcp_call_start", "mcp_call_end", "mcp_call_error"}:
+        tool_name = payload.get("tool_name") or payload.get("mcp_tool_name") or "mcp tool"
+        labels = {
+            "mcp_call_start": "MCP call started",
+            "mcp_call_end": "MCP call completed",
+            "mcp_call_error": "MCP call failed",
+        }
+        return {
+            "type": kind,
+            "agent": payload.get("agent") or "",
+            "label": payload.get("label") or labels[kind],
+            "message": _short_text(payload.get("message") or tool_name),
+            "tool_name": tool_name,
+            "detail": payload,
+        }
+    if kind == "tool_error":
+        tool_name = payload.get("tool_name") or payload.get("name") or ""
+        return {
+            "type": "tool_error",
+            "agent": payload.get("agent") or "",
+            "label": f"Tool error {tool_name}".strip(),
+            "message": _short_text(payload.get("message") or payload),
+            "tool_name": tool_name,
+            "detail": payload,
+        }
     if kind == "agent_route_decision":
         route_trace = payload.get("route_trace") or {}
+        route = route_trace.get("route") or payload.get("route") or "unknown"
+        intent = route_trace.get("intent") or payload.get("intent") or "unknown"
+        allowed = payload.get("allowed_tools") or route_trace.get("allowed_tools") or []
+        extra = f"; tools={', '.join(map(str, allowed[:6]))}" if isinstance(allowed, list) and allowed else ""
         return {
             "type": "route_decision",
             "agent": payload.get("agent") or "",
             "label": "Route decision",
-            "message": f"route={route_trace.get('route') or 'unknown'}; intent={route_trace.get('intent') or 'unknown'}",
+            "message": f"route={route}; intent={intent}{extra}",
             "detail": payload,
         }
     return {
@@ -422,6 +467,13 @@ def health():
               example: rag-pipeline
     """
     return jsonify({"status": "healthy", "service": "rag-pipeline"}), 200
+
+
+@app.route('/agent/dashboard', methods=['GET'])
+def agent_dashboard():
+    """Serve the local streaming agent dashboard."""
+    dashboard_path = Path(__file__).resolve().parent.parent / "examples" / "agent_chat_stream_demo.html"
+    return send_file(dashboard_path)
 
 
 @app.route('/agent/files/upload', methods=['POST'])
@@ -855,6 +907,7 @@ def agent_chat_stream():
 
     Node-compatible events: `status`, `result`, `error`.
     Additional categorized events: `routing`, `search`, `analysis`, `agent_trace`, `answer`, `file`.
+    `agent_trace` includes live LLM messages, LLM tool decisions, and MCP call lifecycle events.
 
     ---
     tags:
@@ -1015,24 +1068,39 @@ def agent_chat_stream():
                             {"type": event_name, "agent": str(role or ""), "node": node_name, "detail": payload},
                         )
 
-                    if event_name in {"tool_call", "tool_result"}:
+                    if event_name in {"tool_call", "tool_result", "tool_error"}:
                         category = _category_for_agent_role(agent_role)
+                        display_agent_role = str(agent_role or payload.get("agent") or "")
                         yield _sse_event(
                             category,
-                            {"type": event_name, "agent": str(agent_role or ""), "node": node_name, "detail": payload},
+                            {"type": event_name, "agent": display_agent_role, "node": node_name, "detail": payload},
                         )
+                        trace_agent_role = display_agent_role
+                        trace_kind = {
+                            "tool_call": "llm_tool_decision",
+                            "tool_result": "tool_result",
+                            "tool_error": "tool_error",
+                        }[event_name]
                         yield _sse_event(
                             "agent_trace",
                             _agent_trace_event(
                                 {
                                     **payload,
-                                    "kind": "llm_tool_decision" if event_name == "tool_call" else "tool_result",
-                                    "agent": str(agent_role or ""),
+                                    "kind": trace_kind,
+                                    "agent": trace_agent_role,
                                 }
                             ),
                         )
 
-                    if event_name == "llm_interaction":
+                    if event_name in {
+                        "llm_interaction",
+                        "llm_start",
+                        "llm_error",
+                        "decision",
+                        "mcp_call_start",
+                        "mcp_call_end",
+                        "mcp_call_error",
+                    }:
                         yield _sse_event("agent_trace", _agent_trace_event(payload))
 
                     if event_name == "artifact":

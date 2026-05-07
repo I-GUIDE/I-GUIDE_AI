@@ -272,12 +272,12 @@
         <form id="chat-form" class="controls">
           <label>
             Endpoint
-            <input id="endpoint" value="http://localhost:5002/agent/chat/stream">
+            <input id="endpoint" value="/agent/chat/stream">
           </label>
 
           <label>
             Upload Endpoint
-            <input id="upload_endpoint" value="http://localhost:5002/agent/files/upload">
+            <input id="upload_endpoint" value="/agent/files/upload">
           </label>
 
           <label>
@@ -334,7 +334,7 @@
 
           <label>
             MCP Modules
-            <input id="mcp_modules" value="search_tools,data_tools">
+            <input id="mcp_modules" value="search_tools,data_tools,spatial_analysis_tools">
           </label>
 
           <div class="checkbox-group">
@@ -350,6 +350,14 @@
             <label class="checkbox">
               <input class="search-method" type="checkbox" value="neo4j_search" checked>
               Neo4j Search
+            </label>
+            <label class="checkbox">
+              <input class="search-method" type="checkbox" value="neo4j_get_element_by_id" checked>
+              Neo4j Get By ID
+            </label>
+            <label class="checkbox">
+              <input class="search-method" type="checkbox" value="neo4j_explore_related_nodes" checked>
+              Neo4j Traverse ID
             </label>
             <label class="checkbox">
               <input class="search-method" type="checkbox" value="spatial_search" checked>
@@ -475,7 +483,7 @@
 
       wrapper.appendChild(header);
 
-      if (eventName === "agent_trace") {
+      if (eventName === "agent_trace" || payload.message) {
         const body = document.createElement("div");
         body.className = "trace-message";
         body.textContent = payload.message || "";
@@ -505,6 +513,24 @@
       }
       toolTraceEl.appendChild(wrapper);
       toolTraceEl.scrollTop = toolTraceEl.scrollHeight;
+    }
+
+    function apiKeyHeaders(includeJson = false) {
+      const headers = {};
+      if (includeJson) headers["Content-Type"] = "application/json";
+      const apiKey = document.getElementById("api_key").value.trim();
+      if (apiKey) headers["X-API-KEY"] = apiKey;
+      return headers;
+    }
+
+    function normalizeRequestUrl(rawUrl, fallbackPath) {
+      const value = String(rawUrl || "").trim();
+      const base = window.location.protocol === "file:" ? "http://127.0.0.1:3500" : window.location.origin;
+      if (value) {
+        if (/^https?:\/\//i.test(value)) return value;
+        return new URL(value, base).toString();
+      }
+      return new URL(fallbackPath, base).toString();
     }
 
     function renderDocRefs() {
@@ -570,8 +596,8 @@
     function absoluteUrl(path) {
       if (!path) return "#";
       if (/^https?:\/\//i.test(path)) return path;
-      const endpoint = document.getElementById("endpoint").value.trim() || window.location.origin;
-      return new URL(path, endpoint).toString();
+      const base = window.location.protocol === "file:" ? "http://127.0.0.1:3500" : window.location.origin;
+      return new URL(path, base).toString();
     }
 
     function maybeCollectRefs(value) {
@@ -663,6 +689,7 @@
 
     async function streamRequest(url, payload) {
       currentAbortController = new AbortController();
+      const requestUrl = normalizeRequestUrl(url, "/agent/chat/stream");
       statusChip.textContent = "connecting";
       memoryChip.textContent = `memory: ${payload.memory_id || "auto"}`;
       threadChip.textContent = `thread: ${payload.thread_id || "auto"}`;
@@ -673,16 +700,23 @@
       renderDownloadFiles();
       toolTraceEl.innerHTML = "";
 
-      const apiKey = document.getElementById("api_key").value.trim();
-      const headers = { "Content-Type": "application/json" };
-      if (apiKey) headers["X-API-KEY"] = apiKey;
+      appendTrace("request_start", {
+        label: "POST /agent/chat/stream",
+        message: `Sending request to ${requestUrl}`
+      });
+      console.info("Agent chat stream request", requestUrl, payload);
 
-      const response = await fetch(url, {
+      const response = await fetch(requestUrl, {
         method: "POST",
-        headers,
+        headers: apiKeyHeaders(true),
         body: JSON.stringify(payload),
         signal: currentAbortController.signal
       });
+
+      appendTrace("request_response", {
+        label: "HTTP response",
+        message: `${response.status} ${response.statusText || ""}`.trim()
+      }, !response.ok);
 
       if (!response.ok || !response.body) {
         const text = await response.text();
@@ -705,6 +739,10 @@
           handleSseBlock(rawEvent);
           boundary = buffer.indexOf("\n\n");
         }
+      }
+
+      if (buffer.trim()) {
+        handleSseBlock(buffer);
       }
     }
 
@@ -736,11 +774,7 @@
       maybeCollectDownloads(payload);
       renderDocRefs();
       renderDownloadFiles();
-      const lowLevelToolEvent = ["search", "analysis"].includes(eventName)
-        && ["tool_call", "tool_result"].includes(payload.type);
-      if (!lowLevelToolEvent) {
-        appendTrace(eventName, payload, eventName === "error");
-      }
+      appendTrace(eventName, payload, eventName === "error");
 
       if (eventName === "status" && payload.status) {
         statusChip.textContent = payload.status;
@@ -788,8 +822,13 @@
         await streamRequest(endpoint, payload);
       } catch (error) {
         statusChip.textContent = "error";
-        answerEl.textContent = String(error.message || error);
-        appendTrace("client_error", { message: String(error.message || error) }, true);
+        const message = String(error.message || error);
+        answerEl.textContent = message;
+        appendTrace("client_error", {
+          label: "Client error",
+          message,
+          hint: "If the Flask terminal shows no request, verify the endpoint host/port. This page falls back to 127.0.0.1:3500 when opened as file://."
+        }, true);
       } finally {
         currentAbortController = null;
       }
@@ -814,8 +853,18 @@
       files.forEach((file) => formData.append("files", file));
 
       try {
-        const response = await fetch(document.getElementById("upload_endpoint").value.trim(), {
+        const uploadUrl = normalizeRequestUrl(
+          document.getElementById("upload_endpoint").value.trim(),
+          "/agent/files/upload"
+        );
+        appendTrace("upload_start", {
+          label: "POST /agent/files/upload",
+          message: `Uploading ${files.length} file(s) to ${uploadUrl}`
+        });
+        console.info("Agent file upload request", uploadUrl, files.map((file) => file.name));
+        const response = await fetch(uploadUrl, {
           method: "POST",
+          headers: apiKeyHeaders(false),
           body: formData
         });
         const payload = await response.json();
@@ -843,6 +892,20 @@
     renderDocRefs();
     renderAttachedFiles();
     renderDownloadFiles();
+
+    window.addEventListener("error", (event) => {
+      appendTrace("client_error", {
+        label: "Client error",
+        message: event.message || "Unhandled browser error"
+      }, true);
+    });
+
+    window.addEventListener("unhandledrejection", (event) => {
+      appendTrace("client_error", {
+        label: "Client error",
+        message: String((event.reason && event.reason.message) || event.reason || "Unhandled promise rejection")
+      }, true);
+    });
   </script>
 </body>
 </html>

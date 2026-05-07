@@ -20,6 +20,7 @@ import importlib.util
 import inspect
 import os
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
@@ -28,6 +29,11 @@ from fastapi.responses import JSONResponse
 from mcp.server import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from dotenv import load_dotenv
+
+# Tool modules historically import the decorator as `from server import mcp_tool`.
+# When uvicorn imports this file as `MCP_server.server`, expose the same module
+# under that legacy name so the scanner does not load a second server instance.
+sys.modules.setdefault("server", sys.modules[__name__])
 
 # Load .env from root folder
 env_path = Path(__file__).parent.parent / ".env"
@@ -59,6 +65,18 @@ mcp = FastMCP(
 # MCP transport — ASGI app speaking the MCP streamable HTTP protocol.
 mcp_app = mcp.streamable_http_app()
 
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Start the mounted MCP streamable HTTP session manager.
+
+    Starlette does not run lifespan handlers for mounted sub-apps, so the
+    parent FastAPI app must enter the MCP session manager context itself.
+    Without this, POST /mcp fails with "Task group is not initialized".
+    """
+    async with mcp.session_manager.run():
+        yield
+
 # REST transport — separate FastAPI app that will receive one route per tool.
 rest_app = FastAPI(
     title="I-GUIDE Tool API",
@@ -72,7 +90,12 @@ rest_app = FastAPI(
 )
 
 # Parent app that stitches both transports together.
-app = FastAPI(title="I-GUIDE Tool Server", docs_url=None, redoc_url=None)
+app = FastAPI(
+    title="I-GUIDE Tool Server",
+    docs_url=None,
+    redoc_url=None,
+    lifespan=_lifespan,
+)
 app.mount("/mcp", mcp_app)
 app.mount("/api", rest_app)
 
