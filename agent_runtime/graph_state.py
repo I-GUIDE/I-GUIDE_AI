@@ -41,6 +41,8 @@ RAG_COMPONENT_TOOL_NAMES: set[str] = {
     "keyword_search",
     "semantic_search",
     "neo4j_search",
+    "neo4j_get_element_by_id",
+    "neo4j_explore_related_nodes",
     "spatial_search",
     "opengeodata_search",
 }

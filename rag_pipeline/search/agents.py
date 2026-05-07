@@ -25,7 +25,7 @@ import os
 import re
 import time
 from functools import lru_cache, wraps
-from typing import Any, Dict, List, MutableMapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Tuple
 
 import requests
 from neo4j import Driver, GraphDatabase
@@ -33,6 +33,8 @@ from neo4j.graph import Node as _Neo4jNode
 from opensearchpy import OpenSearch
 
 from .neo4j_graph_tools import (
+    build_element_by_id_query,
+    build_explore_related_nodes_query,
     build_tool_query,
     detect_pattern,
     run_user_author_fallback,
@@ -177,14 +179,40 @@ def _neo4j_run(cypher: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
         return list(session.run(cypher, **params))
 
 
-def _extract_node_from_record(rec: Dict[str, Any]) -> Optional[_Neo4jNode]:
+def _extract_node_from_record(rec: Dict[str, Any]) -> Optional[Any]:
     node = rec.get("node")
     if isinstance(node, _Neo4jNode):
+        return node
+    if isinstance(node, Mapping):
         return node
     for value in rec.values():
         if isinstance(value, _Neo4jNode):
             return value
+        if isinstance(value, Mapping) and any(key in value for key in ("id", "_id", "doc_id", "title")):
+            return value
     return None
+
+
+def _node_props_labels_ref(node: Any, fallback_id: str) -> Tuple[Dict[str, Any], set, str]:
+    if isinstance(node, _Neo4jNode):
+        props = dict(node)
+        labels = set(getattr(node, "labels", set())) - _get_internal_labels()
+        ref_id = (
+            props.get("_id")
+            or props.get("doc_id")
+            or props.get("id")
+            or getattr(node, "element_id", fallback_id)
+        )
+        return props, labels, str(ref_id)
+
+    if isinstance(node, Mapping):
+        props = dict(node)
+        raw_labels = props.pop("_labels", [])
+        labels = set(raw_labels if isinstance(raw_labels, list) else []) - _get_internal_labels()
+        ref_id = props.get("_id") or props.get("doc_id") or props.get("id") or fallback_id
+        return props, labels, str(ref_id)
+
+    return {}, set(), str(fallback_id)
 
 
 def _graph_context_prefix(record: Dict[str, Any]) -> str:
@@ -206,49 +234,83 @@ def _graph_context_prefix(record: Dict[str, Any]) -> str:
     return "; ".join(parts)
 
 
+def _source_to_hit(
+    source: Dict[str, Any],
+    *,
+    doc_id: str,
+    score: float,
+    node_labels: Optional[set] = None,
+    prefix: str = "",
+) -> Dict[str, Any]:
+    labels = node_labels or set()
+    resource_type = (
+        source.get("resource-type")
+        or source.get("element_type")
+        or (next(iter(labels)).lower() if labels else None)
+    )
+
+    base_contents = source.get("contents") or ""
+    contents = f"[{prefix}] {base_contents}".strip() if prefix else base_contents or None
+
+    return {
+        "_id": doc_id,
+        "_score": score,
+        "_source": {
+            "doc_id":          doc_id,
+            "id":              source.get("id") or doc_id,
+            "contributor":     source.get("contributor"),
+            "contents":        contents,
+            "resource-type":   resource_type,
+            "title":           source.get("title"),
+            "authors":         _as_list(source.get("authors")),
+            "tags":            _as_list(source.get("tags")),
+            "thumbnail-image": _transform_thumbnail(source.get("thumbnail-image", source.get("thumbnail_image"))),
+            "click_count":     source.get("click_count", 0),
+        },
+    }
+
+
+def _node_to_hit(
+    node: Any,
+    *,
+    score: float = 1.0,
+    record: Optional[Dict[str, Any]] = None,
+    fallback_id: str = "node",
+) -> Optional[Dict[str, Any]]:
+    props, node_labels, ref_id = _node_props_labels_ref(node, fallback_id)
+    if not props:
+        return None
+    source = _normalize_source_fields(props, ref_id)
+    doc_id = str(source.get("doc_id") or source.get("id") or ref_id)
+    prefix = _graph_context_prefix(record or {})
+    return _source_to_hit(source, doc_id=doc_id, score=score, node_labels=node_labels, prefix=prefix)
+
+
 def _rows_to_hits(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Convert raw Neo4j records to the standard hit format."""
     hits: List[Dict[str, Any]] = []
     for idx, record in enumerate(rows):
-        node = _extract_node_from_record(record)
         score = _safe_score(record.get("score", 1.0))
+        node = _extract_node_from_record(record)
 
         if node is not None:
-            props = dict(node)
-            ref_id = props.get("_id", getattr(node, "element_id", f"node:{idx}"))
-            node_labels = set(getattr(node, "labels", set())) - _get_internal_labels()
-        else:
-            props = {k: v for k, v in record.items() if isinstance(v, (str, int, float, list, dict))}
-            ref_id = props.get("doc_id", f"row:{idx}")
-            node_labels = set()
+            hit = _node_to_hit(node, score=score, record=record, fallback_id=f"node:{idx}")
+            if hit is not None:
+                hits.append(hit)
+            continue
 
+        props = {k: v for k, v in record.items() if isinstance(v, (str, int, float, list, dict))}
+        ref_id = props.get("_id") or props.get("doc_id") or props.get("id") or f"row:{idx}"
         source = _normalize_source_fields(props, str(ref_id))
-        doc_id = str(source.get("doc_id", ref_id))
-
-        resource_type = (
-            source.get("resource-type")
-            or source.get("element_type")
-            or (next(iter(node_labels)).lower() if node_labels else None)
+        doc_id = str(source.get("doc_id") or source.get("id") or ref_id)
+        hits.append(
+            _source_to_hit(
+                source,
+                doc_id=doc_id,
+                score=score,
+                prefix=_graph_context_prefix(record),
+            )
         )
-
-        prefix = _graph_context_prefix(record)
-        base_contents = source.get("contents") or ""
-        contents = f"[{prefix}] {base_contents}".strip() if prefix else base_contents or None
-
-        hits.append({
-            "_id": doc_id,
-            "_score": score,
-            "_source": {
-                "contributor":     source.get("contributor"),
-                "contents":        contents,
-                "resource-type":   resource_type,
-                "title":           source.get("title"),
-                "authors":         _as_list(source.get("authors")),
-                "tags":            _as_list(source.get("tags")),
-                "thumbnail-image": _transform_thumbnail(source.get("thumbnail-image", source.get("thumbnail_image"))),
-                "click_count":     source.get("click_count", 0),
-            },
-        })
     return hits
 
 
@@ -256,6 +318,164 @@ def _as_list(val: Any) -> List[Any]:
     if val is None:
         return []
     return val if isinstance(val, list) else [val]
+
+
+def _hit_to_document(hit: Dict[str, Any], source_name: str = "neo4j") -> Dict[str, Any]:
+    doc = hit.get("_source") or {}
+    doc_id = str(hit.get("_id") or doc.get("doc_id") or doc.get("id") or "")
+    return {
+        "doc_id": doc_id,
+        "source": source_name,
+        "score": hit.get("_score", 0.0),
+        "title": doc.get("title") or "Untitled",
+        "element_type": doc.get("element_type") or doc.get("resource-type") or "resource",
+        "contents": (doc.get("contents") or "")[:800],
+        "authors": _as_list(doc.get("authors")),
+        "tags": _as_list(doc.get("tags")),
+    }
+
+
+def _empty_related_payload() -> Dict[str, Any]:
+    return {
+        "source": "neo4j",
+        "count": 0,
+        "seed": None,
+        "documents": [],
+        "edges": [],
+        "citation_ids": [],
+    }
+
+
+def _normalize_edges(raw_edges: Any) -> List[Dict[str, str]]:
+    edges: List[Dict[str, str]] = []
+    seen = set()
+    for edge in raw_edges or []:
+        if not isinstance(edge, Mapping):
+            continue
+        src = str(edge.get("src") or "").strip()
+        dst = str(edge.get("dst") or "").strip()
+        rel_type = str(edge.get("type") or "").strip()
+        if not src or not dst:
+            continue
+        key = (src, dst, rel_type)
+        if key in seen:
+            continue
+        seen.add(key)
+        edges.append({"src": src, "dst": dst, "type": rel_type})
+    return edges
+
+
+def _related_rows_to_hits(rows: List[Dict[str, Any]], *, include_seed: bool = True) -> List[Dict[str, Any]]:
+    if not rows:
+        return []
+
+    row = rows[0]
+    hits: List[Dict[str, Any]] = []
+    seen = set()
+
+    def add_node(node: Any, score: float, fallback_id: str) -> None:
+        hit = _node_to_hit(node, score=score, fallback_id=fallback_id)
+        if hit is None:
+            return
+        doc_id = hit.get("_id")
+        if not doc_id or doc_id in seen:
+            return
+        seen.add(doc_id)
+        hits.append(hit)
+
+    if include_seed:
+        add_node(row.get("seed"), 1.0, "seed")
+
+    for idx, node in enumerate(row.get("nodes") or []):
+        add_node(node, 0.8, f"related:{idx}")
+
+    return hits
+
+
+def _related_rows_to_payload(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not rows:
+        return _empty_related_payload()
+
+    row = rows[0]
+    seed_hit = _node_to_hit(row.get("seed"), score=1.0, fallback_id="seed")
+    if seed_hit is None:
+        return _empty_related_payload()
+
+    seed_doc = _hit_to_document(seed_hit)
+    related_hits = _related_rows_to_hits(rows, include_seed=False)
+    seed_doc_id = seed_doc.get("doc_id")
+    documents = [
+        _hit_to_document(hit)
+        for hit in related_hits
+        if hit.get("_id") != seed_doc_id
+    ]
+
+    citation_ids: List[str] = []
+    for doc_id in [seed_doc.get("doc_id"), *[doc.get("doc_id") for doc in documents]]:
+        if doc_id and doc_id not in citation_ids:
+            citation_ids.append(str(doc_id))
+
+    return {
+        "source": "neo4j",
+        "count": len(documents),
+        "seed": seed_doc,
+        "documents": documents,
+        "edges": _normalize_edges(row.get("edges")),
+        "citation_ids": citation_ids,
+    }
+
+
+def get_neo4j_element_by_id_results(element_id: str) -> List[Dict[str, Any]]:
+    """
+    Deterministically fetch one public knowledge element by canonical Neo4j id.
+    """
+    try:
+        cypher, params = build_element_by_id_query(element_id)
+        return _rows_to_hits(_neo4j_run(cypher, params))
+    except ValueError:
+        return []
+    except Exception as exc:
+        log.warning("Neo4j element ID lookup failed (%s).", exc)
+        return []
+
+
+def get_neo4j_related_node_results(
+    element_id: str,
+    *,
+    depth: int = 2,
+    limit: int = 50,
+    include_seed: bool = True,
+) -> List[Dict[str, Any]]:
+    """
+    Deterministically fetch public RELATED-node hits for a public seed element.
+    """
+    try:
+        cypher, params = build_explore_related_nodes_query(element_id, depth=depth, limit=limit)
+        return _related_rows_to_hits(_neo4j_run(cypher, params), include_seed=include_seed)
+    except ValueError:
+        return []
+    except Exception as exc:
+        log.warning("Neo4j related-node lookup failed (%s).", exc)
+        return []
+
+
+def explore_neo4j_related_nodes(
+    element_id: str,
+    *,
+    depth: int = 2,
+    limit: int = 50,
+) -> Dict[str, Any]:
+    """
+    Deterministically fetch a graph-shaped public RELATED-node neighborhood.
+    """
+    try:
+        cypher, params = build_explore_related_nodes_query(element_id, depth=depth, limit=limit)
+        return _related_rows_to_payload(_neo4j_run(cypher, params))
+    except ValueError:
+        return _empty_related_payload()
+    except Exception as exc:
+        log.warning("Neo4j related-node exploration failed (%s).", exc)
+        return _empty_related_payload()
 
 
 # ---------------------------------------------------------------------------
@@ -430,6 +650,22 @@ def get_neo4j_agent_results(user_query: str, limit: int = 12) -> List[Dict[str, 
     pattern_result = detect_pattern(query)
     if pattern_result is not None:
         pattern_name, captured = pattern_result
+
+        if pattern_name == "element_by_id":
+            hits = get_neo4j_element_by_id_results(captured.get("element_id", ""))
+            log.info("Element ID tool returned %d results for query: %s", len(hits), query)
+            return hits
+
+        if pattern_name == "explore_related_by_id":
+            hits = get_neo4j_related_node_results(
+                captured.get("element_id", ""),
+                depth=2,
+                limit=limit,
+                include_seed=True,
+            )
+            log.info("Related-node ID tool returned %d results for query: %s", len(hits), query)
+            return hits
+
         tool_query = build_tool_query(pattern_name, captured, limit)
 
         if tool_query is not None:
@@ -687,6 +923,9 @@ __all__ = [
     "get_keyword_search_results",
     "get_basic_neo4j_search_results",
     "get_neo4j_agent_results",
+    "get_neo4j_element_by_id_results",
+    "get_neo4j_related_node_results",
+    "explore_neo4j_related_nodes",
     "get_opensearch_agent_results",
     "get_comprehensive_schema",
     "run_agent_search",
