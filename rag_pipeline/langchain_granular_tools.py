@@ -13,6 +13,13 @@ from .search.agents import (
 )
 from .search.semantic import semantic_search as run_semantic_search
 from .search.spatial import get_spatial_search_results
+from .qgis_headless_tools import (
+    pyqgis_layer_summary_tool,
+    pyqgis_render_map_tool,
+    qgis_metric_buffer_tool,
+    qgis_processing_help_tool,
+    qgis_processing_run_tool,
+)
 
 
 def _safe_int(value: Any, default: int = 8, minimum: int = 1, maximum: int = 100) -> int:
@@ -101,10 +108,146 @@ def opengeodata_search_tool(query: str, limit: int = 8, session_context_json: Op
     return _build_payload(hits, source="opengeodata")
 
 
+def make_langchain_qgis_tools(*, session_id: Optional[str] = None) -> List[Any]:
+    try:
+        from langchain_core.tools import StructuredTool
+    except Exception as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError(
+            "LangChain is not installed. Add `langchain-core` (or langchain) to dependencies."
+        ) from exc
+
+    def qgis_processing_run(algorithm: str, parameters_json: str, timeout_sec: int = 300) -> str:
+        return qgis_processing_run_tool(
+            algorithm=algorithm,
+            parameters_json=parameters_json,
+            session_id=session_id,
+            timeout_sec=timeout_sec,
+        )
+
+    def qgis_metric_buffer(
+        input_layer: str,
+        distance_meters: float,
+        output_filename: str = "buffer.geojson",
+        projected_crs: str = "EPSG:26916",
+        target_crs: str = "EPSG:4326",
+        dissolve: bool = False,
+        segments: int = 12,
+        timeout_sec: int = 300,
+    ) -> str:
+        return qgis_metric_buffer_tool(
+            input_layer=input_layer,
+            distance_meters=distance_meters,
+            output_filename=output_filename,
+            projected_crs=projected_crs,
+            target_crs=target_crs,
+            dissolve=dissolve,
+            segments=segments,
+            session_id=session_id,
+            timeout_sec=timeout_sec,
+        )
+
+    def pyqgis_layer_summary(
+        layer_path: str,
+        provider: str = "ogr",
+        layer_name: Optional[str] = None,
+        sample_limit: int = 5,
+        timeout_sec: int = 180,
+    ) -> str:
+        return pyqgis_layer_summary_tool(
+            layer_path=layer_path,
+            provider=provider,
+            layer_name=layer_name,
+            sample_limit=sample_limit,
+            session_id=session_id,
+            timeout_sec=timeout_sec,
+        )
+
+    def pyqgis_render_map(
+        layers_json: str,
+        output_filename: str = "map.png",
+        width: int = 1200,
+        height: int = 800,
+        extent_json: Optional[str] = None,
+        basemap: str = "none",
+        basemap_url: Optional[str] = None,
+        crs: Optional[str] = None,
+        timeout_sec: int = 180,
+    ) -> str:
+        return pyqgis_render_map_tool(
+            layers_json=layers_json,
+            output_filename=output_filename,
+            width=width,
+            height=height,
+            extent_json=extent_json,
+            basemap=basemap,
+            basemap_url=basemap_url,
+            crs=crs,
+            session_id=session_id,
+            timeout_sec=timeout_sec,
+        )
+
+    return [
+        StructuredTool.from_function(
+            func=qgis_processing_help_tool,
+            name="qgis_processing_help",
+            description=(
+                "Inspect a QGIS Processing algorithm's JSON help by id, such as native:buffer. "
+                "Use before qgis_processing_run when parameter names are uncertain."
+            ),
+            metadata={"category": "spatial_analysis"},
+        ),
+        StructuredTool.from_function(
+            func=qgis_processing_run,
+            name="qgis_processing_run",
+            description=(
+                "Run one QGIS Processing algorithm headlessly in an isolated per-session job directory. "
+                "parameters_json must be a JSON object using QGIS parameter names; relative output paths "
+                "on OUTPUT-style parameters are written under the job directory. Returns JSON with job_dir, "
+                "effective_parameters, stdout_json, stdout, and stderr. For meter-based buffers on GeoJSON "
+                "or EPSG:4326 layers, prefer qgis_metric_buffer instead of native:buffer."
+            ),
+            metadata={"category": "spatial_analysis"},
+        ),
+        StructuredTool.from_function(
+            func=qgis_metric_buffer,
+            name="qgis_metric_buffer",
+            description=(
+                "Create a meter-based buffer safely with QGIS. This resolves uploaded file ids, reprojects "
+                "the input layer to a projected CRS, runs native:buffer using distance_meters, then reprojects "
+                "the output to target_crs. Use this for requests like 'buffer by 500 meters', especially when "
+                "the input is GeoJSON/EPSG:4326. Returns output_path and managed_output with file_id/download_url."
+            ),
+            metadata={"category": "spatial_analysis"},
+        ),
+        StructuredTool.from_function(
+            func=pyqgis_layer_summary,
+            name="pyqgis_layer_summary",
+            description=(
+                "Inspect one vector or raster layer with standalone headless PyQGIS. "
+                "Returns JSON with CRS, extent, fields, feature count, and sample features for vector layers."
+            ),
+            metadata={"category": "spatial_analysis"},
+        ),
+        StructuredTool.from_function(
+            func=pyqgis_render_map,
+            name="pyqgis_render_map",
+            description=(
+                "Render vector/raster layer paths to a PNG using standalone headless PyQGIS in an isolated "
+                "per-session job directory. layers_json may contain uploaded file_id strings or objects with "
+                "path/layer_path, optional name, and provider ('ogr' for vector or 'gdal' for raster). Set "
+                "basemap='osm' to draw an OpenStreetMap XYZ background under the data. Returns managed_output "
+                "with file_id and download_url when rendering succeeds."
+            ),
+            metadata={"category": "spatial_analysis"},
+        ),
+    ]
+
+
 def make_langchain_granular_tools(
     enabled_search_methods: Optional[Sequence[str]] = None,
     *,
     include_file_tools: bool = True,
+    session_id: Optional[str] = None,
 ) -> List[Any]:
     try:
         from langchain_core.tools import StructuredTool
@@ -113,7 +256,7 @@ def make_langchain_granular_tools(
             "LangChain is not installed. Add `langchain-core` (or langchain) to dependencies."
         ) from exc
 
-    search_tools = [
+    retrieval_tools = [
         StructuredTool.from_function(
             func=keyword_search_tool,
             name="keyword_search",
@@ -163,13 +306,15 @@ def make_langchain_granular_tools(
     if enabled_search_methods is not None:
         enabled = {str(name).strip() for name in enabled_search_methods if str(name).strip()}
         neo4j_companion_tools = {"neo4j_get_element_by_id", "neo4j_explore_related_nodes"}
-        search_tools = [
-            tool for tool in search_tools
+        retrieval_tools = [
+            tool for tool in retrieval_tools
             if getattr(tool, "name", "") in enabled
             or ("neo4j_search" in enabled and getattr(tool, "name", "") in neo4j_companion_tools)
         ]
 
-    tools = list(search_tools)
+    qgis_analysis_tools = make_langchain_qgis_tools(session_id=session_id)
+
+    tools = [*retrieval_tools, *qgis_analysis_tools]
     if include_file_tools:
         tools.extend(make_langchain_file_tools())
     return tools
@@ -183,5 +328,11 @@ __all__ = [
     "neo4j_explore_related_nodes_tool",
     "spatial_search_tool",
     "opengeodata_search_tool",
+    "pyqgis_layer_summary_tool",
+    "pyqgis_render_map_tool",
+    "qgis_metric_buffer_tool",
+    "qgis_processing_help_tool",
+    "qgis_processing_run_tool",
+    "make_langchain_qgis_tools",
     "make_langchain_granular_tools",
 ]

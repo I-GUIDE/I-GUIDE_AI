@@ -383,6 +383,8 @@ def download_agent_file(file_id):
             mimetype = "text/csv"
         elif suffix == ".json":
             mimetype = "application/json"
+        elif suffix == ".png":
+            mimetype = "image/png"
         elif suffix in {".txt", ".md", ".py"}:
             mimetype = "text/plain"
         return send_file(path, as_attachment=True, download_name=record.get("filename") or path.name, mimetype=mimetype)

@@ -29,6 +29,11 @@ ANALYSIS_TOOL_NAMES: set[str] = {
     "mcp_get_crime_statistics",
     "mcp_count_crimes_per_community",
     "mcp_generate_crime_map",
+    "qgis_processing_help",
+    "qgis_processing_run",
+    "qgis_metric_buffer",
+    "pyqgis_layer_summary",
+    "pyqgis_render_map",
 }
 
 DISCOVERY_TOOL_NAMES: set[str] = {

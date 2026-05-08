@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Any, Dict, Optional
 from uuid import uuid4
@@ -144,8 +145,49 @@ def create_output_file(filename: str, content: str, overwrite: bool = False) -> 
     return _write_record(record)
 
 
+def create_output_file_from_path(
+    source_path: str | Path,
+    filename: Optional[str] = None,
+    overwrite: bool = False,
+) -> Dict[str, Any]:
+    source = Path(source_path).expanduser().resolve()
+    if not source.is_file():
+        raise ValueError(f"source file does not exist: {source}")
+
+    safe_name = secure_filename(filename or source.name or "agent_output.bin") or "agent_output.bin"
+    existing_record: Optional[Dict[str, Any]] = None
+
+    if overwrite:
+        for meta_path in _metadata_dir().glob("*.json"):
+            try:
+                record = json.loads(meta_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if record.get("kind") == "output" and record.get("filename") == safe_name:
+                existing_record = record
+                break
+
+    if existing_record:
+        file_id = str(existing_record["file_id"])
+    else:
+        file_id = f"file_{uuid4().hex[:12]}"
+
+    target = _outputs_dir() / f"{file_id}__{safe_name}"
+    shutil.copyfile(source, target)
+    record = {
+        "file_id": file_id,
+        "filename": safe_name,
+        "kind": "output",
+        "path": str(target),
+        "size_bytes": target.stat().st_size,
+        "download_url": _build_download_url(file_id),
+    }
+    return _write_record(record)
+
+
 __all__ = [
     "create_output_file",
+    "create_output_file_from_path",
     "get_file_record",
     "require_file_record",
     "resolve_file_id",
