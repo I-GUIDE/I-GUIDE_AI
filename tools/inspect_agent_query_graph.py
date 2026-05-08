@@ -15,6 +15,7 @@ from agent_runtime.graph_nodes import collect_orchestration_tools as _collect_or
 
 def _build_spec() -> dict:
     tools = _collect_orchestration_tools(
+        query="example query",
         chat_history=[{"role": "user", "content": "example memory"}],
         llm=None,
         verbose=False,

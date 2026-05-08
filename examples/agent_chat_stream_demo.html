@@ -182,6 +182,8 @@
 
     .answer {
       white-space: pre-wrap;
+      overflow-wrap: break-word;
+      word-break: break-word;
       line-height: 1.55;
       min-height: 120px;
       padding: 14px;
@@ -198,7 +200,8 @@
 
     .event-log {
       max-height: 480px;
-      overflow: auto;
+      overflow-x: hidden;
+      overflow-y: auto;
       border: 1px solid var(--line);
       border-radius: 14px;
       background: #fff;
@@ -206,6 +209,12 @@
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
       font-size: 0.84rem;
       line-height: 1.45;
+    }
+
+    .event-log pre {
+      white-space: pre-wrap;
+      overflow-wrap: break-word;
+      word-break: break-all;
     }
 
     .event-item {
@@ -223,6 +232,19 @@
     .event-name {
       font-weight: 700;
       color: var(--accent);
+    }
+
+    .trace-message {
+      margin-top: 6px;
+      white-space: pre-wrap;
+      overflow-wrap: break-word;
+      word-break: break-word;
+    }
+
+    .trace-meta {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 0.78rem;
     }
 
     .muted {
@@ -250,12 +272,12 @@
         <form id="chat-form" class="controls">
           <label>
             Endpoint
-            <input id="endpoint" value="http://localhost:5002/agent/chat/stream">
+            <input id="endpoint" value="/agent/chat/stream">
           </label>
 
           <label>
             Upload Endpoint
-            <input id="upload_endpoint" value="http://localhost:5002/agent/files/upload">
+            <input id="upload_endpoint" value="/agent/files/upload">
           </label>
 
           <label>
@@ -312,7 +334,7 @@
 
           <label>
             MCP Modules
-            <input id="mcp_modules" value="search_tools,data_tools">
+            <input id="mcp_modules" value="search_tools,data_tools,spatial_analysis_tools">
           </label>
 
           <div class="checkbox-group">
@@ -328,6 +350,14 @@
             <label class="checkbox">
               <input class="search-method" type="checkbox" value="neo4j_search" checked>
               Neo4j Search
+            </label>
+            <label class="checkbox">
+              <input class="search-method" type="checkbox" value="neo4j_get_element_by_id" checked>
+              Neo4j Get By ID
+            </label>
+            <label class="checkbox">
+              <input class="search-method" type="checkbox" value="neo4j_explore_related_nodes" checked>
+              Neo4j Traverse ID
             </label>
             <label class="checkbox">
               <input class="search-method" type="checkbox" value="spatial_search" checked>
@@ -449,17 +479,58 @@
 
       const header = document.createElement("div");
       header.className = `event-name ${isError ? "error" : ""}`;
-      header.textContent = eventName;
-
-      const body = document.createElement("pre");
-      body.textContent = JSON.stringify(payload, null, 2);
-      body.style.margin = "6px 0 0";
-      body.style.whiteSpace = "pre-wrap";
+      header.textContent = payload && payload.label ? payload.label : eventName;
 
       wrapper.appendChild(header);
-      wrapper.appendChild(body);
+
+      if (eventName === "agent_trace" || payload.message) {
+        const body = document.createElement("div");
+        body.className = "trace-message";
+        body.textContent = payload.message || "";
+        wrapper.appendChild(body);
+
+        const metaParts = [];
+        if (payload.agent) metaParts.push(`agent: ${payload.agent}`);
+        if (payload.type) metaParts.push(`type: ${payload.type}`);
+        if (payload.sequence) metaParts.push(`step: ${payload.sequence}`);
+        if (metaParts.length) {
+          const meta = document.createElement("div");
+          meta.className = "trace-meta";
+          meta.textContent = metaParts.join(" · ");
+          wrapper.appendChild(meta);
+        }
+      } else if (eventName === "error" && payload.diagnosticText) {
+        const body = document.createElement("div");
+        body.className = "trace-message error";
+        body.textContent = payload.error || "Stream error";
+        wrapper.appendChild(body);
+      } else {
+        const body = document.createElement("pre");
+        body.textContent = JSON.stringify(payload, null, 2);
+        body.style.margin = "6px 0 0";
+        body.style.whiteSpace = "pre-wrap";
+        wrapper.appendChild(body);
+      }
       toolTraceEl.appendChild(wrapper);
       toolTraceEl.scrollTop = toolTraceEl.scrollHeight;
+    }
+
+    function apiKeyHeaders(includeJson = false) {
+      const headers = {};
+      if (includeJson) headers["Content-Type"] = "application/json";
+      const apiKey = document.getElementById("api_key").value.trim();
+      if (apiKey) headers["X-API-KEY"] = apiKey;
+      return headers;
+    }
+
+    function normalizeRequestUrl(rawUrl, fallbackPath) {
+      const value = String(rawUrl || "").trim();
+      const base = window.location.protocol === "file:" ? "http://127.0.0.1:3500" : window.location.origin;
+      if (value) {
+        if (/^https?:\/\//i.test(value)) return value;
+        return new URL(value, base).toString();
+      }
+      return new URL(fallbackPath, base).toString();
     }
 
     function renderDocRefs() {
@@ -525,8 +596,8 @@
     function absoluteUrl(path) {
       if (!path) return "#";
       if (/^https?:\/\//i.test(path)) return path;
-      const endpoint = document.getElementById("endpoint").value.trim() || window.location.origin;
-      return new URL(path, endpoint).toString();
+      const base = window.location.protocol === "file:" ? "http://127.0.0.1:3500" : window.location.origin;
+      return new URL(path, base).toString();
     }
 
     function maybeCollectRefs(value) {
@@ -618,6 +689,7 @@
 
     async function streamRequest(url, payload) {
       currentAbortController = new AbortController();
+      const requestUrl = normalizeRequestUrl(url, "/agent/chat/stream");
       statusChip.textContent = "connecting";
       memoryChip.textContent = `memory: ${payload.memory_id || "auto"}`;
       threadChip.textContent = `thread: ${payload.thread_id || "auto"}`;
@@ -628,16 +700,23 @@
       renderDownloadFiles();
       toolTraceEl.innerHTML = "";
 
-      const apiKey = document.getElementById("api_key").value.trim();
-      const headers = { "Content-Type": "application/json" };
-      if (apiKey) headers["X-API-KEY"] = apiKey;
+      appendTrace("request_start", {
+        label: "POST /agent/chat/stream",
+        message: `Sending request to ${requestUrl}`
+      });
+      console.info("Agent chat stream request", requestUrl, payload);
 
-      const response = await fetch(url, {
+      const response = await fetch(requestUrl, {
         method: "POST",
-        headers,
+        headers: apiKeyHeaders(true),
         body: JSON.stringify(payload),
         signal: currentAbortController.signal
       });
+
+      appendTrace("request_response", {
+        label: "HTTP response",
+        message: `${response.status} ${response.statusText || ""}`.trim()
+      }, !response.ok);
 
       if (!response.ok || !response.body) {
         const text = await response.text();
@@ -660,6 +739,10 @@
           handleSseBlock(rawEvent);
           boundary = buffer.indexOf("\n\n");
         }
+      }
+
+      if (buffer.trim()) {
+        handleSseBlock(buffer);
       }
     }
 
@@ -693,30 +776,37 @@
       renderDownloadFiles();
       appendTrace(eventName, payload, eventName === "error");
 
-      if (eventName === "status" && payload.stage) {
-        statusChip.textContent = payload.stage;
+      if (eventName === "status" && payload.status) {
+        statusChip.textContent = payload.status;
       }
-      if (eventName === "memory_loaded" && payload.memory_id) {
-        memoryChip.textContent = `memory: ${payload.memory_id}`;
+      if (eventName === "routing" && payload.type === "route_trace") {
+        const detail = payload.detail || {};
+        statusChip.textContent = `route: ${detail.intent || "unknown"}`;
       }
-      if (eventName === "route_trace" && payload.allowed_tools) {
-        statusChip.textContent = `route: ${payload.intent || "unknown"}`;
-      }
-      if (eventName === "final_answer") {
-        answerEl.textContent = payload.answer || JSON.stringify(payload, null, 2);
-      }
-      if (eventName === "response") {
-        answerEl.textContent = payload.answer || answerEl.textContent;
-        if (payload.thread_id) {
-          threadChip.textContent = `thread: ${payload.thread_id}`;
+      if (eventName === "answer") {
+        const text = payload.answer || payload.final_answer;
+        if (text) {
+          answerEl.textContent = text;
+          statusChip.textContent = "completed";
         }
-        if (payload.memory_id) {
-          memoryChip.textContent = `memory: ${payload.memory_id}`;
+      }
+      if (eventName === "result") {
+        if (payload.answer) {
+          answerEl.textContent = payload.answer;
+        }
+        if (payload.threadId) {
+          threadChip.textContent = `thread: ${payload.threadId}`;
+        }
+        if (payload.memoryId) {
+          memoryChip.textContent = `memory: ${payload.memoryId}`;
         }
         statusChip.textContent = "completed";
       }
       if (eventName === "error") {
         statusChip.textContent = "error";
+        if (payload.error) {
+          answerEl.textContent = payload.error;
+        }
       }
     }
 
@@ -732,8 +822,13 @@
         await streamRequest(endpoint, payload);
       } catch (error) {
         statusChip.textContent = "error";
-        answerEl.textContent = String(error.message || error);
-        appendTrace("client_error", { message: String(error.message || error) }, true);
+        const message = String(error.message || error);
+        answerEl.textContent = message;
+        appendTrace("client_error", {
+          label: "Client error",
+          message,
+          hint: "If the Flask terminal shows no request, verify the endpoint host/port. This page falls back to 127.0.0.1:3500 when opened as file://."
+        }, true);
       } finally {
         currentAbortController = null;
       }
@@ -758,8 +853,18 @@
       files.forEach((file) => formData.append("files", file));
 
       try {
-        const response = await fetch(document.getElementById("upload_endpoint").value.trim(), {
+        const uploadUrl = normalizeRequestUrl(
+          document.getElementById("upload_endpoint").value.trim(),
+          "/agent/files/upload"
+        );
+        appendTrace("upload_start", {
+          label: "POST /agent/files/upload",
+          message: `Uploading ${files.length} file(s) to ${uploadUrl}`
+        });
+        console.info("Agent file upload request", uploadUrl, files.map((file) => file.name));
+        const response = await fetch(uploadUrl, {
           method: "POST",
+          headers: apiKeyHeaders(false),
           body: formData
         });
         const payload = await response.json();
@@ -787,6 +892,20 @@
     renderDocRefs();
     renderAttachedFiles();
     renderDownloadFiles();
+
+    window.addEventListener("error", (event) => {
+      appendTrace("client_error", {
+        label: "Client error",
+        message: event.message || "Unhandled browser error"
+      }, true);
+    });
+
+    window.addEventListener("unhandledrejection", (event) => {
+      appendTrace("client_error", {
+        label: "Client error",
+        message: String((event.reason && event.reason.message) || event.reason || "Unhandled promise rejection")
+      }, true);
+    });
   </script>
 </body>
 </html>

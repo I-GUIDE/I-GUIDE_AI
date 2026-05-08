@@ -153,6 +153,8 @@ def test_pyqgis_render_map_registers_binary_output(qgis_job_root, monkeypatch):
 
     managed = result["managed_output"]
     managed_path = Path(managed["path"])
+    if not managed_path.is_absolute():
+        managed_path = qgis_job_root / managed_path
 
     assert result["ok"] is True
     assert managed["filename"] == "map.png"
