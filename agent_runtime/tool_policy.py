@@ -57,6 +57,7 @@ def collect_tools(
     mcp_modules: Optional[List[str]],
     enabled_search_methods: Optional[List[str]] = None,
     include_file_tools: bool = True,
+    session_id: Optional[str] = None,
 ) -> List[Any]:
     """Build the concrete list of LangChain ``StructuredTool`` objects.
 
@@ -73,6 +74,7 @@ def collect_tools(
         tools = make_langchain_granular_tools(
             enabled_search_methods=enabled_search_methods,
             include_file_tools=include_file_tools,
+            session_id=session_id,
         )
     elif strategy == "full_pipeline":
         tools = [make_langchain_rag_tool(), *make_langchain_file_tools()]

@@ -186,6 +186,21 @@ See [.env.example](.env.example) for all configuration options. Key variables:
 | `NEO4J_URI` | No | Neo4j connection (enables graph search) |
 | `GOOGLE_MAPS_API_KEY` | No | Enables NLP-based spatial search |
 | `MCP_SERVER_URL` | No | MCP tool server URL (default: http://127.0.0.1:8000/mcp) |
+| `QGIS_PROCESS_BIN` | No | `qgis_process` executable for headless QGIS Processing tools |
+| `QGIS_PYTHON_BIN` | No | Python executable that can import `qgis.*` for standalone PyQGIS tools |
+| `QGIS_PREFIX_PATH` | No | Optional QGIS install prefix for standalone PyQGIS initialization |
+| `QGIS_JOB_ROOT` | No | Optional root for per-session QGIS job artifacts |
+
+### Headless QGIS Tools
+
+Granular LangChain agent mode includes optional headless QGIS tools:
+
+- `qgis_processing_help` inspects QGIS Processing algorithm parameters.
+- `qgis_processing_run` runs one Processing algorithm through `qgis_process`.
+- `pyqgis_layer_summary` inspects one layer in a standalone PyQGIS subprocess.
+- `pyqgis_render_map` renders layers to a PNG in a standalone PyQGIS subprocess.
+
+Each call writes artifacts under `AGENT_FILE_STORAGE_ROOT/qgis_jobs/<session>/<job_id>` by default. The session id is derived from the agent thread id when the tool is called through the orchestrated LangChain runtime, so different conversations do not share QGIS project state. These tools require QGIS to be installed on the host or in the container.
 
 ## Testing
 

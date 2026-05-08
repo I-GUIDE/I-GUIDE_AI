@@ -74,7 +74,8 @@ ORCHESTRATOR_AGENT_PROMPT = (
     "4. Do not invent facts not grounded in chat history or tool outputs.\n"
     "5. If attached/uploaded file context is explicitly present, you may use file tools directly yourself.\n"
     "6. Do not assume a local file exists unless attached/uploaded file context is explicitly present.\n"
-    "7. Produce a final answer for the user after using the minimum sufficient set of tools."
+    "7. When the user asks to render a map or use QGIS/PyQGIS, call the matching QGIS tool; do not fake binary files with write_output_file.\n"
+    "8. Produce a final answer for the user after using the minimum sufficient set of tools."
 )
 
 DEFAULT_CHECKPOINTER = InMemorySaver()
@@ -233,6 +234,7 @@ def build_agent_executor(
     system_prompt_override: Optional[str] = None,
     agent_name: str = "rag_agent",
     checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
+    session_id: Optional[str] = None,
 ) -> Any:
     """Create a LangChain AgentExecutor wired with the repository's RAG tool."""
     if preloaded_tools is not None:
@@ -242,6 +244,7 @@ def build_agent_executor(
             tool_strategy=tool_strategy,
             include_mcp_tools=include_mcp_tools,
             mcp_modules=mcp_modules,
+            session_id=session_id,
         )
     if allowed_tool_names:
         allowed = set(allowed_tool_names)
@@ -311,6 +314,7 @@ def build_search_agent_executor(
     allowed_tool_names: Optional[List[str]] = None,
     preloaded_tools: Optional[List[Any]] = None,
     checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
+    session_id: Optional[str] = None,
 ) -> Any:
     return build_agent_executor(
         llm=llm,
@@ -324,6 +328,7 @@ def build_search_agent_executor(
         system_prompt_override=SEARCH_AGENT_PROMPT,
         agent_name="search_agent",
         checkpointer=checkpointer,
+        session_id=session_id,
     )
 
 

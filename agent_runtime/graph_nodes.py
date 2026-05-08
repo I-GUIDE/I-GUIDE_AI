@@ -172,6 +172,7 @@ def make_search_agent_evidence_tool(
             mcp_modules=mcp_modules,
             enabled_search_methods=enabled_search_methods,
             include_file_tools=allow_file_tools,
+            session_id=nested_thread_id,
         )
         route_trace: Optional[Dict[str, Any]] = None
         allowed_tool_names: Optional[List[str]] = None
@@ -389,11 +390,13 @@ def collect_orchestration_tools(
 ) -> List[Any]:
     """Assemble the tool set for the OrchestratorAgent."""
     from rag_pipeline.langchain_file_tools import make_langchain_file_tools
+    from rag_pipeline.langchain_granular_tools import make_langchain_qgis_tools
 
     tools: List[Any] = []
     allow_file_tools = query_has_file_context(query)
     if allow_file_tools:
         tools.extend(make_langchain_file_tools())
+        tools.extend(make_langchain_qgis_tools(session_id=child_thread_id(thread_id, "orchestrator_qgis")))
     if chat_history:
         tools.append(make_answer_from_memory_tool(llm=llm, chat_history=chat_history))
     tools.append(
