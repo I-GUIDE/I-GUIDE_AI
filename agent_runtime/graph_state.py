@@ -59,5 +59,10 @@ FILE_TOOL_NAMES: set[str] = {
     "write_output_file",
 }
 
+SKILL_TOOL_NAMES: set[str] = {
+    "list_available_skills",
+    "load_skill",
+}
+
 # Alias kept for backward compatibility — identical to RAG_COMPONENT_TOOL_NAMES.
 IGUIDE_SEARCH_TOOL_NAMES: set[str] = RAG_COMPONENT_TOOL_NAMES.copy()

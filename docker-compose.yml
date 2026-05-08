@@ -68,7 +68,7 @@ services:
       # Embedding Service
       - FLASK_EMBEDDING_URL=http://embedding-server:5000
       # MCP Tool Server
-      - MCP_SERVER_URL=http://mcp-server:8000/mcp
+      - MCP_SERVER_URL=http://mcp-server:8000/mcp/
       # LLM Configuration
       - ANVILGPT_URL=${ANVILGPT_URL}
       - ANVILGPT_KEY=${ANVILGPT_KEY}

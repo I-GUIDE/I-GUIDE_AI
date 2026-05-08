@@ -38,6 +38,8 @@ from agent_runtime.tool_policy import (
     collect_tools,
     select_allowed_tools,
 )
+from agent_runtime.skills import make_skill_tools
+from agent_runtime.streaming_trace import emit_trace_event, trace_agent
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +159,7 @@ def make_search_agent_evidence_tool(
     allow_file_tools: bool = False,
     thread_id: Optional[str] = None,
     checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
+    skill_roots: Optional[List[str]] = None,
 ) -> Any:
     """Create a ``search_agent_evidence`` tool that invokes SearchAgent."""
     from langchain_core.tools import StructuredTool
@@ -166,6 +169,16 @@ def make_search_agent_evidence_tool(
         nested_thread_id = thread_id
         if nested_thread_id:
             nested_thread_id = f"{nested_thread_id}::search_tool::{invocation_index}"
+        emit_trace_event(
+            "subagent_started",
+            {
+                "role": "search_agent",
+                "query": query,
+                "thread_id": nested_thread_id,
+                "message": "SearchAgent started",
+            },
+            agent_role="search_agent",
+        )
         all_tools = collect_tools(
             tool_strategy=tool_strategy,
             include_mcp_tools=include_mcp_tools,
@@ -173,6 +186,7 @@ def make_search_agent_evidence_tool(
             enabled_search_methods=enabled_search_methods,
             include_file_tools=allow_file_tools,
             session_id=nested_thread_id,
+            skill_roots=skill_roots,
         )
         route_trace: Optional[Dict[str, Any]] = None
         allowed_tool_names: Optional[List[str]] = None
@@ -186,6 +200,19 @@ def make_search_agent_evidence_tool(
                 llm=llm,
                 forced_intent=forced_intent,
             )
+            emit_trace_event(
+                "decision",
+                {
+                    "kind": "agent_route_decision",
+                    "agent": "search_agent",
+                    "query": query,
+                    "route": route_trace.get("route"),
+                    "intent": route_trace.get("intent"),
+                    "allowed_tools": route_trace.get("allowed_tools") or [],
+                    "route_trace": route_trace,
+                },
+                agent_role="search_agent",
+            )
             allowed_tool_names = route_trace.get("allowed_tools") or None
 
         search_executor = build_search_agent_executor(
@@ -198,13 +225,29 @@ def make_search_agent_evidence_tool(
             allowed_tool_names=allowed_tool_names,
             preloaded_tools=all_tools,
             checkpointer=checkpointer,
+            skill_roots=skill_roots,
         )
-        search_response = invoke_agent_with_payload_fallback(
-            search_executor,
-            query=query,
-            chat_history=None,
-            config=agent_config(nested_thread_id),
-        )
+        try:
+            with trace_agent("search_agent"):
+                search_response = invoke_agent_with_payload_fallback(
+                    search_executor,
+                    query=query,
+                    chat_history=None,
+                    config=agent_config(nested_thread_id),
+                )
+        except Exception:
+            emit_trace_event(
+                "subagent_completed",
+                {
+                    "role": "search_agent",
+                    "query": query,
+                    "thread_id": nested_thread_id,
+                    "status": "error",
+                    "message": "SearchAgent failed",
+                },
+                agent_role="search_agent",
+            )
+            raise
         evidence = build_search_evidence_payload(query, search_response, route_trace)
         search_invocations.append(
             {
@@ -214,6 +257,17 @@ def make_search_agent_evidence_tool(
                 "search_result": search_response,
                 "evidence": evidence,
             }
+        )
+        emit_trace_event(
+            "subagent_completed",
+            {
+                "role": "search_agent",
+                "query": query,
+                "thread_id": nested_thread_id,
+                "status": "completed",
+                "message": "SearchAgent completed",
+            },
+            agent_role="search_agent",
         )
         return json.dumps(evidence, ensure_ascii=True, default=str)
 
@@ -242,10 +296,11 @@ def make_analysis_agent_answer_tool(
     allow_file_tools: bool = False,
     thread_id: Optional[str] = None,
     checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
+    skill_roots: Optional[List[str]] = None,
 ) -> Any:
     """Create an ``analysis_agent_answer`` tool that invokes AnalysisAgent."""
     from langchain_core.tools import StructuredTool
-    from rag_pipeline.langchain_mcp_tools import make_langchain_mcp_tools
+    from agent_runtime.langchain_mcp_tools import make_langchain_mcp_tools
 
     # Avoid circular import — import sibling at call time
     from agent_runtime.graph_runtime import run_code_agent_query
@@ -266,10 +321,21 @@ def make_analysis_agent_answer_tool(
         allow_file_tools=allow_file_tools,
         thread_id=child_thread_id(thread_id, "analysis_search"),
         checkpointer=checkpointer,
+        skill_roots=skill_roots,
     )
 
     def code_agent_answer(query: str, search_evidence_json: str = "") -> str:
         nested_thread_id = child_thread_id(thread_id, "code_tool")
+        emit_trace_event(
+            "subagent_started",
+            {
+                "role": "code_agent",
+                "query": query,
+                "thread_id": nested_thread_id,
+                "message": "CodeAgent started",
+            },
+            agent_role="code_agent",
+        )
         code_query = query
         if search_evidence_json:
             code_query = (
@@ -277,21 +343,48 @@ def make_analysis_agent_answer_tool(
                 "Relevant search evidence is provided below as JSON. Use it when writing code and dependencies.\n"
                 f"{search_evidence_json}"
             )
-        code_response = run_code_agent_query(
-            code_query,
-            chat_history=chat_history,
-            llm=llm,
-            verbose=verbose,
-            return_intermediate_steps=return_intermediate_steps,
-            tool_strategy=tool_strategy,
-            include_mcp_tools=include_mcp_tools,
-            mcp_modules=mcp_modules,
-            smart_tool_routing=smart_tool_routing,
-            forced_intent=forced_intent,
-            thread_id=nested_thread_id,
-            checkpointer=checkpointer,
-        )
+        try:
+            with trace_agent("code_agent"):
+                code_response = run_code_agent_query(
+                    code_query,
+                    chat_history=chat_history,
+                    llm=llm,
+                    verbose=verbose,
+                    return_intermediate_steps=return_intermediate_steps,
+                    tool_strategy=tool_strategy,
+                    include_mcp_tools=include_mcp_tools,
+                    mcp_modules=mcp_modules,
+                    smart_tool_routing=smart_tool_routing,
+                    forced_intent=forced_intent,
+                    thread_id=nested_thread_id,
+                    checkpointer=checkpointer,
+                    skill_roots=skill_roots,
+                )
+        except Exception:
+            emit_trace_event(
+                "subagent_completed",
+                {
+                    "role": "code_agent",
+                    "query": query,
+                    "thread_id": nested_thread_id,
+                    "status": "error",
+                    "message": "CodeAgent failed",
+                },
+                agent_role="code_agent",
+            )
+            raise
         code_search_invocations.extend(code_response.get("code_agent_search_invocations") or [])
+        emit_trace_event(
+            "subagent_completed",
+            {
+                "role": "code_agent",
+                "query": query,
+                "thread_id": nested_thread_id,
+                "status": "completed",
+                "message": "CodeAgent completed",
+            },
+            agent_role="code_agent",
+        )
         return json.dumps(
             {
                 "answer": code_response.get("final_answer", ""),
@@ -308,7 +401,7 @@ def make_analysis_agent_answer_tool(
         description="Use CodeAgent to provide runnable code and a Dependencies section when analysis alone is insufficient.",
     )
 
-    analysis_tools: List[Any] = [search_tool, code_tool]
+    analysis_tools: List[Any] = [*make_skill_tools(skill_roots=skill_roots), search_tool, code_tool]
     if include_mcp_tools:
         analysis_tools = [
             *make_langchain_mcp_tools(include_modules=mcp_modules),
@@ -326,10 +419,21 @@ def make_analysis_agent_answer_tool(
         system_prompt_override=ANALYSIS_AGENT_PROMPT,
         agent_name="analysis_agent",
         checkpointer=checkpointer,
+        skill_roots=skill_roots,
     )
 
     def analysis_agent_answer(query: str, search_evidence_json: str = "") -> str:
         nested_thread_id = child_thread_id(thread_id, "analysis_tool")
+        emit_trace_event(
+            "subagent_started",
+            {
+                "role": "analysis_agent",
+                "query": query,
+                "thread_id": nested_thread_id,
+                "message": "AnalysisAgent started",
+            },
+            agent_role="analysis_agent",
+        )
         evidence_payload = {}
         if search_evidence_json:
             try:
@@ -343,13 +447,39 @@ def make_analysis_agent_answer_tool(
                 "Search evidence is provided below as JSON. Use only this evidence and the chat history.\n"
                 f"{json.dumps(evidence_payload, ensure_ascii=True)}"
             )
-        analysis_response = invoke_agent_with_payload_fallback(
-            analysis_executor,
-            query=analysis_query,
-            chat_history=chat_history,
-            config=agent_config(nested_thread_id),
-        )
+        try:
+            with trace_agent("analysis_agent"):
+                analysis_response = invoke_agent_with_payload_fallback(
+                    analysis_executor,
+                    query=analysis_query,
+                    chat_history=chat_history,
+                    config=agent_config(nested_thread_id),
+                )
+        except Exception:
+            emit_trace_event(
+                "subagent_completed",
+                {
+                    "role": "analysis_agent",
+                    "query": query,
+                    "thread_id": nested_thread_id,
+                    "status": "error",
+                    "message": "AnalysisAgent failed",
+                },
+                agent_role="analysis_agent",
+            )
+            raise
         answer = extract_final_answer(analysis_response) or ""
+        emit_trace_event(
+            "subagent_completed",
+            {
+                "role": "analysis_agent",
+                "query": query,
+                "thread_id": nested_thread_id,
+                "status": "completed",
+                "message": "AnalysisAgent completed",
+            },
+            agent_role="analysis_agent",
+        )
         return json.dumps(
             {
                 "answer": answer,
@@ -387,10 +517,11 @@ def collect_orchestration_tools(
     forced_intent: Optional[str],
     thread_id: Optional[str],
     checkpointer: Optional[Any],
+    skill_roots: Optional[List[str]] = None,
 ) -> List[Any]:
     """Assemble the tool set for the OrchestratorAgent."""
-    from rag_pipeline.langchain_file_tools import make_langchain_file_tools
-    from rag_pipeline.langchain_granular_tools import make_langchain_qgis_tools
+    from agent_runtime.langchain_file_tools import make_langchain_file_tools
+    from agent_runtime.langchain_granular_tools import make_langchain_qgis_tools
 
     tools: List[Any] = []
     allow_file_tools = query_has_file_context(query)
@@ -414,6 +545,7 @@ def collect_orchestration_tools(
             allow_file_tools=False,
             thread_id=child_thread_id(thread_id, "search"),
             checkpointer=checkpointer,
+            skill_roots=skill_roots,
         )
     )
     tools.append(
@@ -431,6 +563,7 @@ def collect_orchestration_tools(
             allow_file_tools=allow_file_tools,
             thread_id=child_thread_id(thread_id, "analysis"),
             checkpointer=checkpointer,
+            skill_roots=skill_roots,
         )
     )
     return tools

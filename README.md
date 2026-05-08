@@ -44,6 +44,7 @@ User query
 ```
 agent_runtime/                   Multi-agent orchestration
   graph_state.py                 Type definitions, tool-name constants
+  skills.py                      Filesystem-backed SKILL.md skill discovery/loading
   intent_classifier.py           Query intent classification (analysis/code/discovery/hybrid)
   tool_policy.py                 Tool filtering by intent
   executor_factory.py            Agent prompts, LLM config, executor builders
@@ -190,6 +191,9 @@ See [.env.example](.env.example) for all configuration options. Key variables:
 | `QGIS_PYTHON_BIN` | No | Python executable that can import `qgis.*` for standalone PyQGIS tools |
 | `QGIS_PREFIX_PATH` | No | Optional QGIS install prefix for standalone PyQGIS initialization |
 | `QGIS_JOB_ROOT` | No | Optional root for per-session QGIS job artifacts |
+| `AGENT_SKILLS_ENABLED` | No | Enables native filesystem skill discovery (default: `1`) |
+| `AGENT_SKILL_PATHS` | No | Comma-separated extra skill roots; defaults also scan `skills/` and `.agents/skills/` |
+| `AGENT_SKILL_MAX_RESOURCE_BYTES` | No | Max bytes loaded from a skill resource (default: `65536`) |
 
 ### Headless QGIS Tools
 
@@ -197,10 +201,54 @@ Granular LangChain agent mode includes optional headless QGIS tools:
 
 - `qgis_processing_help` inspects QGIS Processing algorithm parameters.
 - `qgis_processing_run` runs one Processing algorithm through `qgis_process`.
+- `qgis_metric_buffer` reprojects, buffers by meters, and reprojects output for safer metric buffers.
 - `pyqgis_layer_summary` inspects one layer in a standalone PyQGIS subprocess.
 - `pyqgis_render_map` renders layers to a PNG in a standalone PyQGIS subprocess.
 
 Each call writes artifacts under `AGENT_FILE_STORAGE_ROOT/qgis_jobs/<session>/<job_id>` by default. The session id is derived from the agent thread id when the tool is called through the orchestrated LangChain runtime, so different conversations do not share QGIS project state. These tools require QGIS to be installed on the host or in the container.
+
+## Agent Skills
+
+Native skills are filesystem bundles that add reusable workflow guidance without
+loading the full instructions into every prompt. Put skills under `skills/` or
+`.agents/skills/`, or pass explicit roots via `AGENT_SKILL_PATHS`, CLI
+`--skill-paths`, or API `skillPaths`.
+
+Each skill lives in its own directory:
+
+```text
+skills/
+  geospatial-report/
+    SKILL.md
+    references/
+      style-guide.md
+    scripts/
+      validate.py
+```
+
+`SKILL.md` requires YAML-style front matter:
+
+```md
+---
+name: geospatial-report
+description: Use when producing a cited geospatial analysis report.
+allowed-tools: keyword_search, semantic_search, spatial_search
+tags: [geospatial, reporting]
+---
+
+# Geospatial Report
+
+Follow this workflow when the user asks for a report...
+```
+
+At runtime, agents see only skill names and descriptions through the
+`list_available_skills` and `load_skill` tools. When a skill is relevant, the
+agent calls `load_skill(skill_name=...)` to load the full instructions, and can
+call it again with `resource_path` for listed reference files.
+
+Treat skills as trusted developer-controlled assets. The native loader reads
+instructions and text resources only; executable actions should still be exposed
+as MCP or LangChain tools with schemas, permissions, and audit logging.
 
 ## Testing
 

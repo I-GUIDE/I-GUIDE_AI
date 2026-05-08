@@ -6,16 +6,47 @@ passing large GeoDataFrames through the MCP protocol.
 
 from typing import Dict, Any
 import geopandas as gpd
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import io
-import base64
+import json
+import os
+from pathlib import Path
+from uuid import uuid4
+
 
 from ddgs import DDGS
 
 from server import mcp_tool
 
-# Import the cache from data_tools (module loaded without a package)
-from tools.data_tools import _dataframe_cache
+
+def _save_plot_to_file_store(buf: io.BytesIO, filename: str) -> Dict[str, Any]:
+    """Save a PNG buffer to the agent file store and return a download record."""
+    storage_root = Path(os.getenv("AGENT_FILE_STORAGE_ROOT", "./agent_chat_files"))
+    outputs_dir = storage_root / "outputs"
+    metadata_dir = storage_root / "metadata"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+
+    file_id = f"file_{uuid4().hex[:12]}"
+    target = outputs_dir / f"{file_id}__{filename}"
+    target.write_bytes(buf.read())
+
+    record = {
+        "file_id": file_id,
+        "filename": filename,
+        "kind": "output",
+        "path": str(target),
+        "size_bytes": target.stat().st_size,
+        "download_url": f"/agent/files/{file_id}/download",
+    }
+    (metadata_dir / f"{file_id}.json").write_text(
+        json.dumps(record, ensure_ascii=True, indent=2), encoding="utf-8"
+    )
+    return record
+
+from tools.cache import _dataframe_cache
 
 
 @mcp_tool(category="computation")
@@ -34,11 +65,13 @@ def count_crimes_per_community(crime_type: str = None) -> Dict[str, Any]:
             - top_communities: Top 10 communities by crime count
             - filtered_by: Crime type if filtered
     """
+    from tools.data_tools import load_chicago_community_areas, load_chicago_crime_data
+
     if 'chicago_community_areas' not in _dataframe_cache:
-        return {"error": "Community areas not loaded. Call load_chicago_community_areas() first."}
+        load_chicago_community_areas()
     
     if 'chicago_crime_data' not in _dataframe_cache:
-        return {"error": "Crime data not loaded. Call load_chicago_crime_data() first."}
+        load_chicago_crime_data()
     
     gdf_polygons = _dataframe_cache['chicago_community_areas']
     gdf_points = _dataframe_cache['chicago_crime_data']
@@ -51,8 +84,8 @@ def count_crimes_per_community(crime_type: str = None) -> Dict[str, Any]:
     gdf_points = gdf_points.to_crs(gdf_polygons.crs)
     joined_gdf = gpd.sjoin(gdf_polygons, gdf_points, how="left", predicate="contains")
     
-    # Count points per community
-    point_counts = joined_gdf.groupby("community").size()
+    # Count only matched points; left-join placeholder rows have null index_right.
+    point_counts = joined_gdf.groupby("community")["index_right"].count()
     point_counts.name = "crime_count"
     
     # Merge back to polygons
@@ -93,21 +126,27 @@ def count_crimes_per_community(crime_type: str = None) -> Dict[str, Any]:
 @mcp_tool(category="generation")
 def generate_crime_map(title: str = "Crime Counts by Community Area") -> str:
     """
-    Generates a choropleth map of crime counts per community area.
-    Returns the map as a base64-encoded PNG image.
-    
+    Use this tool to generate, create, or visualize a map of Chicago crime counts by community area.
+    This is the ONLY tool needed — it loads all data and runs the spatial analysis internally.
+    Do NOT call load_chicago_community_areas, load_chicago_crime_data, or count_crimes_per_community first.
+
     Args:
         title: Title for the map.
-    
+
     Returns:
-        str: Base64-encoded PNG image data (can be displayed in notebooks/apps).
+        str: Base64-encoded PNG image data URI (data:image/png;base64,...).
     """
+    from tools.data_tools import load_chicago_community_areas, load_chicago_crime_data
+
+    if 'chicago_community_areas' not in _dataframe_cache:
+        load_chicago_community_areas()
+    if 'chicago_crime_data' not in _dataframe_cache:
+        load_chicago_crime_data()
     if 'crime_counts_by_community' not in _dataframe_cache:
-        return "Error: No crime count data available. Call count_crimes_per_community() first."
-    
+        count_crimes_per_community()
+
     gdf = _dataframe_cache['crime_counts_by_community']
-    
-    # Create the plot
+
     fig, ax = plt.subplots(1, 1, figsize=(12, 12))
     gdf.plot(
         column="crime_count",
@@ -118,15 +157,19 @@ def generate_crime_map(title: str = "Crime Counts by Community Area") -> str:
     )
     ax.set_title(title, fontdict={"fontsize": "16", "fontweight": "3"})
     ax.set_axis_off()
-    
-    # Save to base64
+
     buf = io.BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight', dpi=150)
     buf.seek(0)
-    img_base64 = base64.b64encode(buf.read()).decode('utf-8')
     plt.close(fig)
-    
-    return f"data:image/png;base64,{img_base64}"
+
+    record = _save_plot_to_file_store(buf, "chicago_crime_map.png")
+    return {
+        "status": "success",
+        "filename": record["filename"],
+        "file_id": record["file_id"],
+        "download_url": record["download_url"],
+    }
 
 
 @mcp_tool(category="retrieval_external")
