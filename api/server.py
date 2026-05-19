@@ -761,11 +761,12 @@ def agent_chat():
       - in: header
         name: X-API-KEY
         type: string
-        required: true
-        description: API key for agent chat endpoints (env var AGENT_CHAT_API_KEY).
+        required: false
+        description: API key for agent chat endpoints when env var AGENT_CHAT_API_KEY is configured. The Authorization header with a Bearer token is also accepted.
       - in: body
         name: body
         required: true
+        description: Agent chat request. CamelCase frontend fields and snake_case backend aliases are both accepted; when both are present, the camelCase value is used.
         schema:
           type: object
           required:
@@ -773,81 +774,427 @@ def agent_chat():
           properties:
             userQuery:
               type: string
-              example: What datasets are available for Chicago crime?
+              description: Natural-language user prompt. Required unless the snake_case alias `user_input` is supplied.
+              example: Inspect the uploaded Chicago crime CSV and summarize trends by primary type.
+            user_input:
+              type: string
+              description: Snake_case alias for `userQuery`.
+              example: Inspect the uploaded Chicago crime CSV and summarize trends by primary type.
             memoryId:
               type: string
               nullable: true
-              example: conversation-1
+              description: Persistent memory id. If omitted and `usePersistentMemory` is true, a new memory record is created. Also used as the thread id when `threadId` is omitted.
+              example: agent-memory-chicago-001
+            memory_id:
+              type: string
+              nullable: true
+              description: Snake_case alias for `memoryId`.
+              example: agent-memory-chicago-001
             threadId:
               type: string
               nullable: true
-              example: chat-thread-1
+              description: LangGraph/checkpointer thread id for agent execution. If omitted, `memoryId` is used.
+              example: agent-thread-chicago-001
+            thread_id:
+              type: string
+              nullable: true
+              description: Snake_case alias for `threadId`.
+              example: agent-thread-chicago-001
             conversationName:
               type: string
               nullable: true
-              example: Chicago agent chat
+              description: Friendly name used when the endpoint creates a new persistent memory.
+              example: Chicago crime analysis
+            conversation_name:
+              type: string
+              nullable: true
+              description: Snake_case alias for `conversationName`.
+              example: Chicago crime analysis
             recentK:
               type: integer
               nullable: true
+              description: Number of recent memory turns to include in chat history. Use 0 to ignore history for this turn.
+              default: null
+              example: 8
+            recent_k:
+              type: integer
+              nullable: true
+              description: Snake_case alias for `recentK`.
               example: 8
             toolStrategy:
               type: string
+              enum:
+                - granular
+                - full_pipeline
+              default: granular
+              description: Agent tool mode. `granular` exposes individual keyword, semantic, Neo4j, spatial, OpenGeoData, QGIS, file, and skill tools. `full_pipeline` exposes the compatibility RAG pipeline tool.
+              example: granular
+            tool_strategy:
+              type: string
+              enum:
+                - granular
+                - full_pipeline
+              description: Snake_case alias for `toolStrategy`.
               example: granular
             includeMcpTools:
               type: boolean
+              default: false
+              description: Whether to include MCP-backed tools in the agent toolset.
+              example: false
+            include_mcp_tools:
+              type: boolean
+              description: Snake_case alias for `includeMcpTools`.
               example: false
             mcpModules:
               type: array
               items:
                 type: string
               nullable: true
+              description: MCP module allowlist. May be an array of module names or a comma-separated string.
+              example: ["search_tools", "data_tools"]
+            mcp_modules:
+              type: array
+              items:
+                type: string
+              nullable: true
+              description: Snake_case alias for `mcpModules`.
               example: ["search_tools", "data_tools"]
             enabledSearchMethods:
               type: array
               items:
                 type: string
+                enum:
+                  - keyword_search
+                  - semantic_search
+                  - neo4j_search
+                  - spatial_search
+                  - opengeodata_search
               nullable: true
+              description: Optional retrieval tool allowlist used with the granular strategy. May be an array or a comma-separated string. When `neo4j_search` is enabled, the companion Neo4j id and related-node tools are also available.
+              example: ["keyword_search", "semantic_search", "opengeodata_search"]
+            enabled_search_methods:
+              type: array
+              items:
+                type: string
+              nullable: true
+              description: Snake_case alias for `enabledSearchMethods`.
               example: ["keyword_search", "semantic_search"]
             usePersistentMemory:
               type: boolean
+              default: true
+              description: Whether to load and update persistent conversation memory.
+              example: true
+            use_persistent_memory:
+              type: boolean
+              description: Snake_case alias for `usePersistentMemory`.
               example: true
             smartToolRouting:
               type: boolean
+              default: true
+              description: Whether the orchestration layer should classify intent and restrict allowed tools before invoking the agent.
+              example: true
+            smart_tool_routing:
+              type: boolean
+              description: Snake_case alias for `smartToolRouting`.
               example: true
             forcedIntent:
               type: string
               nullable: true
-              example: null
+              description: Optional override for the routing intent classifier. Use only for debugging or deterministic tests.
+              example: search
+            forced_intent:
+              type: string
+              nullable: true
+              description: Snake_case alias for `forcedIntent`.
+              example: search
             filePaths:
               type: array
               items:
                 type: string
               nullable: true
-              example: ["./data/crime.csv"]
+              description: Local filesystem paths to expose to the agent through file tools. Prefer `fileIds` for files uploaded through `/agent/files/upload`.
+              example: ["./data/Crimes_-_2026_20260406.csv"]
+            file_paths:
+              type: array
+              items:
+                type: string
+              nullable: true
+              description: Snake_case alias for `filePaths`.
+              example: ["./data/Crimes_-_2026_20260406.csv"]
             fileIds:
               type: array
               items:
                 type: string
               nullable: true
+              description: Managed file ids returned by `/agent/files/upload` or by agent-generated output tools such as `write_output_file`.
+              example: ["file_0123456789ab"]
+            file_ids:
+              type: array
+              items:
+                type: string
+              nullable: true
+              description: Snake_case alias for `fileIds`.
               example: ["file_0123456789ab"]
             skillPaths:
               type: array
               items:
                 type: string
               nullable: true
+              description: Directories searched for agent skills. Also accepted as `skillRoots` or `skill_roots`.
+              example: ["./skills"]
+            skill_paths:
+              type: array
+              items:
+                type: string
+              nullable: true
+              description: Snake_case alias for `skillPaths`.
+              example: ["./skills"]
+            skillRoots:
+              type: array
+              items:
+                type: string
+              nullable: true
+              description: Alternate camelCase name for skill search roots.
               example: ["./skills"]
             verbose:
               type: boolean
+              default: false
+              description: Enables verbose LangChain/agent execution logging.
               example: false
+          example:
+            userQuery: Inspect the uploaded Chicago crime CSV and summarize trends by primary type.
+            memoryId: agent-memory-chicago-001
+            threadId: agent-thread-chicago-001
+            conversationName: Chicago crime analysis
+            recentK: 6
+            toolStrategy: granular
+            includeMcpTools: false
+            enabledSearchMethods: ["keyword_search", "semantic_search", "opengeodata_search"]
+            usePersistentMemory: true
+            smartToolRouting: true
+            forcedIntent: search
+            fileIds: ["file_0123456789ab"]
+            skillPaths: ["./skills"]
+            verbose: false
     responses:
       200:
         description: Agent chat response payload.
+        schema:
+          type: object
+          properties:
+            answer:
+              type: string
+              description: Final answer extracted from the agent result.
+              example: The uploaded CSV contains reported Chicago crime incidents. Theft, battery, and criminal damage are the most frequent primary types in this sample.
+            message_id:
+              type: string
+              description: UUID for the persisted chat turn.
+              example: 9dc05b2c-4d1b-46f8-b640-ef1f490f0b62
+            elements:
+              type: array
+              description: Legacy UI evidence elements. Agent chat currently returns an empty list unless upstream payloads provide elements.
+              items:
+                type: object
+              example: []
+            count:
+              type: integer
+              description: Count of returned `elements`.
+              example: 0
+            retrievalSteps:
+              type: array
+              description: Legacy retrieval-step trace. Agent chat currently returns an empty list unless upstream payloads provide retrieval steps.
+              items:
+                type: object
+              example: []
+            reactHistory:
+              type: array
+              description: Legacy ReAct history. Agent chat currently returns an empty list unless upstream payloads provide ReAct history.
+              items:
+                type: object
+              example: []
+            memoryId:
+              type: string
+              nullable: true
+              description: Effective persistent memory id used for the turn.
+              example: agent-memory-chicago-001
+            threadId:
+              type: string
+              nullable: true
+              description: Effective agent execution thread id.
+              example: agent-thread-chicago-001
+            routeTrace:
+              type: object
+              description: Summary of the route and tool calls selected by the orchestration agent.
+              properties:
+                query:
+                  type: string
+                  example: Inspect the uploaded Chicago crime CSV and summarize trends by primary type.
+                route:
+                  type: string
+                  example: search_then_analysis
+                available_agents:
+                  type: array
+                  items:
+                    type: string
+                  example: ["answer_from_memory", "search_agent_evidence", "analysis_agent_answer"]
+                called_tools:
+                  type: array
+                  items:
+                    type: string
+                  example: ["search_agent_evidence", "analysis_agent_answer"]
+                analysis_called_tools:
+                  type: array
+                  items:
+                    type: string
+                  example: ["read_uploaded_file"]
+                selected_skills:
+                  type: array
+                  items:
+                    type: string
+                  example: ["chicago-crime-analysis"]
+                chat_history_available:
+                  type: boolean
+                  example: true
+            artifacts:
+              type: object
+              description: Reserved object for generated artifacts when supplied by upstream agent payloads.
+              example: {}
+            agent_result:
+              type: object
+              description: JSON-safe raw agent execution result, including orchestration result, route trace, final answer, thread id, and available skills.
+              properties:
+                final_answer:
+                  type: string
+                  example: The uploaded CSV contains reported Chicago crime incidents.
+                thread_id:
+                  type: string
+                  example: agent-thread-chicago-001
+                route_trace:
+                  type: object
+                available_skills:
+                  type: array
+                  items:
+                    type: object
+                orchestration_result:
+                  type: object
+            fileIds:
+              type: array
+              description: Normalized managed file ids made available to the agent.
+              items:
+                type: string
+              example: ["file_0123456789ab"]
+            filePaths:
+              type: array
+              description: Normalized local file paths made available to the agent.
+              items:
+                type: string
+              example: []
+            skillPaths:
+              type: array
+              description: Normalized skill root directories used for skill discovery.
+              items:
+                type: string
+              example: ["skills"]
+            availableSkills:
+              type: array
+              description: Skills discovered from `skillPaths`.
+              items:
+                type: object
+                properties:
+                  name:
+                    type: string
+                    example: chicago-crime-analysis
+                  description:
+                    type: string
+                    example: Analyze Chicago crime datasets.
+                  path:
+                    type: string
+                    example: skills/chicago-crime-analysis
+                  allowed_tools:
+                    type: array
+                    items:
+                      type: string
+                    example: ["keyword_search", "semantic_search"]
+                  tags:
+                    type: array
+                    items:
+                      type: string
+                    example: ["crime", "chicago"]
+            warning:
+              type: string
+              description: Optional warning, commonly persistent-memory load or update failures.
+              example: "persistent_memory_unavailable: connection refused"
+        examples:
+          application/json:
+            answer: The uploaded CSV contains reported Chicago crime incidents. Theft, battery, and criminal damage are the most frequent primary types in this sample.
+            message_id: 9dc05b2c-4d1b-46f8-b640-ef1f490f0b62
+            elements: []
+            count: 0
+            retrievalSteps: []
+            reactHistory: []
+            memoryId: agent-memory-chicago-001
+            threadId: agent-thread-chicago-001
+            routeTrace:
+              query: Inspect the uploaded Chicago crime CSV and summarize trends by primary type.
+              route: search_then_analysis
+              available_agents: ["answer_from_memory", "search_agent_evidence", "analysis_agent_answer"]
+              called_tools: ["search_agent_evidence", "analysis_agent_answer"]
+              analysis_called_tools: ["read_uploaded_file"]
+              selected_skills: ["chicago-crime-analysis"]
+              chat_history_available: true
+            artifacts: {}
+            agent_result:
+              final_answer: The uploaded CSV contains reported Chicago crime incidents.
+              thread_id: agent-thread-chicago-001
+              route_trace:
+                route: search_then_analysis
+              available_skills:
+                - name: chicago-crime-analysis
+                  description: Analyze Chicago crime datasets.
+                  path: skills/chicago-crime-analysis
+                  allowed_tools: ["keyword_search", "semantic_search"]
+                  tags: ["crime", "chicago"]
+              orchestration_result:
+                messages: []
+            fileIds: ["file_0123456789ab"]
+            filePaths: []
+            skillPaths: ["skills"]
+            availableSkills:
+              - name: chicago-crime-analysis
+                description: Analyze Chicago crime datasets.
+                path: skills/chicago-crime-analysis
+                allowed_tools: ["keyword_search", "semantic_search"]
+                tags: ["crime", "chicago"]
       400:
         description: Validation error (e.g., missing userQuery).
+        schema:
+          type: object
+          properties:
+            error:
+              type: string
+              example: Missing userQuery in request body.
       403:
-        description: Forbidden — invalid or missing API key.
+        description: Forbidden - invalid or missing API key when AGENT_CHAT_API_KEY is configured.
+        schema:
+          type: object
+          properties:
+            error:
+              type: string
+              example: "Forbidden: invalid API key."
       500:
         description: Internal server error.
+        schema:
+          type: object
+          properties:
+            error:
+              type: string
+              example: "Internal server error: agent execution failed"
+            diagnostics:
+              type: object
+              description: Optional structured agent diagnostics.
+            diagnosticText:
+              type: string
+              description: Optional readable diagnostic trace.
     """
     try:
         try:
@@ -922,11 +1269,12 @@ def agent_chat_stream():
       - in: header
         name: X-API-KEY
         type: string
-        required: true
-        description: API key for agent chat endpoints (env var AGENT_CHAT_API_KEY).
+        required: false
+        description: API key for agent chat endpoints when env var AGENT_CHAT_API_KEY is configured. The Authorization header with a Bearer token is also accepted.
       - in: body
         name: body
         required: true
+        description: Agent chat stream request. CamelCase frontend fields and snake_case backend aliases are both accepted; when both are present, the camelCase value is used.
         schema:
           type: object
           required:
@@ -934,74 +1282,282 @@ def agent_chat_stream():
           properties:
             userQuery:
               type: string
+              description: Natural-language user prompt. Required unless the snake_case alias `user_input` is supplied.
+              example: Inspect the attached CSV and summarize the main columns.
+            user_input:
+              type: string
+              description: Snake_case alias for `userQuery`.
               example: Inspect the attached CSV and summarize the main columns.
             memoryId:
               type: string
               nullable: true
+              description: Persistent memory id. If omitted and `usePersistentMemory` is true, a new memory record is created. Also used as the thread id when `threadId` is omitted.
+              example: demo-session-1
+            memory_id:
+              type: string
+              nullable: true
+              description: Snake_case alias for `memoryId`.
               example: demo-session-1
             threadId:
               type: string
               nullable: true
+              description: LangGraph/checkpointer thread id for streamed agent execution. If omitted, `memoryId` is used.
+              example: demo-thread-1
+            thread_id:
+              type: string
+              nullable: true
+              description: Snake_case alias for `threadId`.
               example: demo-thread-1
             conversationName:
               type: string
               nullable: true
+              description: Friendly name used when the endpoint creates a new persistent memory.
+              example: Streaming CSV analysis
+            conversation_name:
+              type: string
+              nullable: true
+              description: Snake_case alias for `conversationName`.
+              example: Streaming CSV analysis
             recentK:
               type: integer
               nullable: true
+              description: Number of recent memory turns to include in chat history. Use 0 to ignore history for this turn.
+              default: null
+              example: 8
+            recent_k:
+              type: integer
+              nullable: true
+              description: Snake_case alias for `recentK`.
               example: 8
             toolStrategy:
               type: string
+              enum:
+                - granular
+                - full_pipeline
+              default: granular
+              description: Agent tool mode. `granular` exposes individual keyword, semantic, Neo4j, spatial, OpenGeoData, QGIS, file, and skill tools. `full_pipeline` exposes the compatibility RAG pipeline tool.
+              example: granular
+            tool_strategy:
+              type: string
+              enum:
+                - granular
+                - full_pipeline
+              description: Snake_case alias for `toolStrategy`.
               example: granular
             includeMcpTools:
               type: boolean
+              default: false
+              description: Whether to include MCP-backed tools in the agent toolset.
+              example: false
+            include_mcp_tools:
+              type: boolean
+              description: Snake_case alias for `includeMcpTools`.
               example: false
             mcpModules:
               type: array
               items:
                 type: string
               nullable: true
-            enabledSearchMethods:
+              description: MCP module allowlist. May be an array of module names or a comma-separated string.
+              example: ["search_tools", "data_tools"]
+            mcp_modules:
               type: array
               items:
                 type: string
               nullable: true
+              description: Snake_case alias for `mcpModules`.
+              example: ["search_tools", "data_tools"]
+            enabledSearchMethods:
+              type: array
+              items:
+                type: string
+                enum:
+                  - keyword_search
+                  - semantic_search
+                  - neo4j_search
+                  - spatial_search
+                  - opengeodata_search
+              nullable: true
+              description: Optional retrieval tool allowlist used with the granular strategy. May be an array or a comma-separated string. When `neo4j_search` is enabled, the companion Neo4j id and related-node tools are also available.
+              example: ["keyword_search", "semantic_search", "opengeodata_search"]
+            enabled_search_methods:
+              type: array
+              items:
+                type: string
+              nullable: true
+              description: Snake_case alias for `enabledSearchMethods`.
+              example: ["keyword_search", "semantic_search"]
             usePersistentMemory:
               type: boolean
+              default: true
+              description: Whether to load and update persistent conversation memory.
+              example: true
+            use_persistent_memory:
+              type: boolean
+              description: Snake_case alias for `usePersistentMemory`.
               example: true
             smartToolRouting:
               type: boolean
+              default: true
+              description: Whether the orchestration layer should classify intent and restrict allowed tools before invoking the agent.
+              example: true
+            smart_tool_routing:
+              type: boolean
+              description: Snake_case alias for `smartToolRouting`.
               example: true
             forcedIntent:
               type: string
               nullable: true
+              description: Optional override for the routing intent classifier. Use only for debugging or deterministic tests.
+              example: search
+            forced_intent:
+              type: string
+              nullable: true
+              description: Snake_case alias for `forcedIntent`.
+              example: search
             filePaths:
               type: array
               items:
                 type: string
               nullable: true
+              description: Local filesystem paths to expose to the agent through file tools. Prefer `fileIds` for files uploaded through `/agent/files/upload`.
+              example: ["./data/Crimes_-_2026_20260406.csv"]
+            file_paths:
+              type: array
+              items:
+                type: string
+              nullable: true
+              description: Snake_case alias for `filePaths`.
+              example: ["./data/Crimes_-_2026_20260406.csv"]
             fileIds:
               type: array
               items:
                 type: string
               nullable: true
+              description: Managed file ids returned by `/agent/files/upload` or by agent-generated output tools such as `write_output_file`.
+              example: ["file_0123456789ab"]
+            file_ids:
+              type: array
+              items:
+                type: string
+              nullable: true
+              description: Snake_case alias for `fileIds`.
+              example: ["file_0123456789ab"]
             skillPaths:
               type: array
               items:
                 type: string
               nullable: true
+              description: Directories searched for agent skills. Also accepted as `skillRoots` or `skill_roots`.
+              example: ["./skills"]
+            skill_paths:
+              type: array
+              items:
+                type: string
+              nullable: true
+              description: Snake_case alias for `skillPaths`.
+              example: ["./skills"]
+            skillRoots:
+              type: array
+              items:
+                type: string
+              nullable: true
+              description: Alternate camelCase name for skill search roots.
+              example: ["./skills"]
             verbose:
               type: boolean
+              default: false
+              description: Enables verbose LangChain/agent execution logging.
               example: false
+          example:
+            userQuery: Inspect the attached CSV and summarize the main columns.
+            memoryId: demo-session-1
+            threadId: demo-thread-1
+            conversationName: Streaming CSV analysis
+            recentK: 8
+            toolStrategy: granular
+            includeMcpTools: false
+            enabledSearchMethods: ["keyword_search", "semantic_search", "opengeodata_search"]
+            usePersistentMemory: true
+            smartToolRouting: true
+            forcedIntent: search
+            fileIds: ["file_0123456789ab"]
+            skillPaths: ["./skills"]
+            verbose: false
     responses:
       200:
-        description: SSE stream of status / result (or error) events.
+        description: |
+          Server-Sent Events stream. Each event block is formatted as `event: <name>\\ndata: <json>\\n\\n`.
+
+          Node-compatible events:
+          - `status`: progress message with a `status` string.
+          - `result`: final payload with the same JSON shape as `/agent/chat`.
+          - `error`: streamed error payload. Missing `userQuery` is reported this way after the stream is opened.
+
+          Additional UI events:
+          - `routing`: route initialization, intent/policy state, and final route trace.
+          - `search`: search-agent starts, completions, tool calls, tool results, and tool errors.
+          - `analysis`: analysis/code-agent starts, completions, tool calls, tool results, and tool errors.
+          - `agent_trace`: normalized live LLM messages, LLM tool decisions, MCP call lifecycle events, and diagnostic trace events.
+          - `answer`: intermediate completed/final-answer payloads.
+          - `file`: generated artifact notifications.
+        schema:
+          type: string
+          example: |
+            event: status
+            data: {"status":"Agent chat started"}
+
+            event: routing
+            data: {"type":"initialized","detail":{"stage":"initialized","thread_id":"demo-thread-1","tool_strategy":"granular","available_agents":["answer_from_memory","search_agent_evidence","analysis_agent_answer"],"available_skills":[]}}
+
+            event: agent_trace
+            data: {"type":"route_decision","agent":"orchestrator_agent","label":"Route decision","message":"route=search_then_analysis; intent=search","detail":{"kind":"agent_route_decision","route":"search_then_analysis"}}
+
+            event: answer
+            data: {"type":"result","answer":"The CSV includes ID, date, primary type, description, location, latitude, and longitude columns.","detail":{"answer":"The CSV includes ID, date, primary type, description, location, latitude, and longitude columns."}}
+
+            event: result
+            data: {"answer":"The CSV includes ID, date, primary type, description, location, latitude, and longitude columns.","message_id":"9dc05b2c-4d1b-46f8-b640-ef1f490f0b62","elements":[],"count":0,"retrievalSteps":[],"reactHistory":[],"memoryId":"demo-session-1","threadId":"demo-thread-1","routeTrace":{"route":"search_then_analysis","called_tools":["search_agent_evidence","analysis_agent_answer"]},"artifacts":{},"agent_result":{"final_answer":"The CSV includes ID, date, primary type, description, location, latitude, and longitude columns."},"fileIds":["file_0123456789ab"],"filePaths":[],"skillPaths":["skills"],"availableSkills":[]}
+        examples:
+          text/event-stream: |
+            event: status
+            data: {"status":"Agent chat started"}
+
+            event: routing
+            data: {"type":"route_trace","detail":{"query":"Inspect the attached CSV and summarize the main columns.","route":"search_then_analysis","available_agents":["answer_from_memory","search_agent_evidence","analysis_agent_answer"],"called_tools":["search_agent_evidence","analysis_agent_answer"],"analysis_called_tools":["read_uploaded_file"],"selected_skills":[],"chat_history_available":true}}
+
+            event: search
+            data: {"type":"tool_call","agent":"search_agent","node":null,"detail":{"name":"read_uploaded_file","args":{"file_id":"file_0123456789ab"}}}
+
+            event: agent_trace
+            data: {"type":"tool_call","agent":"search_agent","label":"LLM tool decision","message":"read_uploaded_file({\"file_id\": \"file_0123456789ab\"})","tool_calls":[{"name":"read_uploaded_file","args":{"file_id":"file_0123456789ab"}}],"detail":{"kind":"llm_tool_decision","agent":"search_agent","name":"read_uploaded_file","args":{"file_id":"file_0123456789ab"}}}
+
+            event: result
+            data: {"answer":"The CSV includes ID, date, primary type, description, location, latitude, and longitude columns.","message_id":"9dc05b2c-4d1b-46f8-b640-ef1f490f0b62","elements":[],"count":0,"retrievalSteps":[],"reactHistory":[],"memoryId":"demo-session-1","threadId":"demo-thread-1","routeTrace":{"query":"Inspect the attached CSV and summarize the main columns.","route":"search_then_analysis","available_agents":["answer_from_memory","search_agent_evidence","analysis_agent_answer"],"called_tools":["search_agent_evidence","analysis_agent_answer"],"analysis_called_tools":["read_uploaded_file"],"selected_skills":[],"chat_history_available":true},"artifacts":{},"agent_result":{"final_answer":"The CSV includes ID, date, primary type, description, location, latitude, and longitude columns.","thread_id":"demo-thread-1","route_trace":{"route":"search_then_analysis"},"available_skills":[],"orchestration_result":{"messages":[]}},"fileIds":["file_0123456789ab"],"filePaths":[],"skillPaths":["skills"],"availableSkills":[]}
       400:
-        description: Validation error (returned as an SSE error event).
+        description: Pre-stream validation error. Most body validation failures are returned as an SSE `error` event with HTTP 200 after the stream is opened.
+        schema:
+          type: object
+          properties:
+            error:
+              type: string
+              example: enabled_search_methods must be a list of strings or a comma-separated string
       403:
-        description: Forbidden — invalid or missing API key.
+        description: Forbidden - invalid or missing API key when AGENT_CHAT_API_KEY is configured.
+        schema:
+          type: object
+          properties:
+            error:
+              type: string
+              example: "Forbidden: invalid API key."
       500:
         description: Internal server error.
+        schema:
+          type: object
+          properties:
+            error:
+              type: string
+              example: "Internal server error: agent execution failed"
     """
     try:
         try:
