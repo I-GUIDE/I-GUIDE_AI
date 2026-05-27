@@ -23,6 +23,56 @@ RouteType = Literal["search", "analysis", "code", "direct_answer"]
 # use to decide which tools an agent is allowed to call.  If a new MCP
 # tool is added, register it in the appropriate set here.
 # ---------------------------------------------------------------------------
+# Telecoupling Toolbox (vendored InVEST + telecoupling models).  Mirrors the
+# tool names in agent_runtime/telecoupling/tools_spec.json.  These are analysis
+# tools, made available to the analysis agent only when the toolbox toggle is on.
+TELECOUPLING_TOOL_NAMES: set[str] = {
+    "run_network_analysis_grouping",
+    "run_coastal_blue_carbon_preprocessor",
+    "run_coastal_blue_carbon",
+    "run_seasonal_water_yield",
+    "run_crop_production_percentile",
+    "run_crop_production_regression",
+    "run_carbon_storage",
+    "run_habitat_quality",
+    "run_annual_water_yield",
+    "run_forest_carbon_edge_effect",
+    "run_crop_pollination",
+    "run_delineateit",
+    "run_routedem",
+    "run_Sediment_Delivery_Ratio_SDR",
+    "run_ndr",
+    "run_urban_cooling",
+    "run_urban_flood_risk_mitigation",
+    "run_urban_stormwater_retention",
+    "run_urban_nature_access",
+    "run_urban_mental_health",
+    "run_scenic_quality",
+    "run_habitat_risk_assessment",
+    "run_wave_energy_production",
+    "run_scenario_gen_proximity",
+    "run_coastal_vulnerability",
+    "run_offshore_wind_energy",
+    "run_recreation_tourism",
+    "run_model_selection_ols",
+    "run_factor_analysis_mixed_data",
+    "run_co2_emissions",
+    "run_cost_benefit_analysis",
+    "run_population_count_density",
+    "run_draw_radial_flows",
+    "run_commodity_trade",
+    "run_add_agents_interactively",
+    "run_draw_agents_from_table",
+    "run_add_causes_interactively",
+    "run_add_systems_interactively",
+    "run_draw_systems_from_table",
+    "run_add_media_flows",
+    "run_food_security",
+    "run_nutrition_metrics",
+    "read_file_content",
+    "render_spatial_file",
+}
+
 ANALYSIS_TOOL_NAMES: set[str] = {
     "mcp_load_chicago_community_areas",
     "mcp_load_chicago_crime_data",
@@ -34,7 +84,7 @@ ANALYSIS_TOOL_NAMES: set[str] = {
     "qgis_metric_buffer",
     "pyqgis_layer_summary",
     "pyqgis_render_map",
-}
+} | TELECOUPLING_TOOL_NAMES
 
 DISCOVERY_TOOL_NAMES: set[str] = {
     "rag_tool",

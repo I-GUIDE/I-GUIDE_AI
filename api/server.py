@@ -82,6 +82,9 @@ def _normalize_agent_chat_request(data: dict) -> dict:
     use_persistent_memory = bool(_coalesce(data.get("usePersistentMemory"), data.get("use_persistent_memory"), True))
     smart_tool_routing = bool(_coalesce(data.get("smartToolRouting"), data.get("smart_tool_routing"), True))
     forced_intent = _coalesce(data.get("forcedIntent"), data.get("forced_intent"))
+    include_telecoupling_tools = bool(_coalesce(
+        data.get("includeTelecouplingTools"), data.get("include_telecoupling_tools"), False
+    ))
     file_paths = _coalesce(data.get("filePaths"), data.get("file_paths"))
     file_ids = _coalesce(data.get("fileIds"), data.get("file_ids"))
     skill_roots = _coalesce(data.get("skillPaths"), data.get("skill_paths"), data.get("skillRoots"), data.get("skill_roots"))
@@ -100,6 +103,7 @@ def _normalize_agent_chat_request(data: dict) -> dict:
         "use_persistent_memory": use_persistent_memory,
         "smart_tool_routing": smart_tool_routing,
         "forced_intent": forced_intent,
+        "include_telecoupling_tools": include_telecoupling_tools,
         "file_paths": file_paths,
         "file_ids": file_ids,
         "skill_roots": skill_roots,
@@ -897,6 +901,15 @@ def agent_chat():
               type: boolean
               description: Snake_case alias for `smartToolRouting`.
               example: true
+            includeTelecouplingTools:
+              type: boolean
+              default: false
+              description: When true, load the Telecoupling Toolbox (42 InVEST + telecoupling models) into the analysis agent for this query.
+              example: false
+            include_telecoupling_tools:
+              type: boolean
+              description: Snake_case alias for `includeTelecouplingTools`.
+              example: false
             forcedIntent:
               type: string
               nullable: true
@@ -1225,6 +1238,7 @@ def agent_chat():
             use_persistent_memory=bool(normalized.get("use_persistent_memory", True)),
             smart_tool_routing=bool(normalized.get("smart_tool_routing", True)),
             forced_intent=normalized.get("forced_intent"),
+            include_telecoupling_tools=bool(normalized.get("include_telecoupling_tools", False)),
             file_paths=normalized.get("file_paths"),
             file_ids=normalized.get("file_ids"),
             skill_roots=normalized.get("skill_roots"),
@@ -1405,6 +1419,15 @@ def agent_chat_stream():
               type: boolean
               description: Snake_case alias for `smartToolRouting`.
               example: true
+            includeTelecouplingTools:
+              type: boolean
+              default: false
+              description: When true, load the Telecoupling Toolbox (42 InVEST + telecoupling models) into the analysis agent for this query.
+              example: false
+            include_telecoupling_tools:
+              type: boolean
+              description: Snake_case alias for `includeTelecouplingTools`.
+              example: false
             forcedIntent:
               type: string
               nullable: true
@@ -1599,6 +1622,7 @@ def agent_chat_stream():
                     use_persistent_memory=bool(normalized.get("use_persistent_memory", True)),
                     smart_tool_routing=bool(normalized.get("smart_tool_routing", True)),
                     forced_intent=normalized.get("forced_intent"),
+                    include_telecoupling_tools=bool(normalized.get("include_telecoupling_tools", False)),
                     file_paths=normalized.get("file_paths"),
                     file_ids=normalized.get("file_ids"),
                     skill_roots=normalized.get("skill_roots"),

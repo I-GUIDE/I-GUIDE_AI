@@ -294,6 +294,7 @@ def make_analysis_agent_answer_tool(
     smart_tool_routing: bool = True,
     forced_intent: Optional[str] = None,
     allow_file_tools: bool = False,
+    include_telecoupling_tools: bool = False,
     thread_id: Optional[str] = None,
     checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
     skill_roots: Optional[List[str]] = None,
@@ -401,12 +402,44 @@ def make_analysis_agent_answer_tool(
         description="Use CodeAgent to provide runnable code and a Dependencies section when analysis alone is insufficient.",
     )
 
-    analysis_tools: List[Any] = [*make_skill_tools(skill_roots=skill_roots), search_tool, code_tool]
+    # When the Telecoupling Toolbox is enabled, discover its skill bundles too.
+    analysis_skill_roots: Optional[List[Any]] = skill_roots
+    if include_telecoupling_tools:
+        from agent_runtime.skills import augmented_skill_roots, telecoupling_skill_root
+
+        analysis_skill_roots = augmented_skill_roots(skill_roots, [telecoupling_skill_root()])
+
+    analysis_tools: List[Any] = [*make_skill_tools(skill_roots=analysis_skill_roots), search_tool, code_tool]
     if include_mcp_tools:
         analysis_tools = [
             *make_langchain_mcp_tools(include_modules=mcp_modules),
             *analysis_tools,
         ]
+    if include_telecoupling_tools:
+        from agent_runtime.langchain_telecoupling_tools import make_langchain_telecoupling_tools
+
+        analysis_tools.extend(
+            make_langchain_telecoupling_tools(
+                session_id=child_thread_id(thread_id, "telecoupling"),
+            )
+        )
+
+    analysis_prompt = ANALYSIS_AGENT_PROMPT
+    if include_telecoupling_tools:
+        analysis_prompt = (
+            ANALYSIS_AGENT_PROMPT
+            + "\n\nTelecoupling Toolbox:\n"
+            "8. The Telecoupling Toolbox is enabled: InVEST and telecoupling model tools "
+            "(names beginning with `run_`, plus `read_file_content` and `render_spatial_file`) "
+            "are available. When the user asks to run a model (e.g. seasonal water yield, "
+            "habitat quality, SDR/NDR, carbon, network analysis, commodity trade), call the "
+            "matching `run_*` tool directly rather than only describing it.\n"
+            "9. Before calling a model tool, make sure every required parameter is available; "
+            "if some are missing, ask the user for just those. Each tool's description lists its "
+            "parameters, and `load_skill` provides the matching workflow and output interpretation.\n"
+            "10. File-path arguments accept an uploaded file_id, a managed filename, or an absolute "
+            "path. After a tool returns, report the produced outputs and their download links."
+        )
 
     analysis_executor = build_agent_executor(
         llm=llm,
@@ -416,7 +449,7 @@ def make_analysis_agent_answer_tool(
         include_mcp_tools=False,
         mcp_modules=None,
         preloaded_tools=analysis_tools,
-        system_prompt_override=ANALYSIS_AGENT_PROMPT,
+        system_prompt_override=analysis_prompt,
         agent_name="analysis_agent",
         checkpointer=checkpointer,
         skill_roots=skill_roots,
@@ -515,6 +548,7 @@ def collect_orchestration_tools(
     enabled_search_methods: Optional[List[str]],
     smart_tool_routing: bool,
     forced_intent: Optional[str],
+    include_telecoupling_tools: bool = False,
     thread_id: Optional[str],
     checkpointer: Optional[Any],
     skill_roots: Optional[List[str]] = None,
@@ -561,6 +595,7 @@ def collect_orchestration_tools(
             smart_tool_routing=smart_tool_routing,
             forced_intent=forced_intent,
             allow_file_tools=allow_file_tools,
+            include_telecoupling_tools=include_telecoupling_tools,
             thread_id=child_thread_id(thread_id, "analysis"),
             checkpointer=checkpointer,
             skill_roots=skill_roots,

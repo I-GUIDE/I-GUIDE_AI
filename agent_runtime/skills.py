@@ -82,6 +82,30 @@ def skills_enabled() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
+def telecoupling_skill_root() -> Path:
+    """Root holding the vendored Telecoupling Toolbox skill bundles.
+
+    Kept as its own root (one level under ``skills/``) so the 42 telecoupling
+    skills are discovered only when the toolbox is explicitly enabled, instead
+    of always cluttering the default skill catalog.
+    """
+    return REPO_ROOT / "skills" / "telecoupling"
+
+
+def augmented_skill_roots(
+    skill_roots: Optional[Sequence[str | Path]],
+    extra_roots: Sequence[str | Path],
+) -> List[Path]:
+    """Return the effective skill roots plus *extra_roots*.
+
+    Preserves default/env roots (when ``skill_roots`` is None) or the explicit
+    roots, then appends the extras — used to switch the telecoupling skills on
+    alongside the normal skills.
+    """
+    base = default_skill_roots(skill_roots)
+    return [*base, *[Path(root) for root in extra_roots]]
+
+
 def _parse_scalar(value: str) -> Any:
     text = value.strip()
     if not text:
@@ -512,8 +536,10 @@ __all__ = [
     "SkillError",
     "SkillMetadata",
     "SkillRegistry",
+    "augmented_skill_roots",
     "default_skill_roots",
     "make_skill_tools",
     "parse_frontmatter",
     "skill_catalog_for_prompt",
+    "telecoupling_skill_root",
 ]

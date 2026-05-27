@@ -403,6 +403,11 @@
             </label>
           </div>
 
+          <label class="checkbox" title="Add the 42 InVEST + telecoupling models (Seasonal Water Yield, Habitat Quality, Network Analysis, ...) to the analysis agent for this query.">
+            <input id="include_telecoupling_tools" type="checkbox">
+            <strong>Telecoupling Toolbox</strong>&nbsp;<span class="muted">(42 InVEST + telecoupling models)</span>
+          </label>
+
           <div class="actions">
             <button class="primary" type="submit">Start Stream</button>
             <button class="secondary" type="button" id="stop-btn">Stop</button>
@@ -681,6 +686,7 @@
         enabled_search_methods: searchMethodInputs.filter((input) => input.checked).map((input) => input.value),
         use_persistent_memory: document.getElementById("use_persistent_memory").checked,
         smart_tool_routing: document.getElementById("smart_tool_routing").checked,
+        include_telecoupling_tools: document.getElementById("include_telecoupling_tools").checked,
         forced_intent: document.getElementById("forced_intent").value || null,
         file_ids: Array.from(attachedFiles.keys()),
         verbose: document.getElementById("verbose").checked

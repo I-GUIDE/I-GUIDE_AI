@@ -207,6 +207,28 @@ Granular LangChain agent mode includes optional headless QGIS tools:
 
 Each call writes artifacts under `AGENT_FILE_STORAGE_ROOT/qgis_jobs/<session>/<job_id>` by default. The session id is derived from the agent thread id when the tool is called through the orchestrated LangChain runtime, so different conversations do not share QGIS project state. These tools require QGIS to be installed on the host or in the container.
 
+### Telecoupling Toolbox
+
+The analysis agent can optionally load the **Telecoupling Toolbox** — 42 InVEST and
+telecoupling models (Seasonal Water Yield, Habitat Quality, SDR/NDR, Carbon, Urban
+Cooling, Coastal Vulnerability, Network Analysis, Commodity Trade, OLS/FAMD, …) plus
+two utilities (`read_file_content`, `render_spatial_file`) ported from the
+TelecouplingAI project. The toolbox is **off by default** and enabled per query:
+
+- Dashboard: tick **"Telecoupling Toolbox"** in `examples/agent_chat_stream_demo.html`.
+- API: send `includeTelecouplingTools: true` (or `include_telecoupling_tools`) to
+  `/agent/chat` or `/agent/chat/stream`.
+
+When enabled, every model is exposed to the analysis agent as a schema-typed
+LangChain tool, and its parameter-collection / output-interpretation guidance is
+loadable as a skill under `skills/telecoupling/` (e.g. `run-seasonal-water-yield`).
+The vendored implementations live in `agent_runtime/telecoupling/`; tool schemas are
+in `tools_spec.json`. Heavy scientific dependencies (`natcap.invest`, R, GDAL/
+geopandas) are imported lazily per tool — a tool whose dependency is not installed
+returns a structured "dependency not installed" message instead of failing the run.
+Spatial previews (`render_spatial_file`) are produced with headless **PyQGIS**, and
+all outputs are registered in the managed file store with `download_url` links.
+
 ## Agent Skills
 
 Native skills are filesystem bundles that add reusable workflow guidance without

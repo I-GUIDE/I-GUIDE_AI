@@ -188,6 +188,7 @@ def run_agent_chat(
     use_persistent_memory: bool = True,
     smart_tool_routing: bool = True,
     forced_intent: Optional[str] = None,
+    include_telecoupling_tools: bool = False,
     file_paths: Optional[Sequence[Any]] = None,
     file_ids: Optional[Sequence[Any]] = None,
     skill_roots: Optional[Sequence[Any]] = None,
@@ -231,6 +232,7 @@ def run_agent_chat(
         enabled_search_methods=normalized_enabled_search_methods,
         smart_tool_routing=smart_tool_routing,
         forced_intent=forced_intent,
+        include_telecoupling_tools=include_telecoupling_tools,
         thread_id=effective_thread_id,
         skill_roots=normalized_skill_roots,
     )
@@ -284,6 +286,7 @@ def stream_agent_chat_events(
     use_persistent_memory: bool = True,
     smart_tool_routing: bool = True,
     forced_intent: Optional[str] = None,
+    include_telecoupling_tools: bool = False,
     file_paths: Optional[Sequence[Any]] = None,
     file_ids: Optional[Sequence[Any]] = None,
     skill_roots: Optional[Sequence[Any]] = None,
@@ -362,6 +365,7 @@ def stream_agent_chat_events(
         enabled_search_methods=normalized_enabled_search_methods,
         smart_tool_routing=smart_tool_routing,
         forced_intent=forced_intent,
+        include_telecoupling_tools=include_telecoupling_tools,
         thread_id=effective_thread_id,
         skill_roots=normalized_skill_roots,
     ):

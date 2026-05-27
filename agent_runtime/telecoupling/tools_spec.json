@@ -1,0 +1,1999 @@
+[
+  {
+    "name": "run_network_analysis_grouping",
+    "description": "Run Network Analysis Grouping using R + igraph to detect community clusters in flow networks. Use when user asks about network analysis, flow network, community detection, node clustering, trade network.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "nodes_table": {
+          "type": "string",
+          "description": "Path to nodes CSV file"
+        },
+        "links_table": {
+          "type": "string",
+          "description": "Path to links/edges CSV file"
+        },
+        "shapefile_path": {
+          "type": "string",
+          "description": "Path to input shapefile (.shp)"
+        },
+        "nodes_join_attri": {
+          "type": "string",
+          "description": "Column name in nodes CSV used for joining"
+        },
+        "layer_join_attri": {
+          "type": "string",
+          "description": "Column name in shapefile for joining"
+        },
+        "clustering_algorithm": {
+          "type": "string",
+          "description": "Graph clustering method: 'walktrap' or 'spin_glass'"
+        },
+        "weight_within_clusters": {
+          "type": "integer",
+          "description": "Edge weight within same cluster, default 10"
+        },
+        "weight_between_clusters": {
+          "type": "integer",
+          "description": "Edge weight between clusters, default 2"
+        },
+        "color_set": {
+          "type": "string",
+          "description": "RColorBrewer palette name, default Set3"
+        },
+        "node_size": {
+          "type": "number",
+          "description": "Node size scaling, default 0.05"
+        },
+        "edge_width": {
+          "type": "number",
+          "description": "Edge width scaling, default 0.833333"
+        },
+        "label_size": {
+          "type": "number",
+          "description": "Label font size scaling, default 0.8"
+        }
+      },
+      "required": [
+        "nodes_table",
+        "links_table",
+        "shapefile_path",
+        "nodes_join_attri",
+        "layer_join_attri",
+        "clustering_algorithm"
+      ]
+    },
+    "skill": "run-network-analysis",
+    "pre_execution": "**Uploaded files**: If nodes CSV, links CSV, or shapefile have been uploaded, extract their paths directly — do not ask for them again. Only ask for genuinely missing inputs.\n\n**Parameters to collect**:\n- nodes_table: path to nodes CSV file (must contain node attributes and a join column)\n- links_table: path to edges/links CSV file (source and target node identifiers)\n- shapefile_path: path to basemap shapefile for geographic visualization\n- nodes_join_attri: column name in nodes CSV used to join with shapefile (e.g. \"CODE\")\n- layer_join_attri: column name in shapefile attribute table used for joining (e.g. \"ISO_3_CODE\")\n- clustering_algorithm: \"walktrap\" or \"spin_glass\" — if not specified, recommend \"walktrap\" and confirm\n- Optional (have defaults, only ask if user wants to adjust): weight_within_clusters=10, weight_between_clusters=2, color_set=\"Set3\", node_size=0.05, edge_width=0.833333, label_size=0.8\n\n**Key notes**:\n- nodes_join_attri and layer_join_attri are JOIN column names, not data values — ask explicitly if not provided\n\n---"
+  },
+  {
+    "name": "run_coastal_blue_carbon_preprocessor",
+    "description": "Run InVEST Coastal Blue Carbon Preprocessor to identify LULC transitions between time periods. Use when user asks about blue carbon preprocessing, LULC transition analysis, or coastal carbon prep.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "landcover_snapshot_csv": {
+          "type": "string",
+          "description": "Path to CSV with columns: snapshot_year(int), raster_path(str)"
+        },
+        "landcover_lookup_table": {
+          "type": "string",
+          "description": "Path to LULC lookup CSV: lucode, lulc-class, is_coastal_blue_carbon_habitat"
+        }
+      },
+      "required": [
+        "landcover_snapshot_csv",
+        "landcover_lookup_table"
+      ]
+    },
+    "skill": "run-cbc-preprocessor",
+    "pre_execution": "**Uploaded files**: If snapshot CSV or LULC lookup table have been uploaded, extract their paths directly — do not ask for them again. Only ask for genuinely missing inputs.\n\n**Parameters to collect**:\n- landcover_snapshot_csv: path to snapshot CSV with two columns — snapshot_year (integer year) and raster_path (path to the LULC raster for that year)\n- landcover_lookup_table: path to LULC lookup CSV with columns — lucode (integer), lulc-class (name), is_coastal_blue_carbon_habitat (true/false)\n\n**Key notes**:\n- If the user already has a manually edited transitions CSV from a previous run, skip this tool and proceed directly to Tool 3\n\n---"
+  },
+  {
+    "name": "run_coastal_blue_carbon",
+    "description": "Run InVEST Coastal Blue Carbon main model for carbon stock, sequestration, and NPV. Use when user asks about carbon stock, carbon sequestration, coastal carbon, or net present value of carbon.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "landcover_snapshot_csv": {
+          "type": "string"
+        },
+        "landcover_transitions_table": {
+          "type": "string",
+          "description": "Path to MANUALLY EDITED transitions CSV from preprocessor"
+        },
+        "biophysical_table_path": {
+          "type": "string"
+        },
+        "analysis_year": {
+          "type": "integer"
+        },
+        "do_economic_analysis": {
+          "type": "boolean",
+          "description": "Enable NPV calculation, default false"
+        },
+        "discount_rate": {
+          "type": "number"
+        },
+        "inflation_rate": {
+          "type": "number"
+        },
+        "price": {
+          "type": "number",
+          "description": "Carbon price per ton"
+        },
+        "use_price_table": {
+          "type": "boolean",
+          "description": "Use price schedule CSV instead of single price"
+        },
+        "price_table_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "landcover_snapshot_csv",
+        "landcover_transitions_table",
+        "biophysical_table_path"
+      ]
+    },
+    "skill": "run-coastal-blue-carbon",
+    "pre_execution": "**Uploaded files**: If snapshot CSV, transitions CSV, or biophysical table have been uploaded, extract their paths directly — do not ask for them again. Only ask for genuinely missing inputs.\n\n**Parameters to collect**:\n- landcover_snapshot_csv: path to snapshots CSV (same file used in Tool 2)\n- landcover_transitions_table: path to the **manually edited** transitions CSV (output of Tool 2, edited by user)\n- biophysical_table_path: path to biophysical parameters table CSV\n- analysis_year: final year of analysis (optional)\n- do_economic_analysis: true/false — default false; if true, also collect:\n  - discount_rate, inflation_rate\n  - price (single carbon price) OR price_table_path (if use_price_table=true)\n\n**Key notes**:\n- If all three required files are uploaded (snapshots CSV, transitions CSV, biophysical table) and parameters are specified, **call the tool immediately** — do not wait for additional confirmation\n- Include a brief reminder note in your response that the transitions CSV should have been manually edited before running; do not block the tool call on this\n- Economic analysis parameters are only needed when do_economic_analysis=true\n\n---"
+  },
+  {
+    "name": "run_seasonal_water_yield",
+    "description": "Run InVEST Seasonal Water Yield model to estimate quickflow, baseflow, and local recharge. Use when user asks about seasonal water yield, baseflow, quickflow, SWY, or watershed hydrology.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "aoi_path": {
+          "type": "string",
+          "description": "Path to watershed AOI shapefile"
+        },
+        "lulc_raster_path": {
+          "type": "string"
+        },
+        "dem_raster_path": {
+          "type": "string"
+        },
+        "soil_group_path": {
+          "type": "string"
+        },
+        "biophysical_table_path": {
+          "type": "string"
+        },
+        "precip_dir": {
+          "type": "string",
+          "description": "Directory containing 12 monthly precipitation rasters"
+        },
+        "et0_dir": {
+          "type": "string",
+          "description": "Directory containing 12 monthly ET0 rasters"
+        },
+        "rain_events_table_path": {
+          "type": "string",
+          "description": "CSV with columns: month, events"
+        },
+        "threshold_flow_accumulation": {
+          "type": "integer",
+          "description": "Flow accumulation threshold, default 1000"
+        },
+        "alpha_m": {
+          "type": "number",
+          "description": "Default 0.083333"
+        },
+        "beta_i": {
+          "type": "number",
+          "description": "Default 1.0"
+        },
+        "gamma": {
+          "type": "number",
+          "description": "Default 1.0"
+        }
+      },
+      "required": [
+        "aoi_path",
+        "lulc_raster_path",
+        "dem_raster_path",
+        "soil_group_path",
+        "biophysical_table_path",
+        "precip_dir",
+        "et0_dir",
+        "rain_events_table_path",
+        "threshold_flow_accumulation"
+      ]
+    },
+    "skill": "run-seasonal-water-yield",
+    "pre_execution": "**Uploaded files**: If any spatial inputs (shapefiles, rasters, CSVs) or directories have been uploaded or their paths provided, extract them directly — do not ask again. Only ask for genuinely missing inputs.\n\n**Parameters to collect**:\n- aoi_path: watershed area of interest shapefile path\n- lulc_raster_path: land use / land cover raster path\n- dem_raster_path: Digital Elevation Model raster path\n- soil_group_path: hydrologic soil group raster path (classes A/B/C/D)\n- biophysical_table_path: biophysical parameters CSV path\n- precip_dir: **directory** containing 12 monthly precipitation rasters (not a single file)\n- et0_dir: **directory** containing 12 monthly ET0 rasters (not a single file)\n- rain_events_table_path: rain events CSV path (columns: month, events)\n- threshold_flow_accumulation: integer, default 1000 — only ask if user wants to change\n- Optional (defaults provided, only ask if user wants to adjust): alpha_m=0.083333, beta_i=1.0, gamma=1.0\n\n**Key notes**:\n- precip_dir and et0_dir must be directory paths, not individual file paths\n\n---"
+  },
+  {
+    "name": "run_crop_production_percentile",
+    "description": "Run InVEST Crop Production Percentile model for up to 172 crops based on climate percentiles. Use when user asks about crop yield percentile, 172 crops, or food production estimation.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "landcover_raster_path": {
+          "type": "string"
+        },
+        "landcover_to_crop_table_path": {
+          "type": "string",
+          "description": "CSV mapping lucode to crop_name"
+        },
+        "aggregate_polygon_path": {
+          "type": "string",
+          "description": "Optional shapefile for spatial aggregation"
+        }
+      },
+      "required": [
+        "landcover_raster_path",
+        "landcover_to_crop_table_path"
+      ]
+    },
+    "skill": "run-crop-percentile",
+    "pre_execution": "**Uploaded files**: If landcover raster, crop table, or aggregate shapefile have been uploaded, extract their paths directly — do not ask for them again. Only ask for genuinely missing inputs.\n\n**Parameters to collect**:\n- landcover_raster_path: land cover raster path (pixel values = land class codes)\n- landcover_to_crop_table_path: CSV mapping land class codes to crop names (columns: lucode, crop_name)\n- aggregate_polygon_path: optional shapefile for aggregating yield statistics by polygon\n\n**Key notes**:\n- model_data_path is handled server-side — do NOT mention it to the user, do NOT ask for it, do NOT include it in any response\n- Supports 172 crops; if unsure whether a specific crop is supported, it will be validated at runtime\n- Difference from Tool 6: this tool uses climate percentile estimates, no fertilizer data needed, suitable for broad multi-crop surveys; Tool 6 uses fertilizer regression but only supports 10 crops\n\n---"
+  },
+  {
+    "name": "run_crop_production_regression",
+    "description": "Run InVEST Crop Production Regression based on fertilizer NPK rates. Supports 10 crops: barley, maize, oil palm, potato, rice, soybean, sugar beet, sugar cane, sunflower, wheat.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "landcover_raster_path": {
+          "type": "string"
+        },
+        "landcover_to_crop_table_path": {
+          "type": "string"
+        },
+        "fertilization_rate_table_path": {
+          "type": "string",
+          "description": "CSV: crop_name, nitrogen_rate, phosphorus_rate, potassium_rate (kg/ha)"
+        },
+        "aggregate_polygon_path": {
+          "type": "string",
+          "description": "Optional shapefile for spatial aggregation"
+        }
+      },
+      "required": [
+        "landcover_raster_path",
+        "landcover_to_crop_table_path",
+        "fertilization_rate_table_path"
+      ]
+    },
+    "skill": "run-crop-regression",
+    "pre_execution": "**Uploaded files**: If landcover raster, crop table, fertilizer table, or aggregate shapefile have been uploaded, extract their paths directly — do not ask for them again. Only ask for genuinely missing inputs.\n\n**Parameters to collect**:\n- landcover_raster_path: land cover raster path\n- landcover_to_crop_table_path: CSV mapping land class codes to crop names (columns: lucode, crop_name)\n- fertilization_rate_table_path: fertilizer rates CSV with columns: crop_name, nitrogen_rate, phosphorus_rate, potassium_rate (all in kg/ha)\n- aggregate_polygon_path: optional shapefile for aggregating yield statistics by polygon\n\n**Supported crops (10 only)**:\nbarley, maize, oil palm, potato, rice, soybean, sugar beet, sugar cane, sunflower, wheat\n\n**Key notes**:\n- model_data_path is handled server-side — do NOT mention it to the user, do NOT ask for it, do NOT include it in any response\n- Before collecting other parameters, confirm the crops the user wants to analyze are within the supported 10\n- If a crop is not in the list (e.g. cassava, coffee), clearly inform the user it is not supported and recommend Tool 5 (172 crops)\n- crop_name in fertilization_rate_table accepts variants: oil palm / oilpalm / Oil Palm are all recognized\n\n---"
+  },
+  {
+    "name": "run_carbon_storage",
+    "description": "Run InVEST Carbon Storage and Sequestration. Use when user asks about carbon stocks, LULC carbon pools, carbon sequestration, REDD, or valuation of carbon storage.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "lulc_cur_path": {
+          "type": "string",
+          "description": "Path to current LULC raster"
+        },
+        "carbon_pools_path": {
+          "type": "string",
+          "description": "CSV with columns: lucode, C_above, C_below, C_soil, C_dead"
+        },
+        "lulc_fut_path": {
+          "type": "string",
+          "description": "Future LULC raster (for sequestration)"
+        },
+        "lulc_redd_path": {
+          "type": "string",
+          "description": "REDD scenario LULC raster"
+        },
+        "do_valuation": {
+          "type": "boolean",
+          "description": "Enable economic valuation, default false"
+        },
+        "price_per_metric_ton_of_c": {
+          "type": "number"
+        },
+        "discount_rate": {
+          "type": "number"
+        },
+        "rate_change": {
+          "type": "number"
+        },
+        "lulc_cur_year": {
+          "type": "integer"
+        },
+        "lulc_fut_year": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "lulc_cur_path",
+        "carbon_pools_path"
+      ]
+    },
+    "skill": "run-carbon-storage",
+    "pre_execution": "**Uploaded files**: Extract paths from uploaded files first. Only ask for genuinely missing inputs.\n\n**Minimum required parameters**:\n- lulc_cur_path: current land use / land cover raster (pixel values = land class codes)\n- carbon_pools_path: CSV mapping land class codes to carbon pool densities (columns: lucode, c_above, c_below, c_soil, c_dead; unit: Mg C/ha)\n\n**Optional — scenario analysis** (ask only if user mentions future scenarios or REDD):\n- lulc_fut_path: future LULC raster → enables carbon sequestration output (delta_cur_fut)\n- lulc_redd_path: REDD/alternative future LULC raster → enables REDD scenario comparison\n\n**Optional — economic valuation** (ask only if user wants monetary values):\n- do_valuation: set true to compute NPV of sequestration\n- lulc_cur_year: year of current LULC map (e.g. 2010)\n- lulc_fut_year: year of future LULC map (e.g. 2030)\n- price_per_metric_ton_of_c: carbon price (USD per Mg C)\n- discount_rate: annual discount rate as percentage (e.g. 5 for 5%)\n- rate_change: annual rate of change in carbon price as percentage\n\n---"
+  },
+  {
+    "name": "run_habitat_quality",
+    "description": "Run InVEST Habitat Quality to map habitat degradation and quality from threats. Use when user asks about habitat quality, biodiversity, threat analysis, or degradation index.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "lulc_cur_path": {
+          "type": "string",
+          "description": "Current LULC raster"
+        },
+        "threats_table_path": {
+          "type": "string",
+          "description": "CSV describing threats: threat, max_dist, weight, decay"
+        },
+        "sensitivity_table_path": {
+          "type": "string",
+          "description": "CSV with columns: lulc, habitat, plus one column per threat"
+        },
+        "lulc_fut_path": {
+          "type": "string",
+          "description": "Future LULC raster"
+        },
+        "lulc_bas_path": {
+          "type": "string",
+          "description": "Baseline LULC raster"
+        },
+        "access_vector_path": {
+          "type": "string",
+          "description": "Shapefile of protection/access areas"
+        },
+        "half_saturation_constant": {
+          "type": "number",
+          "description": "Half-saturation constant k, default 0.5"
+        }
+      },
+      "required": [
+        "lulc_cur_path",
+        "threats_table_path",
+        "sensitivity_table_path"
+      ]
+    },
+    "skill": "run-habitat-quality",
+    "pre_execution": "**Uploaded files**: Extract paths from uploaded files first.\n\n**Required parameters**:\n- lulc_cur_path: current land use / land cover raster\n- threats_table_path: CSV defining each human threat (columns: threat name, max distance km, weight 0-1, decay type 'linear'/'exponential'); each threat also needs a corresponding raster\n- sensitivity_table_path: CSV mapping each LULC class to habitat sensitivity for each threat (must use 'lulc' as the index column, NOT 'lucode')\n\n**Important — threat rasters**: For each row in threats_table_path, a corresponding threat raster (named threat_<name>_c.tif for current LULC) must exist in the same directory as lulc_cur_path. Ask the user to confirm threat raster files are co-located.\n\n**Optional parameters** (ask only if user mentions future/baseline scenarios or protected areas):\n- lulc_fut_path: future LULC raster → produces quality_f.tif and deg_sum_f.tif\n- lulc_bas_path: baseline LULC raster → produces quality_b.tif and deg_sum_b.tif (for REDD comparisons)\n- access_vector_path: vector of legal protected status (0=no protection, 1=full protection)\n- half_saturation_constant: default 0.5; smaller values make the model more sensitive to low degradation\n\n---"
+  },
+  {
+    "name": "run_annual_water_yield",
+    "description": "Run InVEST Annual Water Yield (Budyko curve) to estimate water yield per watershed. Use when user asks about annual water yield, AWY, Budyko, water supply, or watershed water balance.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "lulc_path": {
+          "type": "string"
+        },
+        "eto_path": {
+          "type": "string",
+          "description": "Reference evapotranspiration raster"
+        },
+        "precipitation_path": {
+          "type": "string"
+        },
+        "depth_to_root_rest_layer_path": {
+          "type": "string",
+          "description": "Depth-to-root-restricting-layer raster (mm)"
+        },
+        "pawc_path": {
+          "type": "string",
+          "description": "Plant available water content raster"
+        },
+        "biophysical_table_path": {
+          "type": "string"
+        },
+        "watersheds_path": {
+          "type": "string"
+        },
+        "sub_watersheds_path": {
+          "type": "string"
+        },
+        "seasonality_constant": {
+          "type": "number",
+          "description": "Zhang seasonality constant, default 15"
+        },
+        "demand_table_path": {
+          "type": "string"
+        },
+        "valuation_table_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "lulc_path",
+        "eto_path",
+        "precipitation_path",
+        "depth_to_root_rest_layer_path",
+        "pawc_path",
+        "biophysical_table_path",
+        "watersheds_path"
+      ]
+    },
+    "skill": "run-annual-water-yield",
+    "pre_execution": "**Uploaded files**: Extract paths from uploaded files first.\n\n**Required parameters**:\n- lulc_path: land use / land cover raster (pixel values = land class codes)\n- depth_to_root_rest_layer_path: raster of depth to root-restricting soil layer (mm)\n- precipitation_path: mean annual precipitation raster (mm/year)\n- pawc_path: plant available water content raster (fraction, 0–1)\n- eto_path: reference evapotranspiration raster (mm/year)\n- watersheds_path: watershed boundary shapefile (must have 'ws_id' integer field)\n- biophysical_table_path: CSV with columns lucode (int), root_depth (mm), Kc (crop coefficient)\n\n**Optional parameters**:\n- seasonality_constant: Zhang Z parameter controlling seasonal water partitioning (default 15; range 10–30; higher = more precipitation becomes runoff)\n- sub_watersheds_path: sub-watershed shapefile for finer spatial aggregation\n- demand_table_path: CSV of water demand by land use (for water scarcity analysis)\n- valuation_table_path: CSV for hydropower economic valuation\n\n---"
+  },
+  {
+    "name": "run_forest_carbon_edge_effect",
+    "description": "Run InVEST Forest Carbon Edge Effect to estimate above-ground carbon in tropical forests accounting for edge effects. Use when user asks about forest carbon, tropical carbon, edge effect, or above-ground biomass.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "lulc_raster_path": {
+          "type": "string"
+        },
+        "biophysical_table_path": {
+          "type": "string"
+        },
+        "tropical_forest_edge_carbon_model_vector_path": {
+          "type": "string",
+          "description": "Carbon model vector from InVEST data"
+        },
+        "aoi_vector_path": {
+          "type": "string"
+        },
+        "pools_to_calculate": {
+          "type": "string",
+          "description": "'all' or 'above_ground', default 'all'"
+        },
+        "compute_forest_edge_effects": {
+          "type": "boolean",
+          "description": "Default true"
+        },
+        "n_nearest_model_points": {
+          "type": "integer",
+          "description": "Default 10"
+        },
+        "biomass_to_carbon_conversion_factor": {
+          "type": "number",
+          "description": "Default 0.47"
+        }
+      },
+      "required": [
+        "lulc_raster_path",
+        "biophysical_table_path",
+        "tropical_forest_edge_carbon_model_vector_path"
+      ]
+    },
+    "skill": "run-forest-carbon-edge",
+    "pre_execution": "**Uploaded files**: Extract paths from uploaded files first.\n\n**Required parameters**:\n- lulc_raster_path: land use / land cover raster (pixel values = land class codes)\n- biophysical_table_path: CSV with columns lucode (int), is_tropical_forest (0/1), c_above (Mg C/ha — used only for non-forest classes; forest edge effect overrides forest pixels)\n- tropical_forest_edge_carbon_model_vector_path: the global regression model vector shipped with InVEST — ask the user to locate it in their InVEST installation (typically `natcap/invest/forest_carbon_edge_effect/core_data/`)\n\n**Optional parameters**:\n- aoi_vector_path: area of interest polygon to clip the analysis\n- pools_to_calculate: 'all' (above + below + soil + dead) or 'above_ground' only (faster)\n- compute_forest_edge_effects: default True; set False to use only biophysical table values (ignores edge proximity)\n- n_nearest_model_points: default 10; controls interpolation smoothness (higher = smoother but slower)\n- biomass_to_carbon_conversion_factor: default 0.47 (IPCC standard); adjust if using a region-specific factor\n\n---"
+  },
+  {
+    "name": "run_crop_pollination",
+    "description": "Run InVEST Pollination model to estimate wild bee pollination services on farms. Use when user asks about pollination, pollinators, bees, farm pollination, or crop pollination services.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "landcover_raster_path": {
+          "type": "string"
+        },
+        "guild_table_path": {
+          "type": "string",
+          "description": "CSV describing pollinator species: species, nesting, foraging columns"
+        },
+        "landcover_biophysical_table_path": {
+          "type": "string",
+          "description": "CSV: lucode + nesting/foraging suitability columns per species"
+        },
+        "farm_vector_path": {
+          "type": "string",
+          "description": "Shapefile of farm polygons"
+        }
+      },
+      "required": [
+        "landcover_raster_path",
+        "guild_table_path",
+        "landcover_biophysical_table_path"
+      ]
+    },
+    "skill": "run-crop-pollination",
+    "pre_execution": "**Uploaded files**: Extract paths from uploaded files first.\n\n**Required parameters**:\n- landcover_raster_path: land cover raster (pixel values = land class codes)\n- guild_table_path: CSV defining each pollinator species/guild — includes nesting preferences and seasonal foraging activity per land cover season\n- landcover_biophysical_table_path: CSV mapping each land cover class to nesting habitat suitability and floral resource availability by season\n\n**Optional parameters**:\n- farm_vector_path: shapefile of agricultural fields — if provided, enables on-farm pollination supply and yield estimates per crop\n\n---"
+  },
+  {
+    "name": "run_delineateit",
+    "description": "Run InVEST DelineateIt to delineate watersheds from a DEM and outlet points. Use when user asks about watershed delineation, catchment boundaries, or outlet snapping.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "dem_path": {
+          "type": "string",
+          "description": "Digital elevation model raster"
+        },
+        "outlet_vector_path": {
+          "type": "string",
+          "description": "Shapefile of outlet/pour points"
+        },
+        "detect_pour_points": {
+          "type": "boolean",
+          "description": "Auto-detect pour points from DEM, default false"
+        },
+        "snap_points": {
+          "type": "boolean",
+          "description": "Snap outlets to nearest stream, default false"
+        },
+        "flow_threshold": {
+          "type": "integer",
+          "description": "Flow accumulation threshold for snapping, default 1000"
+        },
+        "snap_distance": {
+          "type": "integer",
+          "description": "Max snap distance in pixels, default 20"
+        }
+      },
+      "required": [
+        "dem_path"
+      ]
+    },
+    "skill": "run-delineateit",
+    "pre_execution": "**Uploaded files**: Extract paths from uploaded files first.\n\n**Required parameters**:\n- dem_path: digital elevation model raster (any unit; must be projected in meters for accurate area)\n- Outlet specification — one of:\n  - outlet_vector_path: point or polygon shapefile of watershed outlet locations (pour points)\n  - detect_pour_points: set to true to have the model automatically detect pour points from the DEM\n\n**Optional parameters** (ask only if user mentions snapping or stream alignment):\n- snap_points: set true to snap outlet points to the nearest stream pixel (recommended when points are hand-digitized)\n- flow_threshold: minimum flow accumulation to define a stream (default 1000 pixels upstream); lower = denser stream network\n- snap_distance: maximum snapping distance in pixels (default 20)\n\n---"
+  },
+  {
+    "name": "run_routedem",
+    "description": "Run InVEST RouteDEM to compute flow direction, flow accumulation, streams, and slope from a DEM. Use when user asks about flow direction, flow accumulation, stream extraction, or DEM routing.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "dem_path": {
+          "type": "string"
+        },
+        "algorithm": {
+          "type": "string",
+          "description": "'D8' or 'MFD', default 'D8'"
+        },
+        "calculate_flow_direction": {
+          "type": "boolean",
+          "description": "Default true"
+        },
+        "calculate_flow_accumulation": {
+          "type": "boolean",
+          "description": "Default true"
+        },
+        "calculate_stream_threshold": {
+          "type": "boolean",
+          "description": "Default false"
+        },
+        "threshold_flow_accumulation": {
+          "type": "integer",
+          "description": "Required if calculate_stream_threshold=true"
+        },
+        "calculate_slope": {
+          "type": "boolean",
+          "description": "Default false"
+        },
+        "calculate_stream_order": {
+          "type": "boolean",
+          "description": "Default false"
+        },
+        "calculate_downstream_distance": {
+          "type": "boolean",
+          "description": "Default false"
+        }
+      },
+      "required": [
+        "dem_path"
+      ]
+    },
+    "skill": "run-routedem",
+    "pre_execution": "**Uploaded files**: Extract paths from uploaded files first.\n\n**Required parameters**:\n- dem_path: digital elevation model raster (projected CRS recommended; unit: meters)\n\n**What to compute** (ask the user which outputs they need; defaults are flow direction + accumulation):\n- calculate_flow_direction: direction each pixel drains (required for most downstream analyses)\n- calculate_flow_accumulation: number of upstream pixels draining into each pixel (defines stream network)\n- calculate_stream_threshold: extract stream network where accumulation ≥ threshold_flow_accumulation\n- calculate_slope: slope raster in degrees\n- calculate_stream_order: Strahler stream order (requires stream threshold)\n- calculate_downstream_distance: distance from each pixel to the stream outlet\n\n**algorithm**:\n- 'D8' (default): each pixel drains to exactly one of 8 neighbors — simpler, faster, standard for most analyses\n- 'MFD': multiple flow direction — flow is split among multiple downslope neighbors — better for flat/complex terrain\n\n---"
+  },
+  {
+    "name": "run_Sediment_Delivery_Ratio_SDR",
+    "description": "Run InVEST Sediment Delivery Ratio (SDR) to estimate soil erosion and sediment export. Use when user asks about SDR, sediment delivery, erosion, RUSLE, or soil retention.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "dem_path": {
+          "type": "string"
+        },
+        "erosivity_path": {
+          "type": "string",
+          "description": "Rainfall erosivity raster (R factor)"
+        },
+        "erodibility_path": {
+          "type": "string",
+          "description": "Soil erodibility raster (K factor)"
+        },
+        "lulc_path": {
+          "type": "string"
+        },
+        "watersheds_path": {
+          "type": "string"
+        },
+        "biophysical_table_path": {
+          "type": "string",
+          "description": "CSV with usle_c, usle_p per lucode"
+        },
+        "threshold_flow_accumulation": {
+          "type": "integer",
+          "description": "Flow accumulation threshold, default 1000"
+        },
+        "k_param": {
+          "type": "number",
+          "description": "Borselli K parameter, default 2"
+        },
+        "sdr_max": {
+          "type": "number",
+          "description": "Max SDR value, default 0.8"
+        },
+        "ic_0_param": {
+          "type": "number",
+          "description": "Borselli IC0, default 0.5"
+        },
+        "l_max": {
+          "type": "number",
+          "description": "Max slope length, default 122"
+        },
+        "drainage_path": {
+          "type": "string",
+          "description": "Optional drainage channel raster"
+        }
+      },
+      "required": [
+        "dem_path",
+        "erosivity_path",
+        "erodibility_path",
+        "lulc_path",
+        "watersheds_path",
+        "biophysical_table_path",
+        "threshold_flow_accumulation"
+      ]
+    },
+    "skill": "run-sdr",
+    "pre_execution": "**Uploaded files**: Extract paths from uploaded files first.\n\n**Required parameters**:\n- dem_path: digital elevation model raster (meters, projected CRS)\n- erosivity_path: rainfall erosivity raster (R factor; MJ·mm/ha·h·yr) — derived from precipitation intensity data\n- erodibility_path: soil erodibility raster (K factor; t·ha·h/ha·MJ·mm) — from soil texture/organic matter maps\n- lulc_path: land use / land cover raster\n- watersheds_path: watershed boundary shapefile (must have 'ws_id' integer field)\n- biophysical_table_path: CSV with columns lucode (int), usle_c (cover-management factor 0–1), usle_p (support practice factor 0–1)\n- threshold_flow_accumulation: integer defining minimum upstream pixels to be a stream (e.g. 1000)\n\n**Optional calibration parameters** (use defaults unless user has calibration data):\n- k_param: Borselli k, controls connectivity index (default 2)\n- sdr_max: maximum fraction of eroded sediment that can be delivered (default 0.8)\n- ic_0_param: calibration offset (default 0.5)\n- l_max: maximum USLE slope length in meters (default 122)\n- drainage_path: raster of roads/ditches as artificial drainage channels\n\n---"
+  },
+  {
+    "name": "run_ndr",
+    "description": "Run InVEST Nutrient Delivery Ratio (NDR) to estimate nitrogen and phosphorus export from watersheds. Use when user asks about NDR, nutrient delivery, nitrogen export, phosphorus, or water quality nutrients.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "dem_path": {
+          "type": "string"
+        },
+        "lulc_path": {
+          "type": "string"
+        },
+        "runoff_proxy_path": {
+          "type": "string",
+          "description": "Runoff proxy raster (e.g. precipitation)"
+        },
+        "watersheds_path": {
+          "type": "string"
+        },
+        "biophysical_table_path": {
+          "type": "string"
+        },
+        "threshold_flow_accumulation": {
+          "type": "integer",
+          "description": "Default 1000"
+        },
+        "k_param": {
+          "type": "number",
+          "description": "Default 2"
+        },
+        "calc_n": {
+          "type": "boolean",
+          "description": "Calculate nitrogen, default true"
+        },
+        "calc_p": {
+          "type": "boolean",
+          "description": "Calculate phosphorus, default false"
+        },
+        "subsurface_critical_length_n": {
+          "type": "integer",
+          "description": "Default 150"
+        },
+        "subsurface_eff_n": {
+          "type": "number",
+          "description": "Default 0.8"
+        },
+        "subsurface_critical_length_p": {
+          "type": "integer"
+        },
+        "subsurface_eff_p": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "dem_path",
+        "lulc_path",
+        "runoff_proxy_path",
+        "watersheds_path",
+        "biophysical_table_path",
+        "threshold_flow_accumulation"
+      ]
+    },
+    "skill": "run-ndr",
+    "pre_execution": "**Uploaded files**: Extract paths from uploaded files first.\n\n**Required parameters**:\n- dem_path: digital elevation model raster (meters, projected CRS)\n- lulc_path: land use / land cover raster\n- runoff_proxy_path: raster representing water runoff or precipitation (mm/year) — drives nutrient transport\n- watersheds_path: watershed boundary shapefile (must have 'ws_id' integer field)\n- biophysical_table_path: CSV with lucode and nutrient-specific columns — ask user which nutrients they need (N, P, or both), then confirm the table has the appropriate columns (load_n, eff_n, crit_len_n for nitrogen; load_p, eff_p, crit_len_p for phosphorus)\n- threshold_flow_accumulation: integer defining stream network (e.g. 1000)\n\n**Nutrient selection** (ask the user):\n- calc_n: model nitrogen delivery (default True)\n- calc_p: model phosphorus delivery (default False; requires P columns in biophysical table)\n- At least one must be True\n\n**Optional subsurface parameters** (use defaults unless user has data):\n- subsurface_critical_length_n/p: travel length (m) for subsurface flow attenuation (default 150)\n- subsurface_eff_n/p: subsurface nutrient removal efficiency (0–1; default 0.8)\n\n---"
+  },
+  {
+    "name": "run_urban_cooling",
+    "description": "Run InVEST Urban Cooling Island model to estimate urban heat mitigation from green spaces. Use when user asks about urban heat island, cooling effect, urban green space, UHI, or city temperature.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "lulc_raster_path": {
+          "type": "string"
+        },
+        "ref_eto_raster_path": {
+          "type": "string",
+          "description": "Reference ET0 raster"
+        },
+        "aoi_vector_path": {
+          "type": "string",
+          "description": "AOI polygon shapefile"
+        },
+        "biophysical_table_path": {
+          "type": "string",
+          "description": "CSV with Kc, albedo, green_area columns"
+        },
+        "t_ref": {
+          "type": "number",
+          "description": "Reference air temperature (°C) in rural area"
+        },
+        "uhi_max": {
+          "type": "number",
+          "description": "Maximum UHI effect (°C)"
+        },
+        "green_area_cooling_distance": {
+          "type": "number",
+          "description": "Distance (m) over which green areas cool surroundings, default 100"
+        },
+        "t_air_average_radius": {
+          "type": "integer",
+          "description": "Radius (m) to average air temperature, default 2000"
+        },
+        "cc_method": {
+          "type": "string",
+          "description": "'factors' (default) or 'intensity'"
+        },
+        "avg_rel_humidity": {
+          "type": "integer",
+          "description": "Average relative humidity %, default 30"
+        },
+        "building_vector_path": {
+          "type": "string"
+        },
+        "energy_consumption_table_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "lulc_raster_path",
+        "ref_eto_raster_path",
+        "aoi_vector_path",
+        "biophysical_table_path",
+        "t_ref",
+        "uhi_max",
+        "green_area_cooling_distance"
+      ]
+    },
+    "skill": "run-urban-cooling",
+    "pre_execution": "**Uploaded files**: Extract paths from uploaded files first.\n\n**Required parameters**:\n- lulc_raster_path: land use / land cover raster for the urban area\n- ref_eto_raster_path: reference evapotranspiration raster (mm/day) — typically derived from weather station or gridded climate data\n- aoi_vector_path: polygon defining the study area boundary\n- biophysical_table_path: CSV mapping land cover classes to cooling properties (columns: lucode, kc crop coefficient, shade 0–1, albedo 0–1, green_area 0/1)\n- green_area_cooling_distance: distance (meters) over which green areas cool surrounding air (typically 100–1000 m)\n- t_ref: reference rural temperature (°C) — temperature in a nearby rural/non-urban area on a hot summer day\n- uhi_max: maximum urban heat island intensity (°C) — difference between the hottest urban pixel and the rural reference\n\n**Optional parameters**:\n- cc_method: 'factors' (default; uses shade/albedo/ETI weights) or 'intensity' (uses vegetation intensity directly)\n- building_vector_path + energy_consumption_table_path: required only if user wants energy cost savings from cooling\n- avg_rel_humidity: average relative humidity (%) for calculating wet bulb temperature\n- cc_weight_shade / cc_weight_albedo / cc_weight_eti: customize cooling credit weights for cc_method='factors' (must sum to 1.0)\n\n---"
+  },
+  {
+    "name": "run_urban_flood_risk_mitigation",
+    "description": "Run InVEST Urban Flood Risk Mitigation to estimate stormwater runoff and flood risk using curve numbers. Use when user asks about urban flood, stormwater runoff, curve number, SCS-CN, or flood mitigation.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "aoi_watersheds_path": {
+          "type": "string",
+          "description": "AOI/watershed shapefile"
+        },
+        "rainfall_depth": {
+          "type": "number",
+          "description": "Rainfall depth (mm)"
+        },
+        "lulc_path": {
+          "type": "string"
+        },
+        "soils_hydrological_group_raster_path": {
+          "type": "string",
+          "description": "Hydrological soil group raster (values 1-4 for A-D)"
+        },
+        "curve_number_table_path": {
+          "type": "string",
+          "description": "CSV with lucode and curve number columns for soil groups A-D"
+        },
+        "built_infrastructure_vector_path": {
+          "type": "string"
+        },
+        "infrastructure_damage_loss_table_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "aoi_watersheds_path",
+        "rainfall_depth",
+        "lulc_path",
+        "soils_hydrological_group_raster_path",
+        "curve_number_table_path"
+      ]
+    },
+    "skill": "run-urban-flood",
+    "pre_execution": "**Uploaded files**: Extract paths from uploaded files first.\n\n**Required parameters**:\n- aoi_watersheds_path: polygon shapefile defining the study watersheds (used for spatial aggregation)\n- rainfall_depth: design storm depth in millimeters (e.g. 50 for a 50mm storm; ask the user for their design storm return period if they're unsure)\n- lulc_path: land use / land cover raster for the urban area\n- soils_hydrological_group_raster_path: raster of SCS hydrological soil groups (A=well drained, D=poorly drained) encoded as integers 1–4\n- curve_number_table_path: CSV with Curve Number (CN) values for each LULC class × soil group combination (columns: lucode, CN_A, CN_B, CN_C, CN_D)\n\n**IMPORTANT — file identification when multiple CSVs are uploaded**:\n- The CSV containing columns lucode/CN_A/CN_B/CN_C/CN_D (or similar CN columns) is the `curve_number_table_path` — use it directly without asking.\n- Any other CSV (e.g. with infrastructure type and damage cost columns) is the `infrastructure_damage_loss_table_path`.\n- Do NOT ask the user which CSV is which — identify by column names or filename context.\n\n**IMPORTANT — GeoPackage format**: `.gpkg` (GeoPackage) files are valid vector inputs and should be used directly for `aoi_watersheds_path` and `built_infrastructure_vector_path`. Do not ask for a shapefile if a `.gpkg` is uploaded.\n\n**Optional — damage valuation** (include if infrastructure files are uploaded):\n- built_infrastructure_vector_path: polygon vector file of buildings/roads/infrastructure footprints (shapefile or .gpkg; must have 'type' field)\n- infrastructure_damage_loss_table_path: CSV mapping infrastructure type to damage cost per unit area flooded\n\n**IMPORTANT**: Call the tool as soon as all required parameters are available from uploaded files. Do not ask for clarification if files are already uploaded.\n\n---"
+  },
+  {
+    "name": "run_urban_stormwater_retention",
+    "description": "Run InVEST Urban Stormwater Retention model to estimate runoff retention and recharge. Use when user asks about urban stormwater retention, infiltration, pervious surfaces, or retention ratios.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "lulc_path": {
+          "type": "string"
+        },
+        "soil_group_path": {
+          "type": "string",
+          "description": "Hydrological soil group raster"
+        },
+        "precipitation_path": {
+          "type": "string",
+          "description": "Annual precipitation raster (mm)"
+        },
+        "biophysical_table": {
+          "type": "string",
+          "description": "CSV with lucode, EMC_*, RC_* columns"
+        },
+        "adjust_retention_ratios": {
+          "type": "boolean",
+          "description": "Default false"
+        },
+        "retention_radius": {
+          "type": "number",
+          "description": "Required if adjust_retention_ratios=true"
+        },
+        "road_centerlines_path": {
+          "type": "string"
+        },
+        "aggregate_areas_path": {
+          "type": "string"
+        },
+        "replacement_cost": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "lulc_path",
+        "soil_group_path",
+        "precipitation_path",
+        "biophysical_table"
+      ]
+    },
+    "skill": "run-urban-stormwater",
+    "pre_execution": "**Uploaded files**: Extract paths from uploaded files first.\n\n**Required parameters**:\n- lulc_path: land use / land cover raster\n- soil_group_path: SCS hydrological soil group raster (A=1, B=2, C=3, D=4)\n- precipitation_path: annual precipitation raster (mm/year)\n- biophysical_table: CSV with retention and infiltration coefficients per LULC × soil group combination (RC = stormwater retention coefficient, IR = infiltration ratio, ET = evapotranspiration coefficient)\n\n**Optional parameters**:\n- adjust_retention_ratios: set True to account for road drainage effects on adjacent pixels (improves accuracy in urban grids)\n  - retention_radius: radius (meters) within which roads reduce retention of nearby pixels (required if adjust_retention_ratios=True)\n  - road_centerlines_path: road network shapefile for adjustment\n- aggregate_areas_path: polygon shapefile (e.g. neighborhoods, parcels) for aggregated zonal statistics\n- replacement_cost: cost ($/m³) of providing equivalent retention by grey infrastructure — enables economic valuation of retention service\n\n---"
+  },
+  {
+    "name": "run_urban_nature_access",
+    "description": "Run InVEST Urban Nature Access to estimate population access to urban green space. Use when user asks about urban nature access, urban green equity, greenspace accessibility, or UNA.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "lulc_raster_path": {
+          "type": "string"
+        },
+        "lulc_attribute_table": {
+          "type": "string",
+          "description": "CSV mapping lucode to is_green_space and other attrs"
+        },
+        "population_raster_path": {
+          "type": "string"
+        },
+        "admin_boundaries_vector_path": {
+          "type": "string",
+          "description": "Administrative boundary polygons"
+        },
+        "search_radius_mode": {
+          "type": "string",
+          "description": "'uniform radius' (default) | 'radius per population group' | 'radius per urban nature class'"
+        },
+        "decay_function": {
+          "type": "string",
+          "description": "'gaussian' (default) | 'exponential' | 'linear' | 'power' | 'uniform'"
+        },
+        "search_radius": {
+          "type": "integer",
+          "description": "Radius in meters (required for uniform radius mode)"
+        },
+        "population_group_radii_table": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "lulc_raster_path",
+        "lulc_attribute_table",
+        "population_raster_path",
+        "admin_boundaries_vector_path"
+      ]
+    },
+    "skill": "run-urban-nature-access",
+    "pre_execution": "**Uploaded files**: Extract paths from uploaded files first.\n\n**Required parameters**:\n- lulc_raster_path: land use / land cover raster\n- lulc_attribute_table: CSV mapping LULC codes to nature classification (must include lucode and urban_nature columns; urban_nature=1 means that class counts as accessible nature)\n- population_raster_path: population raster (people per pixel) — typically derived from census or WorldPop data\n- admin_boundaries_vector_path: polygon shapefile of administrative units (e.g. districts, neighborhoods) for aggregated results\n\n**Search radius mode** (ask user which fits their analysis):\n- 'uniform radius' (default): all people use the same search distance — requires search_radius in meters (e.g. 300 m for walkable access, 1000 m for cycling)\n- 'radius per population group': different population groups have different mobility — requires population_group_radii_table CSV\n- 'radius per urban nature class': different park sizes have different catchment radii — radii encoded in lulc_attribute_table\n\n**decay_function**: controls how access decreases with distance. Valid values (accept any of these):\n- 'gaussian' (default): smooth, realistic decay — best for walking behavior\n- 'linear': uniform linear decay\n- 'exponential': rapid decay with distance\n- 'dichotomy': binary — all nature within radius counted equally (classic buffer approach)\n\n**Optional parameters**:\n- urban_nature_demand: per-capita nature area standard in m² (e.g. 250 for WHO recommended 9 m²/person × some factor); used to compute supply-demand balance; default if omitted is no demand threshold\n- aggregate_by_pop_group: true/false — if true, aggregate results separately for each population group defined in population_group_radii_table (only relevant when search_radius_mode='radius per population group')\n\n**IMPORTANT**: Call the tool as soon as all required parameters are provided. Do NOT ask for optional parameters unless the user explicitly mentions them.\n\n---"
+  },
+  {
+    "name": "run_urban_mental_health",
+    "description": "Run Urban Mental Health model (extended Urban Nature Access) to estimate mental health benefits from urban greenspace. Use when user asks about mental health, urban mental wellness, greenspace benefits, or psychological well-being.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "lulc_raster_path": {
+          "type": "string"
+        },
+        "lulc_attribute_table": {
+          "type": "string"
+        },
+        "population_raster_path": {
+          "type": "string"
+        },
+        "admin_boundaries_vector_path": {
+          "type": "string"
+        },
+        "search_radius_mode": {
+          "type": "string",
+          "description": "'uniform radius' (default)"
+        },
+        "decay_function": {
+          "type": "string",
+          "description": "'gaussian' (default)"
+        },
+        "search_radius": {
+          "type": "integer",
+          "description": "Default 300 m"
+        },
+        "population_group_radii_table": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "lulc_raster_path",
+        "lulc_attribute_table",
+        "population_raster_path",
+        "admin_boundaries_vector_path"
+      ]
+    },
+    "skill": "run-urban-mental-health",
+    "pre_execution": "**Use this tool when the user asks about**:\n- Mental health benefits of urban nature\n- Psychological wellbeing from nearby green spaces\n- Nature visible or encountered in daily routines (not just \"can I reach a park\")\n- Stress reduction, restorative experience, or mental health equity from urban greenery\n\n**Do NOT use this tool for**: measuring whether residents can physically travel to a park for recreation — use run_urban_nature_access for that.\n\n**Uploaded files**: Extract paths from uploaded files first.\n\n**Required parameters**:\n- lulc_raster_path: land use / land cover raster\n- lulc_attribute_table: CSV mapping LULC codes to nature classification (columns: lucode, urban_nature 0/1)\n- population_raster_path: population count raster (people per pixel)\n- admin_boundaries_vector_path: administrative unit polygon shapefile for zonal reporting\n\n**Search radius** (mental health context uses small radii — nature you can see or pass by):\n- search_radius: distance in meters within which nature contributes to mental health exposure\n  - Typical range: **100–300 m** (visible from window or reachable on foot in minutes)\n  - Default: **300 m** (5-minute walk — nature reliably encountered in daily movement)\n  - Ask the user if they want a different radius (e.g. 100 m for \"nature visible from home\")\n\n**Optional parameters**:\n- search_radius_mode: default 'uniform radius'; alternatives: 'radius per population group', 'radius per urban nature class'\n- decay_function: how benefit declines with distance (default 'gaussian'; options: 'exponential', 'linear', 'dichotomy')\n- population_group_radii_table: required only if search_radius_mode = 'radius per population group'\n\n---"
+  },
+  {
+    "name": "run_scenic_quality",
+    "description": "Run InVEST Scenic Quality to compute viewshed visibility from structure points. Use when user asks about scenic quality, viewshed, visual impact, sight lines, or landscape aesthetics.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "aoi_vector_path": {
+          "type": "string",
+          "description": "Area of interest polygon"
+        },
+        "structure_vector_path": {
+          "type": "string",
+          "description": "Shapefile of structures/viewpoints"
+        },
+        "dem_path": {
+          "type": "string",
+          "description": "Digital elevation model"
+        },
+        "refractivity_coefficient": {
+          "type": "number",
+          "description": "Atmospheric refraction coefficient, default 0.13"
+        },
+        "do_valuation": {
+          "type": "boolean",
+          "description": "Enable valuation, default false"
+        },
+        "valuation_function": {
+          "type": "string",
+          "description": "'linear' | 'logarithmic' | 'exponential' (required if do_valuation=true)"
+        },
+        "a_coef": {
+          "type": "number"
+        },
+        "b_coef": {
+          "type": "number"
+        },
+        "max_valuation_radius": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "aoi_vector_path",
+        "structure_vector_path",
+        "dem_path"
+      ]
+    },
+    "skill": "run-scenic-quality",
+    "pre_execution": "**Use this tool when the user asks about**:\n- Visual impact of offshore or nearshore development (wind turbines, aquaculture, wave energy facilities)\n- Viewshed analysis — which areas can see a proposed structure\n- Scenic amenity mapping for coastal or marine planning\n- Property value impacts from visual intrusion of infrastructure\n\n**Required parameters**:\n- aoi_vector_path: polygon defining the study area (coastline zone of interest)\n- structure_vector_path: point shapefile of structures whose visual impact is being assessed (e.g. wind turbines, offshore platforms) — must share the same projection as the DEM; optional fields in shapefile: `radius` (max viewing distance m), `weight` (importance coefficient), `height` (structure height above ground m)\n- dem_path: digital elevation model (meters, land and bathymetry merged)\n\n**Optional parameters**:\n- refractivity_coefficient: default 0.13 (standard atmospheric refraction); adjust only with specific atmospheric data\n- do_valuation: set True to compute a visual impact value index; requires:\n  - valuation_function: 'linear', 'logarithmic', or 'exponential' (describes how impact decreases with distance)\n  - a_coef, b_coef: function parameters (see InVEST documentation for guidance)\n  - max_valuation_radius: maximum distance from structure to include in valuation (meters)\n\n---"
+  },
+  {
+    "name": "run_habitat_risk_assessment",
+    "description": "Run InVEST Habitat Risk Assessment (HRA) to evaluate cumulative risk to habitats from multiple stressors. Use when user asks about habitat risk, HRA, stressor impact, cumulative impact, or marine risk assessment.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "info_table_path": {
+          "type": "string",
+          "description": "CSV listing habitats and stressors with file paths"
+        },
+        "criteria_table_path": {
+          "type": "string",
+          "description": "CSV/Excel with ratings for each habitat-stressor pair"
+        },
+        "resolution": {
+          "type": "integer",
+          "description": "Output raster resolution in meters"
+        },
+        "max_rating": {
+          "type": "integer",
+          "description": "Maximum rating value used in criteria table (e.g. 3)"
+        },
+        "risk_eq": {
+          "type": "string",
+          "description": "'Euclidean' or 'Multiplicative'"
+        },
+        "decay_eq": {
+          "type": "string",
+          "description": "'exponential', 'linear', or 'none'"
+        },
+        "n_overlapping_stressors": {
+          "type": "integer",
+          "description": "Number of stressors overlapping at once to normalize risk"
+        },
+        "aoi_vector_path": {
+          "type": "string",
+          "description": "AOI polygon shapefile"
+        },
+        "visualize_outputs": {
+          "type": "boolean",
+          "description": "Default false"
+        }
+      },
+      "required": [
+        "info_table_path",
+        "criteria_table_path",
+        "resolution",
+        "max_rating",
+        "risk_eq",
+        "decay_eq",
+        "n_overlapping_stressors",
+        "aoi_vector_path"
+      ]
+    },
+    "skill": "run-habitat-risk-assessment",
+    "pre_execution": "**Use this tool when the user asks about**:\n- Cumulative risk to habitats or species from multiple human activities\n- Marine/coastal spatial planning and stressor mapping\n- Which habitats are most at risk and from which stressors\n- Trade-offs between ecosystem services under alternative management scenarios\n\n**Required parameters**:\n- info_table_path: CSV listing each habitat and stressor with their spatial data files. Columns:\n  - `name`: unique name (must match names in criteria_table_path)\n  - `path`: path to raster (value=1 for presence) or vector spatial file\n  - `type`: \"habitat\" or \"stressor\"\n  - `stressor buffer (meters)`: buffer distance for stressors (blank for habitats, 0 for no buffer)\n- criteria_table_path: the criteria scoring CSV — complex format (see sample data); rows are criteria grouped by habitat-stressor pair, columns are exposure/consequence scores\n- resolution: spatial resolution in meters for output rasters (start with 1000 m for testing, refine later)\n- max_rating: maximum score value used in the criteria table (e.g. 3 if ratings are 0–3)\n- risk_eq: 'Euclidean' (default, more conservative) or 'Multiplicative' (amplifies combined high scores)\n- decay_eq: how stressor effects decay in buffer zones — 'exponential', 'linear', or 'none'\n- n_overlapping_stressors: the maximum number of stressors expected to overlap in any one area (affects risk classification thresholds)\n- aoi_vector_path: polygon shapefile of planning subregions (summary statistics reported per subregion)\n\n**Optional**:\n- visualize_outputs: set True to generate GeoJSON output compatible with the HRA web visualization app\n\n**Important data preparation note**: The criteria scores table is the most complex input — direct the user to InVEST sample data for the correct format before running.\n\n---"
+  },
+  {
+    "name": "run_wave_energy_production",
+    "description": "Run InVEST Wave Energy Production to estimate wave energy potential. Use when user asks about wave energy, offshore wave power, wave resource assessment, or marine renewable energy.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "wave_base_data_path": {
+          "type": "string",
+          "description": "Optional. Path to InVEST wave base data directory. Omit it to use the server's built-in default WaveData (the user does not need to upload or know this path)."
+        },
+        "analysis_area": {
+          "type": "string",
+          "description": "One of: 'Australia', 'East Coast of North America and Puerto Rico', 'Global', 'North Sea 10 meter resolution', 'North Sea 4 meter resolution', 'West Coast of North America and Hawaii'"
+        },
+        "machine_perf_path": {
+          "type": "string",
+          "description": "Wave energy machine performance CSV"
+        },
+        "machine_param_path": {
+          "type": "string",
+          "description": "Wave energy machine parameters CSV"
+        },
+        "bathymetry_path": {
+          "type": "string",
+          "description": "Optional. Bathymetry raster (DEM). Omit it to use the server's built-in default global DEM (the user does not need to upload or know this path)."
+        },
+        "aoi_vector_path": {
+          "type": "string"
+        },
+        "do_valuation": {
+          "type": "boolean",
+          "description": "Default false"
+        },
+        "grid_points_path": {
+          "type": "string",
+          "description": "Required if do_valuation=true"
+        },
+        "machine_econ_path": {
+          "type": "string",
+          "description": "Required if do_valuation=true"
+        },
+        "number_of_machines": {
+          "type": "integer",
+          "description": "Default 28"
+        }
+      },
+      "required": [
+        "analysis_area",
+        "machine_perf_path",
+        "machine_param_path"
+      ]
+    },
+    "skill": "run-wave-energy-production",
+    "pre_execution": "**Use this tool when the user asks about**:\n- Ocean wave energy potential or resource mapping\n- Siting wave energy conversion (WEC) facilities\n- Renewable energy from ocean waves\n- Trade-offs between wave energy and marine conservation/fisheries\n\n**Required parameters**:\n- analysis_area: select from the following options:\n  - \"Australia\"\n  - \"East Coast of North America and Puerto Rico\"\n  - \"Global\"\n  - \"North Sea 10 meter resolution\"\n  - \"North Sea 4 meter resolution\"\n  - \"West Coast of North America and Hawaii\"\n- machine_perf_path: CSV performance matrix (Hs wave height × Tp wave period → power kW); sample data provided with InVEST\n- machine_param_path: CSV of device parameters (CapMax, HsMax, TpMax); sample data provided\n\n**Server-provided defaults — DO NOT ask the user for these paths**:\n- wave_base_data_path: large pre-packaged WaveData directory (~811 MB). It is pre-installed on the server. Omit this parameter entirely unless the user explicitly supplies their own wave base data — the tool will use the built-in default and notify the user.\n- bathymetry_path: global ocean bathymetry DEM. Pre-installed on the server. Omit this parameter unless the user explicitly supplies their own DEM — the tool uses the built-in default and notifies the user.\n\n**Optional parameters**:\n- aoi_vector_path: polygon to clip the analysis to a specific coastal region (recommended for large analysis areas to reduce runtime)\n- do_valuation: set True to compute net present value (NPV) of a WEC facility; requires:\n  - grid_points_path: CSV of electricity grid connection and land points (lat, long, type GRID/LAND, location name)\n  - machine_econ_path: CSV of economic parameters (capital cost, O&M cost, electricity price, discount rate, etc.)\n  - number_of_machines: number of WEC devices in the farm (default 28)\n\n---"
+  },
+  {
+    "name": "run_scenario_gen_proximity",
+    "description": "Run InVEST Scenario Generator: Proximity-Based to generate LULC conversion scenarios. Use when user asks about scenario generation, LULC conversion, proximity-based scenarios, or land use change scenarios.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "base_lulc_path": {
+          "type": "string",
+          "description": "Base LULC raster to convert"
+        },
+        "replacement_lucode": {
+          "type": "integer",
+          "description": "LULC code to convert pixels to"
+        },
+        "area_to_convert": {
+          "type": "number",
+          "description": "Area (ha) to convert"
+        },
+        "focal_landcover_codes": {
+          "type": "string",
+          "description": "Space-separated LULC codes to measure distance from, e.g. '1 2 3'. Accepts one or many codes."
+        },
+        "convertible_landcover_codes": {
+          "type": "string",
+          "description": "Space-separated LULC codes eligible for conversion, e.g. '1 2 3'. Accepts one or many codes."
+        },
+        "convert_nearest_to_edge": {
+          "type": "boolean",
+          "description": "Convert pixels nearest to focal LULC, default true"
+        },
+        "convert_farthest_from_edge": {
+          "type": "boolean",
+          "description": "Convert pixels farthest from focal LULC, default false"
+        },
+        "aoi_path": {
+          "type": "string"
+        },
+        "n_steps": {
+          "type": "integer",
+          "description": "Number of conversion steps, default 1"
+        }
+      },
+      "required": [
+        "base_lulc_path",
+        "replacement_lucode",
+        "area_to_convert",
+        "focal_landcover_codes",
+        "convertible_landcover_codes"
+      ]
+    },
+    "skill": "run-scenario-gen-proximity",
+    "pre_execution": "**Uploaded files**: Extract paths from uploaded files first.\n\n**Required parameters**:\n- base_lulc_path: baseline land use / land cover raster (the map to modify)\n- replacement_lucode: the LULC code of the new land cover type (e.g. 1 for forest if 1=forest in the legend)\n- area_to_convert: total area to convert (hectares)\n- focal_landcover_codes: space-separated list of LULC codes defining the 'edge' to convert near (e.g. \"1 2\" to convert land near forest and shrubland)\n- convertible_landcover_codes: space-separated list of LULC codes that are eligible to be converted (e.g. \"3 4\" for cropland and grassland only)\n\n**Conversion direction** (ask user which scenario):\n- convert_nearest_to_edge: True → converts eligible pixels closest to the focal class boundary first (simulates edge expansion — e.g. deforestation encroaching on forest from the outside)\n- convert_farthest_from_edge: True → converts pixels farthest from the focal class (simulates core area loss, or conversion of isolated patches)\n- Both can be True simultaneously to generate two scenarios in one run\n\n**Optional**:\n- aoi_path: restrict conversion to a specific sub-region polygon\n- n_steps: number of incremental scenario outputs (1 = single final scenario; >1 = intermediate steps useful for pathway analysis)\n\n---"
+  },
+  {
+    "name": "run_coastal_vulnerability",
+    "description": "Run InVEST Coastal Vulnerability to assess shoreline exposure and risk from waves, wind, and sea level. Use when user asks about coastal vulnerability, shoreline risk, CV index, coastal exposure, or coastal hazard.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "aoi_vector_path": {
+          "type": "string",
+          "description": "AOI polygon shapefile"
+        },
+        "bathymetry_raster_path": {
+          "type": "string"
+        },
+        "dem_path": {
+          "type": "string"
+        },
+        "geomorphology_vector_path": {
+          "type": "string",
+          "description": "Shoreline geomorphology shapefile"
+        },
+        "geomorphology_fill_value": {
+          "type": "integer",
+          "description": "Fill value for geomorphology rank"
+        },
+        "landmass_vector_path": {
+          "type": "string",
+          "description": "Global landmass polygon shapefile"
+        },
+        "wwiii_vector_path": {
+          "type": "string",
+          "description": "WAVEWATCH III wave data shapefile"
+        },
+        "model_resolution": {
+          "type": "integer",
+          "description": "Resolution of model in meters"
+        },
+        "max_fetch_distance": {
+          "type": "integer",
+          "description": "Maximum fetch distance (m), default 12000"
+        },
+        "dem_averaging_radius": {
+          "type": "integer",
+          "description": "DEM averaging radius in meters"
+        },
+        "habitat_table_path": {
+          "type": "string"
+        },
+        "population_raster_path": {
+          "type": "string"
+        },
+        "shelf_contour_vector_path": {
+          "type": "string"
+        },
+        "slr_vector_path": {
+          "type": "string"
+        },
+        "slr_field": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "aoi_vector_path",
+        "bathymetry_raster_path",
+        "dem_path",
+        "geomorphology_vector_path",
+        "geomorphology_fill_value",
+        "landmass_vector_path",
+        "wwiii_vector_path",
+        "model_resolution",
+        "max_fetch_distance",
+        "dem_averaging_radius"
+      ]
+    },
+    "skill": "run-coastal-vulnerability",
+    "pre_execution": "**Use this tool when the user asks about**:\n- Coastal hazard exposure or vulnerability mapping\n- Which coastlines are at risk from waves, surge, erosion, or sea-level rise\n- Impact of coastal habitats (mangroves, coral, seagrass) on shoreline protection\n- Identifying vulnerable populations in coastal communities\n- Coastal spatial planning and climate adaptation\n\n**Required parameters**:\n- aoi_vector_path: polygon of the coastal study area (must include some ocean extent)\n- bathymetry_raster_path: ocean bathymetry raster (negative depth values in meters); global 1 arc-minute data available from ETOPO or bundled InVEST sample data\n- dem_averaging_radius: radius (meters) for smoothing DEM when computing wave exposure — typical value: 500–1000 m\n- dem_path: land elevation DEM (meters); SRTM 30 m or equivalent\n- geomorphology_fill_value: integer score (1–4 typical) assigned to coastline segments with no geomorphology data\n- geomorphology_vector_path: polygon shapefile classifying coastal geomorphology (cliffs, beaches, mudflats, etc.)\n- landmass_vector_path: land polygon used to block ocean fetch rays — global land polygon bundled with InVEST\n- max_fetch_distance: maximum distance (meters) over which wave energy is fetched; default 30000 m\n- model_resolution: output pixel resolution in meters; start at 1000 m for testing; refine to 250–500 m for final runs\n- wwiii_vector_path: WaveWatch III wave climate data as a point vector; bundled with InVEST sample data under CoastalVulnerability/\n\n**Optional parameters** (all can be omitted — the model runs with required parameters only):\n- habitat_table_path: CSV linking habitat vector paths to their protection rank (1=highest protection); required to include habitat in the exposure index\n- population_raster_path: raster of population density or counts (LandScan, WorldPop)\n- population_radius: buffer distance (m) for summing at-risk population around coastal points\n- shelf_contour_vector_path: continental shelf polyline — increases storm surge exposure score for coasts near the shelf\n- slr_vector_path: sea-level rise projections as a point vector (OPTIONAL — do NOT ask for this unless user explicitly provides it)\n- slr_field: field name in slr_vector_path containing the SLR rate (only needed if slr_vector_path is provided)\n\n**IMPORTANT**: Call the tool as soon as all required parameters are provided. Do NOT ask for slr_vector_path or slr_field — they are optional and rarely available.\n\n---"
+  },
+  {
+    "name": "run_offshore_wind_energy",
+    "description": "Run InVEST Offshore Wind Energy to estimate offshore wind power potential. Use when user asks about offshore wind, wind energy, marine wind, or wind turbine siting.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "wind_data_path": {
+          "type": "string",
+          "description": "Wind data point shapefile (NOAA/ECMWF)"
+        },
+        "aoi_vector_path": {
+          "type": "string",
+          "description": "AOI polygon shapefile"
+        },
+        "bathymetry_path": {
+          "type": "string",
+          "description": "Optional. Bathymetry raster. Omit it to use the server's built-in default global DEM (the user does not need to upload or know this path)."
+        },
+        "land_polygon_vector_path": {
+          "type": "string",
+          "description": "Optional. Land polygon for distance calculation. Omit it to use the server's built-in default global land polygon (the user does not need to upload or know this path)."
+        },
+        "turbine_parameters_path": {
+          "type": "string",
+          "description": "CSV with turbine specs"
+        },
+        "global_wind_parameters_path": {
+          "type": "string",
+          "description": "CSV with global wind model parameters"
+        },
+        "number_of_turbines": {
+          "type": "integer",
+          "description": "Number of turbines per wind farm"
+        },
+        "min_depth": {
+          "type": "number",
+          "description": "Minimum water depth (m), default 3"
+        },
+        "max_depth": {
+          "type": "number",
+          "description": "Maximum water depth (m), default 60"
+        },
+        "min_distance": {
+          "type": "number",
+          "description": "Minimum distance from shore (m), default 0"
+        },
+        "max_distance": {
+          "type": "number",
+          "description": "Maximum distance from shore (m), default 200000"
+        },
+        "valuation_container": {
+          "type": "boolean",
+          "description": "Enable economic valuation, default false"
+        },
+        "avg_grid_distance": {
+          "type": "number",
+          "description": "Average grid distance (km), default 4"
+        }
+      },
+      "required": [
+        "wind_data_path",
+        "aoi_vector_path",
+        "turbine_parameters_path",
+        "global_wind_parameters_path",
+        "number_of_turbines"
+      ]
+    },
+    "skill": "run-offshore-wind-energy",
+    "pre_execution": "**Use this tool when the user asks about**:\n- Offshore wind energy potential or resource mapping\n- Siting offshore wind farms within a maritime zone (EEZ)\n- Energy density and harvestable energy from wind over the ocean\n- Trade-offs between offshore wind energy and marine conservation or fisheries\n\n**Required parameters**:\n- wind_data_path: CSV of wind speed at hub height with columns: longitude, latitude, wind speed (m/s) percentiles — WEBPAR format; bundled with InVEST sample data under WindEnergy/input/\n- aoi_vector_path: polygon of the wind farm planning area (typically an EEZ or sub-region)\n- turbine_parameters_path: CSV of turbine specifications — InVEST includes 3_6_turbine.csv (3.6 MW) and 5_0_turbine.csv (5 MW) under WindEnergy/input/\n- number_of_turbines: total number of turbines in the wind farm (used for calculating total farm energy and carbon offset)\n- global_wind_parameters_path: global model parameters CSV (loss factors, capacity factors) bundled under WindEnergy/input/global_wind_energy_parameters.csv\n\n**Server-provided defaults — DO NOT ask the user for these paths**:\n- bathymetry_path: global ocean bathymetry DEM (~112 MB). Pre-installed on the server. Omit this parameter unless the user explicitly supplies their own DEM — the tool uses the built-in default and notifies the user.\n- land_polygon_vector_path: global land polygon (~155 MB). Pre-installed on the server. Omit this parameter unless the user explicitly supplies their own land polygon — the tool uses the built-in default and notifies the user.\n\n**Optional parameters**:\n- min_depth / max_depth: depth range for viable turbine installation (default 3–60 m for fixed-bottom foundations)\n- min_distance / max_distance: distance-to-shore constraints in meters (default 0–200,000 m)\n- avg_grid_distance: average distance from turbine to nearest grid connection point (km; affects cable cost if valuation is run)\n- valuation_container: set True to compute net present value — requires additional economic parameters\n\n---"
+  },
+  {
+    "name": "run_model_selection_ols",
+    "description": "Run Ordinary Least Squares (OLS) regression on tabular CSV data. Supports model selection mode to test all variable combinations. Use when user asks about OLS, linear regression, model selection, R-squared, or explanatory variable analysis.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "input_csv": {
+          "type": "string",
+          "description": "Path to input CSV with data"
+        },
+        "dependent_variable": {
+          "type": "string",
+          "description": "Column name of the dependent (Y) variable"
+        },
+        "independent_variables": {
+          "type": "string",
+          "description": "Comma-separated list of independent variable column names"
+        },
+        "model_selection": {
+          "type": "boolean",
+          "description": "If true, test all variable combinations and rank by Adj R², default false"
+        },
+        "min_r2": {
+          "type": "number",
+          "description": "Minimum R² threshold for model selection, default 0.5"
+        },
+        "max_vif": {
+          "type": "number",
+          "description": "Maximum VIF for model selection, default 7.5"
+        },
+        "max_p_value": {
+          "type": "number",
+          "description": "Maximum coefficient p-value for model selection, default 0.05"
+        }
+      },
+      "required": [
+        "input_csv",
+        "dependent_variable",
+        "independent_variables"
+      ]
+    },
+    "skill": "run-model-selection-ols",
+    "pre_execution": "**Uploaded files**: Extract paths from uploaded files first. Only ask for genuinely missing inputs.\n\n**Required parameters**:\n- input_csv: path to the input CSV file containing all variables for regression\n- dependent_variable: column name of the response/outcome variable (Y)\n- independent_variables: list of column names to use as predictors (X variables); comma-separated if provided as text\n\n**Optional parameters**:\n- model_selection: if true, runs automated stepwise model selection to find the best subset of independent variables (default: false)\n- min_r2: minimum acceptable R-squared threshold during model selection (default: 0.5)\n- max_vif: maximum acceptable Variance Inflation Factor for multicollinearity screening (default: 7.5)\n- max_p_value: maximum acceptable p-value for predictor significance (default: 0.05)\n\n**Key notes**:\n- If model_selection is false (default), OLS is run on all provided independent_variables as-is\n- If model_selection is true, the tool iterates over subsets of independent_variables and returns the best-fitting model satisfying min_r2, max_vif, and max_p_value thresholds\n- Trigger words that indicate this tool: OLS, linear regression, model selection, R-squared, regression analysis, multicollinearity, VIF\n\n---"
+  },
+  {
+    "name": "run_factor_analysis_mixed_data",
+    "description": "Run Factor Analysis for Mixed Data (FAMD), PCA, or MCA via R/FactoMineR. Use when user asks about factor analysis, PCA, MCA, FAMD, dimensionality reduction, or mixed data analysis.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "input_csv": {
+          "type": "string",
+          "description": "Path to input CSV with variables"
+        },
+        "quantitative_variables": {
+          "type": "string",
+          "description": "Comma-separated list of numeric variable column names"
+        },
+        "qualitative_variables": {
+          "type": "string",
+          "description": "Comma-separated list of categorical variable column names"
+        },
+        "n_components": {
+          "type": "integer",
+          "description": "Number of components/dimensions, default 5"
+        },
+        "handle_na": {
+          "type": "boolean",
+          "description": "Impute missing values using missMDA, default true"
+        }
+      },
+      "required": [
+        "input_csv"
+      ]
+    },
+    "skill": "run-famd",
+    "pre_execution": "**Uploaded files**: Extract paths from uploaded files first. Only ask for genuinely missing inputs.\n\n**Required parameters**:\n- input_csv: path to the input CSV file containing variables for analysis\n\n**At least one of the following must be provided**:\n- quantitative_variables: list of column names for continuous/numeric variables (comma-separated)\n- qualitative_variables: list of column names for categorical/factor variables (comma-separated)\n\n**Optional parameters**:\n- n_components: number of dimensions/components to extract and retain (default: 5)\n- handle_na: if true, rows with missing values are handled automatically before analysis (default: true)\n\n**Key notes**:\n- If only quantitative_variables are given, the tool runs PCA\n- If only qualitative_variables are given, the tool runs MCA\n- If both are given, the tool runs FAMD (the general case that handles mixed data types)\n- Trigger words that indicate this tool: factor analysis, FAMD, PCA, MCA, dimensionality reduction, mixed data, principal component, correspondence analysis\n\n---"
+  },
+  {
+    "name": "run_co2_emissions",
+    "description": "Calculate CO2 emissions from wildlife or goods transport routes. Use when user asks about CO2 emissions, transport emissions, carbon footprint of transport, or animal transport.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "input_csv": {
+          "type": "string",
+          "description": "CSV with transport route data"
+        },
+        "capacity_per_trip": {
+          "type": "number",
+          "description": "Number of animals/units per trip"
+        },
+        "co2_per_km_per_trip": {
+          "type": "number",
+          "description": "CO2 emissions in kg per km per trip"
+        },
+        "animal_count_field": {
+          "type": "string",
+          "description": "Column name for animal/unit count, default 'animal_count'"
+        },
+        "length_km_field": {
+          "type": "string",
+          "description": "Column name for route length in km, default 'length_km'"
+        },
+        "id_field": {
+          "type": "string",
+          "description": "Optional column name for route ID"
+        }
+      },
+      "required": [
+        "input_csv",
+        "capacity_per_trip",
+        "co2_per_km_per_trip"
+      ]
+    },
+    "skill": "run-co2-emissions",
+    "pre_execution": "**Uploaded files**: Extract paths from uploaded files first. Only ask for genuinely missing inputs.\n\n**Required parameters**:\n- input_csv: path to the input CSV file containing route/trip data with animal counts and distances\n- capacity_per_trip: maximum number of animals that can be transported per trip (used to calculate the number of trips required)\n- co2_per_km_per_trip: CO2 emissions factor in kg CO2 per kilometer per trip\n\n**Optional parameters**:\n- animal_count_field: column name in input_csv that holds the number of animals per route (default: 'animal_count')\n- length_km_field: column name in input_csv that holds the route distance in kilometers (default: 'length_km')\n- id_field: column name to use as a unique row identifier in the output (optional; uses row index if not provided)\n\n**Key notes**:\n- The tool computes number of trips = ceil(animal_count / capacity_per_trip) for each row\n- Total CO2 per route = trips × length_km × co2_per_km_per_trip\n- Trigger words: CO2 emissions, carbon emissions, transport emissions, wildlife transport, animal transport, shipping carbon footprint\n\n---"
+  },
+  {
+    "name": "run_cost_benefit_analysis",
+    "description": "Join cost and revenue data to a feature table and compute net returns (RETURNS = REVENUES - COSTS). Use when user asks about cost-benefit analysis, CBA, economic returns, costs vs revenues.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "input_csv": {
+          "type": "string",
+          "description": "Main feature CSV"
+        },
+        "economic_data_csv": {
+          "type": "string",
+          "description": "CSV with economic data containing cost and revenue columns"
+        },
+        "key_field": {
+          "type": "string",
+          "description": "Column name used to join the two CSVs"
+        },
+        "cost_field": {
+          "type": "string",
+          "description": "Column name for costs in economic_data_csv, default 'COSTS'"
+        },
+        "revenue_field": {
+          "type": "string",
+          "description": "Column name for revenues in economic_data_csv, default 'REVENUES'"
+        }
+      },
+      "required": [
+        "input_csv",
+        "economic_data_csv",
+        "key_field"
+      ]
+    },
+    "skill": "run-cost-benefit-analysis",
+    "pre_execution": "**Uploaded files**: Extract paths from uploaded files first. Only ask for genuinely missing inputs.\n\n**Required parameters**:\n- input_csv: path to the primary input CSV file (e.g., spatial or route data with unique IDs)\n- economic_data_csv: path to a second CSV file containing cost and revenue data per unit/route\n- key_field: column name used to join input_csv and economic_data_csv (must exist in both files)\n\n**Optional parameters**:\n- cost_field: column name in economic_data_csv that holds cost values (default: 'COSTS')\n- revenue_field: column name in economic_data_csv that holds revenue values (default: 'REVENUES')\n\n**Key notes**:\n- The two CSVs are joined on key_field; rows present in input_csv but missing in economic_data_csv will have NaN costs/revenues\n- RETURNS = REVENUES − COSTS is computed automatically for each joined record\n- Trigger words: cost-benefit analysis, CBA, economic returns, costs revenues, return on investment, economic evaluation\n\n---"
+  },
+  {
+    "name": "run_population_count_density",
+    "description": "Calculate population density per reporting unit and optionally compute population change between two time periods. Use when user asks about population density, population count, population growth, or demographic analysis.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "input_csv": {
+          "type": "string",
+          "description": "CSV with reporting unit data"
+        },
+        "population_field": {
+          "type": "string",
+          "description": "Column name for population count"
+        },
+        "area_km2_field": {
+          "type": "string",
+          "description": "Column name for area in km²"
+        },
+        "unit_id_field": {
+          "type": "string",
+          "description": "Optional column name for unit ID (for joining second period data)"
+        },
+        "second_period_csv": {
+          "type": "string",
+          "description": "Optional CSV for second time period (for population change analysis)"
+        },
+        "second_period_population_field": {
+          "type": "string",
+          "description": "Column name for population in second period CSV"
+        }
+      },
+      "required": [
+        "input_csv",
+        "population_field",
+        "area_km2_field"
+      ]
+    },
+    "skill": "run-population-density",
+    "pre_execution": "**Uploaded files**: Extract paths from uploaded files first. Only ask for genuinely missing inputs.\n\n**Required parameters**:\n- input_csv: path to the input CSV file containing population and area data\n- population_field: column name in input_csv holding population count for the primary period\n- area_km2_field: column name in input_csv holding the area of each unit in square kilometers\n\n**Optional parameters**:\n- unit_id_field: column name to use as a unique identifier for each spatial unit (e.g., district name, region code); uses row index if not provided\n- second_period_csv: path to a second CSV file with population data for a comparison period (enables change analysis)\n- second_period_population_field: column name in second_period_csv holding the population count for the second period (required if second_period_csv is provided)\n\n**Key notes**:\n- Population density is computed as: density = population_count / area_km2\n- If second_period_csv is provided, the tool computes population change and percent change between the two periods\n- Trigger words: population density, population count, demographic analysis, population change, per capita density, spatial demographics\n\n---"
+  },
+  {
+    "name": "run_draw_radial_flows",
+    "description": "Generate radial flow lines from a CSV of origin-destination coordinate pairs. Use when user asks about radial flows, flow lines, OD matrix visualization, or origin-destination mapping.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "input_csv": {
+          "type": "string",
+          "description": "CSV with origin and destination coordinates"
+        },
+        "from_x_field": {
+          "type": "string",
+          "description": "Column name for origin longitude/X"
+        },
+        "from_y_field": {
+          "type": "string",
+          "description": "Column name for origin latitude/Y"
+        },
+        "to_x_field": {
+          "type": "string",
+          "description": "Column name for destination longitude/X"
+        },
+        "to_y_field": {
+          "type": "string",
+          "description": "Column name for destination latitude/Y"
+        },
+        "crs": {
+          "type": "string",
+          "description": "Coordinate reference system, default 'EPSG:4326'"
+        }
+      },
+      "required": [
+        "input_csv",
+        "from_x_field",
+        "from_y_field",
+        "to_x_field",
+        "to_y_field"
+      ]
+    },
+    "skill": "run-radial-flows",
+    "pre_execution": "**Uploaded files**: Extract paths from uploaded files first. Only ask for genuinely missing inputs.\n\n**Required parameters**:\n- input_csv: path to the input CSV file where each row represents one flow (origin-destination pair)\n- from_x_field: column name for the X coordinate (longitude) of the flow origin\n- from_y_field: column name for the Y coordinate (latitude) of the flow origin\n- to_x_field: column name for the X coordinate (longitude) of the flow destination\n- to_y_field: column name for the Y coordinate (latitude) of the flow destination\n\n**Optional parameters**:\n- crs: coordinate reference system of the input coordinates (default: 'EPSG:4326' for WGS84 lat/lon)\n\n**Key notes**:\n- Each row in input_csv becomes one straight-line flow arc from origin to destination\n- Additional columns in input_csv (e.g., flow magnitude, commodity type) are preserved in the output GeoJSON/SHP as attributes\n- Trigger words: radial flows, flow lines, OD matrix, origin-destination, flow mapping, movement lines, telecoupling flows\n\n---"
+  },
+  {
+    "name": "run_commodity_trade",
+    "description": "Map bilateral commodity trade flows between countries as GeoJSON flow lines. Use when user asks about commodity trade, bilateral trade, trade flows, import/export mapping.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "trade_csv": {
+          "type": "string",
+          "description": "CSV with trade data (country pairs and values)"
+        },
+        "from_country_field": {
+          "type": "string",
+          "description": "Column name for exporting country (ISO3 code recommended)"
+        },
+        "to_country_field": {
+          "type": "string",
+          "description": "Column name for importing country (ISO3 code recommended)"
+        },
+        "value_field": {
+          "type": "string",
+          "description": "Column name for trade value"
+        },
+        "year_field": {
+          "type": "string",
+          "description": "Optional column name for year"
+        },
+        "year": {
+          "type": "string",
+          "description": "Optional year to filter (e.g. '2020')"
+        },
+        "top_n_partners": {
+          "type": "integer",
+          "description": "Optional: keep only top N trade flows by value"
+        },
+        "centroids_csv": {
+          "type": "string",
+          "description": "Optional CSV with country centroids (columns: iso3, lon, lat)"
+        }
+      },
+      "required": [
+        "trade_csv",
+        "from_country_field",
+        "to_country_field",
+        "value_field"
+      ]
+    },
+    "skill": "run-commodity-trade",
+    "pre_execution": "**Uploaded files**: Extract paths from uploaded files first. Only ask for genuinely missing inputs.\n\n**Required parameters**:\n- trade_csv: path to the CSV file containing bilateral trade flow records\n- from_country_field: column name in trade_csv identifying the exporting/origin country (ISO3 or full name)\n- to_country_field: column name in trade_csv identifying the importing/destination country (ISO3 or full name)\n- value_field: column name in trade_csv holding the trade value (e.g., USD, tonnes)\n\n**Optional parameters**:\n- year_field: column name in trade_csv holding the year of each trade record (used for filtering)\n- year: specific year to filter trade data (e.g., 2020); if omitted, all years are included\n- top_n_partners: if specified, retains only the top N trading partners by total value per country\n- centroids_csv: path to a custom CSV providing geographic centroids for countries or units not in the built-in list; must contain columns: country (or name), lon, lat\n\n**Key notes**:\n- The tool uses built-in ISO3 country centroids for common countries; no centroids_csv is needed for standard country-level trade data\n- Provide centroids_csv only when using non-standard country names, territories, or sub-national units\n- Trigger words: commodity trade, bilateral trade, trade flows, import export mapping, trade network, trade partners\n\n---"
+  },
+  {
+    "name": "run_add_agents_interactively",
+    "description": "Create a point feature layer for telecoupling agents from a CSV with Name, X (lon), Y (lat) columns. Use when user asks about adding agents, telecoupling agents, or placing agent points on a map.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "input_csv": {
+          "type": "string",
+          "description": "CSV with agent data including X and Y coordinates"
+        },
+        "x_field": {
+          "type": "string",
+          "description": "Column name for longitude/X"
+        },
+        "y_field": {
+          "type": "string",
+          "description": "Column name for latitude/Y"
+        },
+        "name_field": {
+          "type": "string",
+          "description": "Column name for agent name, default 'Name'"
+        },
+        "text_field": {
+          "type": "string",
+          "description": "Optional column name for additional text/description"
+        },
+        "crs": {
+          "type": "string",
+          "description": "CRS, default 'EPSG:4326'"
+        }
+      },
+      "required": [
+        "input_csv",
+        "x_field",
+        "y_field"
+      ]
+    },
+    "skill": "run-add-agents",
+    "pre_execution": "**Uploaded files**: Extract paths from uploaded files first. Only ask for genuinely missing inputs.\n\n**Required parameters**:\n- input_csv: path to the CSV file containing agent location data\n- x_field: column name for the X coordinate (longitude) of each agent\n- y_field: column name for the Y coordinate (latitude) of each agent\n\n**Optional parameters**:\n- name_field: column name for agent names or labels displayed on the map (default: 'Name')\n- text_field: column name for additional descriptive text or notes associated with each agent (optional; omitted if not provided)\n- crs: coordinate reference system of the input coordinates (default: 'EPSG:4326' for WGS84 lat/lon)\n\n**Key notes**:\n- Agents in the telecoupling framework are the people, organizations, or entities involved in telecoupling interactions (e.g., farmers, government agencies, corporations, NGOs)\n- Each row in input_csv becomes one agent point feature\n- Trigger words: add agents, telecoupling agents, agent points, sending system agents, stakeholders, actors\n\n---"
+  },
+  {
+    "name": "run_draw_agents_from_table",
+    "description": "Upload a pre-collected agent coordinate table (CSV) and render as point features. Use when user asks about drawing agents from a table, uploading agent coordinates, or batch agent mapping.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "input_csv": {
+          "type": "string",
+          "description": "CSV with agent coordinates"
+        },
+        "x_field": {
+          "type": "string",
+          "description": "Column name for longitude/X"
+        },
+        "y_field": {
+          "type": "string",
+          "description": "Column name for latitude/Y"
+        },
+        "name_field": {
+          "type": "string",
+          "description": "Optional column name for agent name"
+        },
+        "crs": {
+          "type": "string",
+          "description": "CRS, default 'EPSG:4326'"
+        }
+      },
+      "required": [
+        "input_csv",
+        "x_field",
+        "y_field"
+      ]
+    },
+    "skill": "run-draw-agents-table",
+    "pre_execution": "**Uploaded files**: Extract paths from uploaded files first. Only ask for genuinely missing inputs.\n\n**Required parameters**:\n- input_csv: path to the CSV file containing agent location data with coordinates already specified\n- x_field: column name for the X coordinate (longitude) of each agent\n- y_field: column name for the Y coordinate (latitude) of each agent\n\n**Optional parameters**:\n- name_field: column name for agent names or labels (optional; features will be unlabeled if not provided)\n- crs: coordinate reference system of the input coordinates (default: 'EPSG:4326' for WGS84 lat/lon)\n\n**Key notes**:\n- This tool is the batch/table-driven counterpart to run_add_agents_interactively; it is used when the user has a ready-made table of agent coordinates rather than entering them interactively\n- Trigger words: draw agents from table, upload agent coordinates, batch agent mapping, agent CSV, agents from spreadsheet\n\n---"
+  },
+  {
+    "name": "run_add_causes_interactively",
+    "description": "Create point features for telecoupling causes (drivers/pressures) from a CSV with coordinates and description. Use when user asks about adding causes, telecoupling drivers, or cause points.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "input_csv": {
+          "type": "string",
+          "description": "CSV with cause data and coordinates"
+        },
+        "x_field": {
+          "type": "string",
+          "description": "Column name for longitude/X"
+        },
+        "y_field": {
+          "type": "string",
+          "description": "Column name for latitude/Y"
+        },
+        "description_field": {
+          "type": "string",
+          "description": "Column name for cause description, default 'DESCRIPTION'"
+        },
+        "crs": {
+          "type": "string",
+          "description": "CRS, default 'EPSG:4326'"
+        }
+      },
+      "required": [
+        "input_csv",
+        "x_field",
+        "y_field"
+      ]
+    },
+    "skill": "run-add-causes",
+    "pre_execution": "**Uploaded files**: Extract paths from uploaded files first. Only ask for genuinely missing inputs.\n\n**Required parameters**:\n- input_csv: path to the CSV file containing cause location and description data\n- x_field: column name for the X coordinate (longitude) of each cause location\n- y_field: column name for the Y coordinate (latitude) of each cause location\n\n**Optional parameters**:\n- description_field: column name for a textual description of the cause or driver (default: 'DESCRIPTION')\n- crs: coordinate reference system of the input coordinates (default: 'EPSG:4326' for WGS84 lat/lon)\n\n**Key notes**:\n- Causes in the telecoupling framework are the drivers or pressures that initiate or sustain telecoupling interactions (e.g., population growth, trade policies, climate change, demand for resources)\n- Each row in input_csv becomes one cause point feature on the map\n- Trigger words: add causes, telecoupling causes, drivers, pressures, cause points, telecoupling drivers, forcing factors\n\n---"
+  },
+  {
+    "name": "run_add_systems_interactively",
+    "description": "Create point features for telecoupling systems (sending/receiving/spillover) from a CSV with Name and coordinates. Use when user asks about adding systems, telecoupling systems, or system points.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "input_csv": {
+          "type": "string",
+          "description": "CSV with system data and coordinates"
+        },
+        "x_field": {
+          "type": "string",
+          "description": "Column name for longitude/X"
+        },
+        "y_field": {
+          "type": "string",
+          "description": "Column name for latitude/Y"
+        },
+        "name_field": {
+          "type": "string",
+          "description": "Column name for system name, default 'Name'"
+        },
+        "crs": {
+          "type": "string",
+          "description": "CRS, default 'EPSG:4326'"
+        }
+      },
+      "required": [
+        "input_csv",
+        "x_field",
+        "y_field"
+      ]
+    },
+    "skill": "run-add-systems",
+    "pre_execution": "**Uploaded files**: Extract paths from uploaded files first. Only ask for genuinely missing inputs.\n\n**Required parameters**:\n- input_csv: path to the CSV file containing system location data\n- x_field: column name for the X coordinate (longitude) of each system's representative point\n- y_field: column name for the Y coordinate (latitude) of each system's representative point\n\n**Optional parameters**:\n- name_field: column name for system names or labels (e.g., \"Sending System\", \"Receiving System\") (default: 'Name')\n- crs: coordinate reference system of the input coordinates (default: 'EPSG:4326' for WGS84 lat/lon)\n\n**Key notes**:\n- Systems in the telecoupling framework are the coupled human-nature systems involved in telecoupling: sending systems (where flows originate), receiving systems (where flows arrive), and spillover systems (indirectly affected)\n- Each row in input_csv becomes one system point feature\n- Trigger words: add systems, telecoupling systems, sending system, receiving system, spillover system, coupled systems\n\n---"
+  },
+  {
+    "name": "run_draw_systems_from_table",
+    "description": "Upload a systems coordinate table (CSV) and render as point features. Use when user asks about drawing systems from a table, uploading system coordinates, or batch system mapping.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "input_csv": {
+          "type": "string",
+          "description": "CSV with system coordinates"
+        },
+        "x_field": {
+          "type": "string",
+          "description": "Column name for longitude/X"
+        },
+        "y_field": {
+          "type": "string",
+          "description": "Column name for latitude/Y"
+        },
+        "crs": {
+          "type": "string",
+          "description": "CRS, default 'EPSG:4326'"
+        }
+      },
+      "required": [
+        "input_csv",
+        "x_field",
+        "y_field"
+      ]
+    },
+    "skill": "run-draw-systems-table",
+    "pre_execution": "**Uploaded files**: Extract paths from uploaded files first. Only ask for genuinely missing inputs.\n\n**Required parameters**:\n- input_csv: path to the CSV file containing system location data with coordinates already specified\n- x_field: column name for the X coordinate (longitude) of each system\n- y_field: column name for the Y coordinate (latitude) of each system\n\n**Optional parameters**:\n- crs: coordinate reference system of the input coordinates (default: 'EPSG:4326' for WGS84 lat/lon)\n\n**Key notes**:\n- This tool is the batch/table-driven counterpart to run_add_systems_interactively; it is used when the user has a ready-made table of system coordinates\n- Any additional columns in input_csv beyond x_field and y_field are preserved as attributes in the output GeoJSON/SHP\n- Trigger words: draw systems from table, upload system coordinates, batch system mapping, systems from spreadsheet, systems CSV\n\n---"
+  },
+  {
+    "name": "run_add_media_flows",
+    "description": "Parse an HTML file for country mentions and generate flow lines from a source point to each mentioned country. Use when user asks about media flows, information flows, country mentions in media, or media analysis.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "html_file": {
+          "type": "string",
+          "description": "Path to HTML file to parse for country mentions"
+        },
+        "source_lon": {
+          "type": "number",
+          "description": "Longitude of the source location (media outlet)"
+        },
+        "source_lat": {
+          "type": "number",
+          "description": "Latitude of the source location"
+        },
+        "country_reference_csv": {
+          "type": "string",
+          "description": "CSV with country names and centroids (columns: country/name, lon, lat)"
+        },
+        "source_name": {
+          "type": "string",
+          "description": "Name of the source (e.g. media outlet name), default 'Source'"
+        },
+        "min_mentions": {
+          "type": "integer",
+          "description": "Minimum mention count to include a country, default 1"
+        },
+        "crs": {
+          "type": "string",
+          "description": "CRS, default 'EPSG:4326'"
+        }
+      },
+      "required": [
+        "html_file",
+        "source_lon",
+        "source_lat",
+        "country_reference_csv"
+      ]
+    },
+    "skill": "run-add-media-flows",
+    "pre_execution": "**Uploaded files**: Extract paths from uploaded files first. Only ask for genuinely missing inputs.\n\n**Required parameters**:\n- html_file: path to an HTML file (e.g., a scraped news article or media report) to be parsed for country mentions\n- source_lon: longitude of the media source location (the publication or broadcaster's geographic origin)\n- source_lat: latitude of the media source location\n- country_reference_csv: path to a CSV file mapping country names to geographic centroids; must contain columns: country (or name), lon, lat\n\n**Optional parameters**:\n- source_name: display name label for the media source point on the map (default: 'Source')\n- min_mentions: minimum number of times a country must be mentioned in the HTML to be included as a flow (default: 1)\n- crs: coordinate reference system for all coordinates (default: 'EPSG:4326' for WGS84 lat/lon)\n\n**Key notes**:\n- The tool parses the HTML file for country name mentions and counts frequency\n- Each country mentioned at least min_mentions times becomes a flow line from the source to that country's centroid\n- country_reference_csv must be provided — it maps country names found in the article to lat/lon coordinates\n- Trigger words: media flows, information flows, media analysis, country mentions, news flows, media coverage, information telecoupling\n\n---"
+  },
+  {
+    "name": "run_food_security",
+    "description": "Analyze FAO food security indicators for selected countries and generate trend charts. Use when user asks about food security, FAO indicators, undernourishment, food availability, or food access analysis.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "fao_csv": {
+          "type": "string",
+          "description": "Path to FAO food security CSV data"
+        },
+        "countries": {
+          "type": "string",
+          "description": "Comma-separated list of country names to analyze"
+        },
+        "indicator_field": {
+          "type": "string",
+          "description": "Indicator name or column name to analyze (e.g. 'Prevalence of undernourishment')"
+        },
+        "country_field": {
+          "type": "string",
+          "description": "Column name for country, default 'Area'"
+        },
+        "year_field": {
+          "type": "string",
+          "description": "Column name for year, default 'Year'"
+        },
+        "value_field": {
+          "type": "string",
+          "description": "Column name for indicator value, default 'Value'"
+        },
+        "unit_field": {
+          "type": "string",
+          "description": "Optional column name for unit"
+        }
+      },
+      "required": [
+        "fao_csv",
+        "countries",
+        "indicator_field"
+      ]
+    },
+    "skill": "run-food-security",
+    "pre_execution": "**Uploaded files**: Extract paths from uploaded files first. Only ask for genuinely missing inputs.\n\n**Required parameters**:\n- fao_csv: path to a CSV file downloaded from FAOSTAT or formatted in the same structure (long format with country, year, and indicator value columns)\n- countries: list of country names to include in the analysis (comma-separated); must match values in the country_field column\n- indicator_field: the specific FAO indicator to analyze (e.g., \"Prevalence of undernourishment\", \"Average dietary energy supply adequacy\")\n\n**Optional parameters**:\n- country_field: column name in fao_csv that holds country/area names (default: 'Area')\n- year_field: column name in fao_csv that holds the year (default: 'Year')\n- value_field: column name in fao_csv that holds the indicator values (default: 'Value')\n- unit_field: column name in fao_csv that holds the measurement unit (optional; used for axis labeling in charts)\n\n**Key notes**:\n- The tool filters fao_csv to the specified countries and indicator_field, then produces trend charts and a comparison chart\n- Trigger words: food security, FAO indicators, undernourishment, food availability, food access, FAOSTAT, dietary energy, food insecurity\n\n---"
+  },
+  {
+    "name": "run_nutrition_metrics",
+    "description": "Calculate Lower Limit Energy Requirements (LLER) by age group and sex using FAO nutritional formulas. Use when user asks about nutrition metrics, LLER, energy requirements, caloric needs, or nutrition by age group.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "population_csv": {
+          "type": "string",
+          "description": "CSV with population data by age group and sex"
+        },
+        "age_group_field": {
+          "type": "string",
+          "description": "Column name for age group (e.g. '18-30'), default 'age_group'"
+        },
+        "sex_field": {
+          "type": "string",
+          "description": "Column name for sex ('male'/'female'), default 'sex'"
+        },
+        "population_count_field": {
+          "type": "string",
+          "description": "Column name for population count, default 'population'"
+        },
+        "weight_kg_field": {
+          "type": "string",
+          "description": "Optional column name for body weight in kg (uses FAO defaults if not provided)"
+        },
+        "male_height_cm": {
+          "type": "number",
+          "description": "Reference male height in cm, default 170"
+        },
+        "female_height_cm": {
+          "type": "number",
+          "description": "Reference female height in cm, default 158"
+        }
+      },
+      "required": [
+        "population_csv"
+      ]
+    },
+    "skill": "run-nutrition-metrics",
+    "pre_execution": "**Uploaded files**: Extract paths from uploaded files first. Only ask for genuinely missing inputs.\n\n**Required parameters**:\n- population_csv: path to a CSV file where each row represents an age-sex demographic group with population count\n\n**Optional parameters**:\n- age_group_field: column name in population_csv holding the age group label (default: 'age_group')\n  - Accepted values: '0-3', '3-10', '10-18', '18-30', '30-60', '60+'\n- sex_field: column name in population_csv holding the sex label (default: 'sex')\n  - Accepted values: 'male', 'female'\n- population_count_field: column name in population_csv holding the count of individuals in each group (default: 'population')\n- weight_kg_field: column name in population_csv holding the mean body weight in kg for each group (optional; uses built-in age-sex defaults if not provided)\n- male_height_cm: default reference height in cm used for male groups when height is not in the CSV (default: 170)\n- female_height_cm: default reference height in cm used for female groups when height is not in the CSV (default: 158)\n\n**Key notes**:\n- The tool computes per-group and population-weighted LLER (kcal/person/day) and total energy requirements\n- Built-in energy requirement coefficients are applied per age-sex group following standard nutritional reference values\n- Trigger words: nutrition metrics, LLER, energy requirements, caloric needs, nutrition by age, dietary energy demand, population nutrition\n\n---"
+  },
+  {
+    "name": "read_file_content",
+    "description": "Read and return the content of an output file (CSV or TXT) so you can analyze, summarize, or answer questions about it. Use this whenever the user asks to summarize, analyze, explain, or ask questions about a specific output file (e.g. a network_stats CSV, a result_table CSV). Pass the full absolute internal_path of the file.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "file_path": {
+          "type": "string",
+          "description": "Absolute path to the file to read (use internal_path from previous tool results)."
+        }
+      },
+      "required": [
+        "file_path"
+      ]
+    },
+    "skill": null,
+    "pre_execution": ""
+  },
+  {
+    "name": "render_spatial_file",
+    "description": "Render an existing output spatial file to a PNG image using QGIS. ONLY call this tool when the user explicitly requests to visualize, render, or display a specific output file that was already produced by a previous tool run. Do NOT call this when the user is asking to run a model or upload input files — only call it after a tool has already produced output .tif or .shp files and the user specifically asks to see one of those outputs as an image. The file_path must be an absolute path to an existing file on disk.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "file_path": {
+          "type": "string",
+          "description": "Absolute path to the spatial file (.tif, .tiff, .shp, .geojson, or .gpkg) to render."
+        }
+      },
+      "required": [
+        "file_path"
+      ]
+    },
+    "skill": null,
+    "pre_execution": ""
+  },
+  {
+    "name": "run_recreation_tourism",
+    "description": "Run InVEST Visitation: Recreation and Tourism (recmodel_client) to estimate photo-user-days (PUD/TUD) for an area of interest, optionally with regression against local predictors. NOTE: requires NatCap's external recreation server, which may be unavailable in this environment.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "aoi_path": {
+          "type": "string",
+          "description": "Area of interest polygon shapefile path"
+        },
+        "start_year": {
+          "type": "integer",
+          "description": "Start year (2005-2017)"
+        },
+        "end_year": {
+          "type": "integer",
+          "description": "End year (2005-2017)"
+        },
+        "grid_aoi": {
+          "type": "boolean",
+          "description": "Whether to grid the AOI, default false"
+        },
+        "grid_type": {
+          "type": "string",
+          "description": "Grid cell shape: 'square' or 'hexagon'"
+        },
+        "cell_size": {
+          "type": "number",
+          "description": "Grid cell size in AOI units"
+        },
+        "compute_regression": {
+          "type": "boolean",
+          "description": "Run regression against predictors, default false"
+        },
+        "predictor_table_path": {
+          "type": "string",
+          "description": "CSV of predictor variables"
+        },
+        "scenario_predictor_table_path": {
+          "type": "string",
+          "description": "CSV of scenario predictor variables"
+        }
+      },
+      "required": [
+        "aoi_path",
+        "start_year",
+        "end_year"
+      ]
+    },
+    "skill": "run-recreation-tourism",
+    "pre_execution": "**Use this tool when the user asks about**:\n- Recreation or tourism value of natural areas\n- Which parts of a landscape attract the most outdoor visitors\n- What environmental features (forests, beaches, trails) drive recreational visits\n- How habitat loss or land-use change would affect tourism and recreation\n- Photo-user-days (PUD) or proxy visitation mapping\n\n**Important note to user**: This tool connects to NatCap's remote server to fetch\nhistorical Flickr/Twitter photo location data (2005–2017). It requires internet\naccess from the server. Results may take several minutes for large study areas.\n\n**Required parameters**:\n- aoi_path: polygon shapefile of the study area — must be in a projected coordinate system (not WGS84 lat/lon); the AOI defines where the model counts photo-user-days\n- start_year: start of analysis period (integer, 2005–2017)\n- end_year: end of analysis period (integer, 2005–2017, must be ≥ start_year); for best results use 2012–2017 (highest Flickr coverage)\n\n**Optional parameters**:\n- grid_aoi: set True to subdivide the AOI into a regular grid of cells — strongly recommended for polygon AOIs covering large areas; without gridding, results are aggregated per polygon feature\n  - grid_type: 'hexagon' (recommended, avoids edge artifacts) or 'square'\n  - cell_size: size of each grid cell in AOI projection units (e.g. meters if UTM); start large (10,000–50,000 m) to check data density, then refine\n- compute_regression: set True to run a linear regression explaining visitation using local environmental predictor variables; requires:\n  - predictor_table_path: CSV with columns id, path, type — maps predictor names to spatial files (vectors or rasters) and their metric type (point_count, raster_mean, polygon_percent_coverage, etc.)\n- scenario_predictor_table_path: same format as predictor_table_path but for a future/alternative scenario — model predicts how visitation would change\n\n**Cell size guidance**:\n- Too small → most cells have zero photos → regression is unreliable\n- Start at 10–50 km for national/regional scale\n- Go down to 1–5 km only for local studies with dense photo coverage\n\n---"
+  }
+]
