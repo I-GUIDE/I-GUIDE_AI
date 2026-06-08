@@ -401,6 +401,10 @@
               <input id="verbose" type="checkbox">
               Verbose
             </label>
+            <label class="checkbox">
+              <input id="agent_dev" type="checkbox">
+              Agent Dev (detailed trace)
+            </label>
           </div>
 
           <div class="actions">
@@ -683,7 +687,8 @@
         smart_tool_routing: document.getElementById("smart_tool_routing").checked,
         forced_intent: document.getElementById("forced_intent").value || null,
         file_ids: Array.from(attachedFiles.keys()),
-        verbose: document.getElementById("verbose").checked
+        verbose: document.getElementById("verbose").checked,
+        agent_dev: document.getElementById("agent_dev").checked
       };
     }
 

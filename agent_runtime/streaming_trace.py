@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -23,12 +24,51 @@ logger = logging.getLogger(__name__)
 TraceSink = Callable[[Dict[str, Any]], None]
 
 
+# ---------------------------------------------------------------------------
+# AGENT_DEV verbosity gate
+# ---------------------------------------------------------------------------
+# When AGENT_DEV is off (default) the stream only carries coarse execution-state
+# *status* events suitable as user-facing references.  When on, detailed
+# input/output events (tool args, tool results, LLM interactions, routing
+# decisions) are also surfaced for debugging.
+
+_STATUS_TIER_EVENTS = frozenset(
+    {
+        "status",
+        "subagent_started",
+        "subagent_completed",
+        "node_started",
+        "node_completed",
+        "search_complete",
+        "final_answer",
+        "completed",
+        "error",
+    }
+)
+
+
+def is_agent_dev() -> bool:
+    """Return True when detailed agent I/O should be surfaced via SSE.
+
+    Controlled by the ``AGENT_DEV`` environment variable (truthy: 1/true/yes/on).
+    """
+    return (os.getenv("AGENT_DEV") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def is_status_tier_event(event: str) -> bool:
+    """Whether *event* is a coarse status event that is always emitted."""
+    return event in _STATUS_TIER_EVENTS
+
+
 @dataclass
 class _TraceState:
     sink: TraceSink
     handler: Any
     agent_role: str
     sequence: int = 0
+    # Per-request override for detail-tier verbosity. None -> fall back to the
+    # AGENT_DEV env var; True/False -> force on/off for this stream.
+    agent_dev: Optional[bool] = None
 
 
 _TRACE_STATE: ContextVar[Optional[_TraceState]] = ContextVar("agent_stream_trace_state", default=None)
@@ -114,6 +154,11 @@ def _emit_with_state(
     node: Optional[str] = None,
 ) -> None:
     if state is None:
+        return
+    # Detail-tier events are suppressed unless dev mode is enabled. The
+    # per-request flag on the trace state wins; otherwise fall back to AGENT_DEV.
+    dev_enabled = state.agent_dev if state.agent_dev is not None else is_agent_dev()
+    if not is_status_tier_event(event) and not dev_enabled:
         return
 
     payload: Dict[str, Any] = dict(data or {})
@@ -313,10 +358,19 @@ def attach_streaming_callbacks(config: Optional[Dict[str, Any]]) -> Dict[str, An
 
 
 @contextmanager
-def trace_context(sink: TraceSink, *, agent_role: str = "orchestrator_agent") -> Iterator[None]:
-    """Enable streamed trace emission for the current thread/context."""
+def trace_context(
+    sink: TraceSink,
+    *,
+    agent_role: str = "orchestrator_agent",
+    agent_dev: Optional[bool] = None,
+) -> Iterator[None]:
+    """Enable streamed trace emission for the current thread/context.
+
+    ``agent_dev`` overrides detail-tier verbosity for this stream (None falls
+    back to the ``AGENT_DEV`` env var).
+    """
     handler = StreamingTraceCallbackHandler()
-    state = _TraceState(sink=sink, handler=handler, agent_role=agent_role)
+    state = _TraceState(sink=sink, handler=handler, agent_role=agent_role, agent_dev=agent_dev)
     handler._state = state
     state_token = _TRACE_STATE.set(state)
     agent_token = _TRACE_AGENT.set(agent_role)
@@ -341,6 +395,8 @@ __all__ = [
     "attach_streaming_callbacks",
     "current_agent_role",
     "emit_trace_event",
+    "is_agent_dev",
+    "is_status_tier_event",
     "trace_agent",
     "trace_context",
 ]

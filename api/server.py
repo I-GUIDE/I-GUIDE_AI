@@ -86,6 +86,10 @@ def _normalize_agent_chat_request(data: dict) -> dict:
     file_ids = _coalesce(data.get("fileIds"), data.get("file_ids"))
     skill_roots = _coalesce(data.get("skillPaths"), data.get("skill_paths"), data.get("skillRoots"), data.get("skill_roots"))
     verbose = bool(_coalesce(data.get("verbose"), False))
+    # agent_dev is tri-state: present (True/False) overrides per request, absent
+    # (None) falls back to the AGENT_DEV env var in the streaming layer.
+    agent_dev_raw = _coalesce(data.get("agentDev"), data.get("agent_dev"))
+    agent_dev = None if agent_dev_raw is None else bool(agent_dev_raw)
 
     return {
         "user_query": str(user_query).strip() if user_query is not None else "",
@@ -104,6 +108,7 @@ def _normalize_agent_chat_request(data: dict) -> dict:
         "file_ids": file_ids,
         "skill_roots": skill_roots,
         "verbose": verbose,
+        "agent_dev": agent_dev,
     }
 
 
@@ -1603,6 +1608,7 @@ def agent_chat_stream():
                     file_ids=normalized.get("file_ids"),
                     skill_roots=normalized.get("skill_roots"),
                     verbose=bool(normalized.get("verbose", False)),
+                    agent_dev=normalized.get("agent_dev"),
                 ):
                     event_name = str(item.get("event") or "message")
                     payload = item.get("data") or {}

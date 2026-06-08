@@ -35,7 +35,7 @@ from agent_runtime.runtime_utils import (
     extract_search_artifacts,
 )
 from agent_runtime.skills import SkillRegistry
-from agent_runtime.streaming_trace import trace_context
+from agent_runtime.streaming_trace import is_agent_dev, trace_context
 
 
 # ---------------------------------------------------------------------------
@@ -131,9 +131,16 @@ def stream_agent_query_events(
     thread_id: Optional[str] = None,
     checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
     skill_roots: Optional[List[str]] = None,
+    agent_dev: Optional[bool] = None,
 ) -> Generator[Dict[str, Any], None, None]:
-    """Yield structured SSE events while running a query."""
+    """Yield structured SSE events while running a query.
+
+    ``agent_dev`` controls whether detail-tier events (tool I/O, LLM
+    interactions, routing detail) are streamed in addition to the always-on
+    execution-state status events.  None falls back to the ``AGENT_DEV`` env var.
+    """
     effective_thread_id = resolve_thread_id(thread_id, checkpointer)
+    dev_enabled = agent_dev if agent_dev is not None else is_agent_dev()
     yield {
         "event": "status",
         "data": {
@@ -180,7 +187,7 @@ def stream_agent_query_events(
 
     def _worker() -> None:
         try:
-            with trace_context(_enqueue, agent_role="orchestrator_agent"):
+            with trace_context(_enqueue, agent_role="orchestrator_agent", agent_dev=agent_dev):
                 orchestrator = build_orchestrator_agent_executor(
                     llm=llm,
                     verbose=verbose,
@@ -202,35 +209,39 @@ def stream_agent_query_events(
                     available_agent_names=available_agent_names,
                     orchestration_result=orchestration_result if isinstance(orchestration_result, dict) else {},
                 )
-                _enqueue({"event": "route_trace", "data": route_trace})
-                _enqueue(
-                    {
-                        "event": "decision",
-                        "data": {
-                            "kind": "agent_route_decision",
-                            "agent": "orchestrator_agent",
-                            "query": query,
-                            "route": route_trace.get("route"),
-                            "called_tools": route_trace.get("called_tools") or [],
-                            "analysis_called_tools": route_trace.get("analysis_called_tools") or [],
-                            "selected_skills": route_trace.get("selected_skills") or [],
-                            "chat_history_available": route_trace.get("chat_history_available"),
-                            "route_trace": route_trace,
-                        },
-                    }
-                )
-                for interaction in build_llm_interaction_trace(
-                    orchestration_result if isinstance(orchestration_result, dict) else {},
-                    agent_name="orchestrator_agent",
-                ):
-                    interaction.setdefault("replay", True)
-                    _enqueue({"event": "llm_interaction", "data": interaction})
-                for tool_call in artifacts.get("tool_calls") or []:
-                    tool_call.setdefault("replay", True)
-                    _enqueue({"event": "tool_call", "data": tool_call})
-                for tool_result in artifacts.get("tool_results") or []:
-                    tool_result.setdefault("replay", True)
-                    _enqueue({"event": "tool_result", "data": tool_result})
+                # Detail-tier replay events (routing decision, LLM interactions,
+                # tool I/O) are only streamed when dev mode is enabled. Status,
+                # search_complete, final_answer and completed are always emitted.
+                if dev_enabled:
+                    _enqueue({"event": "route_trace", "data": route_trace})
+                    _enqueue(
+                        {
+                            "event": "decision",
+                            "data": {
+                                "kind": "agent_route_decision",
+                                "agent": "orchestrator_agent",
+                                "query": query,
+                                "route": route_trace.get("route"),
+                                "called_tools": route_trace.get("called_tools") or [],
+                                "analysis_called_tools": route_trace.get("analysis_called_tools") or [],
+                                "selected_skills": route_trace.get("selected_skills") or [],
+                                "chat_history_available": route_trace.get("chat_history_available"),
+                                "route_trace": route_trace,
+                            },
+                        }
+                    )
+                    for interaction in build_llm_interaction_trace(
+                        orchestration_result if isinstance(orchestration_result, dict) else {},
+                        agent_name="orchestrator_agent",
+                    ):
+                        interaction.setdefault("replay", True)
+                        _enqueue({"event": "llm_interaction", "data": interaction})
+                    for tool_call in artifacts.get("tool_calls") or []:
+                        tool_call.setdefault("replay", True)
+                        _enqueue({"event": "tool_call", "data": tool_call})
+                    for tool_result in artifacts.get("tool_results") or []:
+                        tool_result.setdefault("replay", True)
+                        _enqueue({"event": "tool_result", "data": tool_result})
                 if "search_agent_evidence" in route_trace.get("called_tools", []):
                     _enqueue(
                         {

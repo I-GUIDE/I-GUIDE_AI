@@ -42,15 +42,25 @@ User query
 ## Project Structure
 
 ```
-agent_runtime/                   Multi-agent orchestration
+agent_runtime/                   Multi-agent orchestration (canonical home for all agent code)
+  graph_runtime.py               Public API: run_agent_query(), stream_agent_query_events(), run_code_agent_query()
+  graph_nodes.py                 Tool factories that expose sub-agents (search/analysis/code/direct) as tools
   graph_state.py                 Type definitions, tool-name constants
-  skills.py                      Filesystem-backed SKILL.md skill discovery/loading
-  intent_classifier.py           Query intent classification (analysis/code/discovery/hybrid)
+  executor_factory.py            Agent prompts, LLM config, executor builders (full_pipeline + granular strategies)
+  intent_classifier.py           Query intent classification (analysis/code/discovery/hybrid) + tool routing
   tool_policy.py                 Tool filtering by intent
-  executor_factory.py            Agent prompts, LLM config, executor builders
-  graph_nodes.py                 Tool factories for the orchestrator agent
-  graph_runtime.py               Public API: run_agent_query(), stream_agent_query_events()
+  skills.py                      Filesystem-backed SKILL.md skill discovery/loading
+  agent_chat_service.py          Chat session management
+  file_store.py                  File upload/download storage
+  langchain_tool.py              RAG pipeline as a LangChain StructuredTool
+  langchain_granular_tools.py    Individual search backends as LangChain tools
+  langchain_mcp_tools.py         MCP server bridge into LangChain
+  langchain_file_tools.py        File I/O tools for agents
+  langchain_agent_executor.py    AgentExecutor wiring helpers
   runtime_utils.py               Response parsing, trace building
+  streaming_trace.py             SSE event streaming for /agent/chat/stream
+  trace_analyzer.py              Trace post-processing / analysis
+  trace_store.py                 Trace persistence
 
 api/                             Flask REST API layer
   server.py                      All HTTP routes (/query, /agent/chat, /agent/files/*) (port 5002)
@@ -66,12 +76,15 @@ rag_pipeline/                    RAG engine
   router_llm.py                  LLM-based search method selection
   memory_module.py               Chat history, follow-up detection, query augmentation
   llm_utils.py                   LLM client wrapper (OpenAI-compatible)
-  agent_chat_service.py          Chat session management
-  agent_file_store.py            File upload/download storage
-  langchain_tool.py              RAG pipeline as a LangChain StructuredTool
-  langchain_granular_tools.py    Individual search backends as LangChain tools
-  langchain_mcp_tools.py         MCP server bridge into LangChain
-  langchain_file_tools.py        File I/O tools for agents
+  qgis_headless_tools.py         Headless QGIS Processing / metric-buffer tools
+  qgis_pyqgis_worker.py          Standalone PyQGIS subprocess worker (layer summary, map render)
+  agent_chat_service.py          Compat shim -> agent_runtime.agent_chat_service
+  agent_file_store.py            Compat shim -> agent_runtime.file_store
+  langchain_tool.py              Compat shim -> agent_runtime.langchain_tool
+  langchain_granular_tools.py    Compat shim -> agent_runtime.langchain_granular_tools
+  langchain_mcp_tools.py         Compat shim -> agent_runtime.langchain_mcp_tools
+  langchain_file_tools.py        Compat shim -> agent_runtime.langchain_file_tools
+  langchain_agent_executor.py    Compat shim -> agent_runtime.langchain_agent_executor
   search/                        Search backends
     core.py                      Search orchestrator (runs all backends)
     keyword.py                   OpenSearch BM25 keyword search
@@ -106,6 +119,12 @@ metadata-extraction-server/      Metadata extraction
   extract_metadata.py            Spatial metadata extraction
   extract_metadata_code_notebooks.py  Code/notebook metadata extraction
 ```
+
+> **Note:** All agent code now lives in `agent_runtime/`. The agent-related
+> modules under `rag_pipeline/` (`agent_chat_service.py`, `agent_file_store.py`,
+> `langchain_*.py`) are thin backward-compatibility shims that re-export from
+> `agent_runtime/` so existing `rag_pipeline.*` import paths keep working. Import
+> from `agent_runtime` directly in new code.
 
 ## Quick Start
 

@@ -1,7 +1,7 @@
 """Agent executor builders and LLM configuration.
 
-Constructs LangChain ``AgentExecutor`` instances for each agent role,
-wires prompt templates, and manages LLM / checkpointer setup.
+Constructs LangGraph agents (via ``langchain.agents.create_agent``) for each
+agent role, wires system prompts, and manages LLM / checkpointer setup.
 """
 
 from __future__ import annotations
@@ -427,7 +427,7 @@ def build_agent_executor(
     session_id: Optional[str] = None,
     skill_roots: Optional[List[str]] = None,
 ) -> Any:
-    """Create a LangChain AgentExecutor wired with the repository's RAG tool."""
+    """Create a LangGraph agent (``create_agent``) wired with the given tools."""
     if preloaded_tools is not None:
         tools = preloaded_tools
     else:
@@ -455,44 +455,27 @@ def build_agent_executor(
         "5. Prefer calling tools over guessing."
     )
 
-    # Legacy API path (older langchain)
+    # LangGraph agent (langchain>=1.0). ``create_agent`` returns a compiled
+    # StateGraph whose invocation accepts ``{"messages": [...]}`` and returns the
+    # same shape — which ``runtime_utils`` already parses. Recursion is bounded by
+    # LangGraph's ``recursion_limit`` (set per invocation via ``agent_config``);
+    # a ``GraphRecursionError`` surfaces as ``AgentInvocationError`` with
+    # diagnostics (see ``invoke_agent_with_payload_fallback``).
     try:
-        from langchain.agents import AgentExecutor, create_tool_calling_agent
-        from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                ("system", system_prompt),
-                MessagesPlaceholder(variable_name="chat_history", optional=True),
-                ("human", "{input}"),
-                MessagesPlaceholder(variable_name="agent_scratchpad"),
-            ]
-        )
-        agent = create_tool_calling_agent(active_llm, tools, prompt)
-        return AgentExecutor(
-            agent=agent,
-            tools=tools,
-            verbose=verbose,
-            return_intermediate_steps=return_intermediate_steps,
-            max_iterations=15,
-            max_execution_time=120,
-        )
-    except Exception:
-        # Current API path (langchain>=1.x)
-        try:
-            from langchain.agents import create_agent
-        except Exception as exc:
-            raise RuntimeError(
-                "Missing compatible LangChain dependencies. Install `langchain`, `langchain-core`, and `langchain-openai`."
-            ) from exc
-        return create_agent(
-            model=active_llm,
-            tools=tools,
-            system_prompt=system_prompt,
-            checkpointer=checkpointer,
-            debug=verbose,
-            name=agent_name,
-        )
+        from langchain.agents import create_agent
+    except Exception as exc:  # pragma: no cover - dependency guard
+        raise RuntimeError(
+            "Missing compatible LangChain dependencies. Install `langchain>=1.0`, "
+            "`langchain-core`, `langgraph`, and `langchain-openai`."
+        ) from exc
+    return create_agent(
+        model=active_llm,
+        tools=tools,
+        system_prompt=system_prompt,
+        checkpointer=checkpointer,
+        debug=verbose,
+        name=agent_name,
+    )
 
 
 def build_search_agent_executor(

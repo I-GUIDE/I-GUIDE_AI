@@ -23,7 +23,7 @@ from agent_runtime.executor_factory import (
     resolve_thread_id,
 )
 from agent_runtime.intent_classifier import (
-    build_route_trace as _build_route_trace_impl,
+    classify_intent,
     chat_history_preview,
     extract_json_object,
     query_has_file_context,
@@ -43,27 +43,38 @@ from agent_runtime.streaming_trace import emit_trace_event, trace_agent
 
 
 # ---------------------------------------------------------------------------
-# Internal helper — wraps build_route_trace with dependency injection
+# Internal helper — keyword-only route trace for the single-route search tool
 # ---------------------------------------------------------------------------
 
-def _build_route_trace(
+def _keyword_search_route_trace(
     query: str,
     available_tool_names: Sequence[str],
-    available_routes: Sequence[Dict[str, Any]],
-    chat_history: Optional[List[Any]] = None,
-    llm: Optional[Any] = None,
     forced_intent: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return _build_route_trace_impl(
-        query,
-        available_tool_names,
-        available_routes,
-        chat_history=chat_history,
-        llm=llm,
-        forced_intent=forced_intent,
-        build_default_llm=build_default_llm,
-        select_allowed_tools=select_allowed_tools,
-    )
+    """Build a route trace for the search sub-agent without an LLM call.
+
+    The search tool exposes exactly one route ("search"), so an LLM router
+    choice is wasted work.  Intent classification + keyword tool filtering is
+    deterministic and sufficient to narrow the allowed tools.
+    """
+    classification = classify_intent(query)
+    allowed = select_allowed_tools(classification["intent"], available_tool_names)
+    return {
+        "query": query,
+        "route": "search",
+        "intent": classification["intent"],
+        "forced_intent": forced_intent,
+        "reason": classification["reason"],
+        "analysis_hits": classification["analysis_hits"],
+        "code_hits": classification["code_hits"],
+        "discovery_hits": classification["discovery_hits"],
+        "available_tools": list(available_tool_names),
+        "available_routes": [
+            {"route": "search", "agent": "search_agent", "tool_names": list(available_tool_names)}
+        ],
+        "allowed_tools": allowed,
+        "router_type": "keyword",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +176,26 @@ def make_search_agent_evidence_tool(
     from langchain_core.tools import StructuredTool
 
     def search_agent_evidence(query: str) -> str:
+        # Dedup against the shared evidence store: if the same query was already
+        # searched anywhere in this request (orchestrator or analysis sub-agent),
+        # reuse its evidence instead of re-invoking the search executor.
+        normalized_query = (query or "").strip().lower()
+        if normalized_query:
+            for prior in search_invocations:
+                prior_query = str(prior.get("query") or "").strip().lower()
+                if prior_query == normalized_query and prior.get("evidence") is not None:
+                    emit_trace_event(
+                        "decision",
+                        {
+                            "kind": "search_cache_hit",
+                            "agent": "search_agent",
+                            "query": query,
+                            "message": "Reused cached SearchAgent evidence",
+                        },
+                        agent_role="search_agent",
+                    )
+                    return json.dumps(prior["evidence"], ensure_ascii=True, default=str)
+
         invocation_index = len(search_invocations) + 1
         nested_thread_id = thread_id
         if nested_thread_id:
@@ -192,12 +223,9 @@ def make_search_agent_evidence_tool(
         allowed_tool_names: Optional[List[str]] = None
         if smart_tool_routing:
             available_names = [getattr(tool, "name", "") for tool in all_tools if getattr(tool, "name", "")]
-            route_trace = _build_route_trace(
+            route_trace = _keyword_search_route_trace(
                 query,
                 available_names,
-                [{"route": "search", "agent": "search_agent", "tool_names": available_names}],
-                chat_history=None,
-                llm=llm,
                 forced_intent=forced_intent,
             )
             emit_trace_event(
@@ -297,15 +325,22 @@ def make_analysis_agent_answer_tool(
     thread_id: Optional[str] = None,
     checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
     skill_roots: Optional[List[str]] = None,
+    search_invocations: Optional[List[Dict[str, Any]]] = None,
 ) -> Any:
-    """Create an ``analysis_agent_answer`` tool that invokes AnalysisAgent."""
+    """Create an ``analysis_agent_answer`` tool that invokes AnalysisAgent.
+
+    ``search_invocations`` is the shared evidence store: pass the same list the
+    orchestrator-level search tool uses so search results are deduplicated and
+    reused across the hierarchy instead of being re-retrieved.
+    """
     from langchain_core.tools import StructuredTool
     from agent_runtime.langchain_mcp_tools import make_langchain_mcp_tools
 
     # Avoid circular import — import sibling at call time
     from agent_runtime.graph_runtime import run_code_agent_query
 
-    search_invocations: List[Dict[str, Any]] = []
+    if search_invocations is None:
+        search_invocations = []
     code_search_invocations: List[Dict[str, Any]] = []
     search_tool = make_search_agent_evidence_tool(
         llm=llm,
@@ -530,6 +565,10 @@ def collect_orchestration_tools(
         tools.extend(make_langchain_qgis_tools(session_id=child_thread_id(thread_id, "orchestrator_qgis")))
     if chat_history:
         tools.append(make_answer_from_memory_tool(llm=llm, chat_history=chat_history))
+    # Single shared evidence store across the orchestrator's search tool and the
+    # analysis sub-agent's search tool, so the same query is retrieved once and
+    # reused (see search_agent_evidence dedup).
+    shared_search_invocations: List[Dict[str, Any]] = []
     tools.append(
         make_search_agent_evidence_tool(
             llm=llm,
@@ -541,7 +580,7 @@ def collect_orchestration_tools(
             enabled_search_methods=enabled_search_methods,
             smart_tool_routing=smart_tool_routing,
             forced_intent=forced_intent,
-            search_invocations=[],
+            search_invocations=shared_search_invocations,
             allow_file_tools=False,
             thread_id=child_thread_id(thread_id, "search"),
             checkpointer=checkpointer,
@@ -564,6 +603,7 @@ def collect_orchestration_tools(
             thread_id=child_thread_id(thread_id, "analysis"),
             checkpointer=checkpointer,
             skill_roots=skill_roots,
+            search_invocations=shared_search_invocations,
         )
     )
     return tools
