@@ -13,6 +13,7 @@ migration; what is asserted here is:
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -223,3 +224,57 @@ def test_agent_dev_request_flag_overrides_env(stub_orchestrator, monkeypatch):
     names_off = {e["event"] for e in gr.stream_agent_query_events("q", agent_dev=False)}
     assert "route_trace" not in names_off and "tool_call" not in names_off
     assert "completed" in names_off  # status tier still present
+
+
+# ---------------------------------------------------------------------------
+# Robustness: tool failures return a result (never leave a dangling tool_call)
+# ---------------------------------------------------------------------------
+
+def test_search_tool_failure_returns_error_string(monkeypatch):
+    import agent_runtime.graph_nodes as gn
+
+    monkeypatch.setattr(gn, "collect_tools", lambda **k: [])
+    monkeypatch.setattr(gn, "build_search_agent_executor", lambda **k: object())
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("backend exploded")
+
+    monkeypatch.setattr(gn, "invoke_agent_with_payload_fallback", boom)
+
+    shared = []
+    tool = gn.make_search_agent_evidence_tool(
+        llm=None, verbose=False, return_intermediate_steps=False,
+        tool_strategy="granular", include_mcp_tools=False, mcp_modules=None,
+        enabled_search_methods=None, smart_tool_routing=False, forced_intent=None,
+        search_invocations=shared, thread_id=None, checkpointer=None,
+    )
+
+    out = tool.invoke({"query": "anything"})  # must NOT raise
+    parsed = json.loads(out)
+    assert parsed["error"] == "search_agent_failed"
+    assert "backend exploded" in parsed["message"]
+    assert shared == [], "failed search must not be cached as evidence"
+
+
+def test_fallback_does_not_retry_on_tool_ordering_400():
+    from agent_runtime.executor_factory import invoke_agent_with_payload_fallback
+
+    class _OrderingErrExecutor:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, payload, config=None):
+            self.calls += 1
+            raise RuntimeError(
+                "Error code: 400 - invalid_request_error: An assistant message with "
+                "'tool_calls' must be followed by tool messages responding to each "
+                "'tool_call_id'."
+            )
+
+    ex = _OrderingErrExecutor()
+    with pytest.raises(RuntimeError):
+        invoke_agent_with_payload_fallback(
+            ex, query="hi", chat_history=None,
+            config={"configurable": {"thread_id": "t"}},
+        )
+    assert ex.calls == 1, "a tool-ordering 400 must not trigger a legacy-payload retry"

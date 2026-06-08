@@ -381,9 +381,18 @@ def invoke_agent_with_payload_fallback(
         return executor.invoke(msg_payload, config=config)
     except Exception as exc:
         text = str(exc).lower()
-        payload_shape_error = (
-            "input" in text and "messages" in text
-        ) or ("invalid" in text and "messages" in text) or ("missing" in text and "messages" in text)
+        # A 400 about tool_call / tool-message ordering means the conversation
+        # history is corrupted (an assistant tool_call without its response),
+        # NOT a payload-shape mismatch — retrying the legacy payload would just
+        # re-send the same broken state. Only fall back for true shape errors.
+        message_sequence_error = (
+            "tool_call" in text or "tool_calls" in text or "tool_call_id" in text or "tool message" in text
+        )
+        payload_shape_error = (not message_sequence_error) and (
+            ("input" in text and "messages" in text)
+            or ("invalid" in text and "messages" in text)
+            or ("missing" in text and "messages" in text)
+        )
         if payload_shape_error:
             return executor.invoke(legacy_payload, config=config)
         if _is_graph_recursion_error(exc):

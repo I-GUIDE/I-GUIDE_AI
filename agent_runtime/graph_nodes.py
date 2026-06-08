@@ -263,7 +263,7 @@ def make_search_agent_evidence_tool(
                     chat_history=None,
                     config=agent_config(nested_thread_id),
                 )
-        except Exception:
+        except Exception as exc:
             emit_trace_event(
                 "subagent_completed",
                 {
@@ -271,11 +271,18 @@ def make_search_agent_evidence_tool(
                     "query": query,
                     "thread_id": nested_thread_id,
                     "status": "error",
-                    "message": "SearchAgent failed",
+                    "message": f"SearchAgent failed: {exc}",
                 },
                 agent_role="search_agent",
             )
-            raise
+            # Return a tool result rather than raising: an unanswered tool_call
+            # left in the orchestrator's checkpoint state poisons every later
+            # turn on the thread (OpenAI requires each tool_call to be answered).
+            return json.dumps(
+                {"error": "search_agent_failed", "message": str(exc), "user_query": query},
+                ensure_ascii=True,
+                default=str,
+            )
         evidence = build_search_evidence_payload(query, search_response, route_trace)
         search_invocations.append(
             {
@@ -395,7 +402,7 @@ def make_analysis_agent_answer_tool(
                     checkpointer=checkpointer,
                     skill_roots=skill_roots,
                 )
-        except Exception:
+        except Exception as exc:
             emit_trace_event(
                 "subagent_completed",
                 {
@@ -403,11 +410,17 @@ def make_analysis_agent_answer_tool(
                     "query": query,
                     "thread_id": nested_thread_id,
                     "status": "error",
-                    "message": "CodeAgent failed",
+                    "message": f"CodeAgent failed: {exc}",
                 },
                 agent_role="code_agent",
             )
-            raise
+            # Return a tool result rather than raising to keep the orchestrator's
+            # tool_call paired with a response in the checkpoint state.
+            return json.dumps(
+                {"error": "code_agent_failed", "message": str(exc), "answer": ""},
+                ensure_ascii=True,
+                default=str,
+            )
         code_search_invocations.extend(code_response.get("code_agent_search_invocations") or [])
         emit_trace_event(
             "subagent_completed",
@@ -490,7 +503,7 @@ def make_analysis_agent_answer_tool(
                     chat_history=chat_history,
                     config=agent_config(nested_thread_id),
                 )
-        except Exception:
+        except Exception as exc:
             emit_trace_event(
                 "subagent_completed",
                 {
@@ -498,11 +511,17 @@ def make_analysis_agent_answer_tool(
                     "query": query,
                     "thread_id": nested_thread_id,
                     "status": "error",
-                    "message": "AnalysisAgent failed",
+                    "message": f"AnalysisAgent failed: {exc}",
                 },
                 agent_role="analysis_agent",
             )
-            raise
+            # Return a tool result rather than raising to keep the orchestrator's
+            # tool_call paired with a response in the checkpoint state.
+            return json.dumps(
+                {"error": "analysis_agent_failed", "message": str(exc), "answer": ""},
+                ensure_ascii=True,
+                default=str,
+            )
         answer = extract_final_answer(analysis_response) or ""
         emit_trace_event(
             "subagent_completed",
