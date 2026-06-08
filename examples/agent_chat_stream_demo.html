@@ -234,6 +234,13 @@
       color: var(--accent);
     }
 
+    .event-name.node {
+      color: #b8860b;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      font-size: 0.78rem;
+    }
+
     .trace-message {
       margin-top: 6px;
       white-space: pre-wrap;
@@ -422,6 +429,7 @@
       <div class="panel-body output">
         <div class="statusbar">
           <span class="chip" id="status-chip">idle</span>
+          <span class="chip" id="node-chip">node: n/a</span>
           <span class="chip" id="memory-chip">memory: n/a</span>
           <span class="chip" id="thread-chip">thread: n/a</span>
         </div>
@@ -458,6 +466,7 @@
     const downloadFilesEl = document.getElementById("download-files");
     const toolTraceEl = document.getElementById("tool-trace");
     const statusChip = document.getElementById("status-chip");
+    const nodeChip = document.getElementById("node-chip");
     const memoryChip = document.getElementById("memory-chip");
     const threadChip = document.getElementById("thread-chip");
     const uploadBtn = document.getElementById("upload-btn");
@@ -482,7 +491,8 @@
       wrapper.className = "event-item";
 
       const header = document.createElement("div");
-      header.className = `event-name ${isError ? "error" : ""}`;
+      const extraClass = eventName === "node" ? "node" : "";
+      header.className = `event-name ${isError ? "error" : ""} ${extraClass}`.trim();
       header.textContent = payload && payload.label ? payload.label : eventName;
 
       wrapper.appendChild(header);
@@ -781,6 +791,14 @@
       renderDownloadFiles();
       appendTrace(eventName, payload, eventName === "error");
 
+      if (eventName === "node") {
+        const stage = payload.stage || payload.node || "node";
+        const done = payload.type === "node_completed";
+        nodeChip.textContent = `node: ${stage}${done ? " ✓" : " …"}`;
+        if (payload.message) {
+          statusChip.textContent = payload.message;
+        }
+      }
       if (eventName === "status" && payload.status) {
         statusChip.textContent = payload.status;
       }

@@ -420,6 +420,27 @@ def is_empty_model_response_error(exc: Exception) -> bool:
 # Agent executor builders
 # ---------------------------------------------------------------------------
 
+def _make_history_repair_middleware() -> Any:
+    """Build a wrap_model_call middleware that repairs invalid tool-call history.
+
+    A dangling assistant ``tool_calls`` message (one whose tool response never
+    got written, e.g. after an interrupted run) otherwise poisons every later
+    turn on the thread.  This sanitizes the outgoing message list before each
+    model call so such a thread self-heals (see runtime_utils.repair_tool_call_sequence).
+    """
+    from langchain.agents.middleware import wrap_model_call
+    from agent_runtime.runtime_utils import repair_tool_call_sequence
+
+    @wrap_model_call
+    def repair_history(request: Any, handler: Any) -> Any:
+        fixed, changed = repair_tool_call_sequence(request.messages)
+        if changed:
+            request = request.override(messages=fixed)
+        return handler(request)
+
+    return repair_history
+
+
 def build_agent_executor(
     *,
     llm: Optional[Any] = None,
@@ -482,6 +503,7 @@ def build_agent_executor(
         tools=tools,
         system_prompt=system_prompt,
         checkpointer=checkpointer,
+        middleware=[_make_history_repair_middleware()],
         debug=verbose,
         name=agent_name,
     )

@@ -1615,6 +1615,22 @@ def agent_chat_stream():
                     agent_role = item.get("agent_role") or payload.get("role")
                     node_name = item.get("node")
 
+                    # Graph node lifecycle (triage / fast_answer / orchestrate):
+                    # surface distinctly so the UI can show pipeline progress.
+                    if event_name in {"node_started", "node_completed"}:
+                        yield _sse_event(
+                            "node",
+                            {
+                                "type": event_name,
+                                "stage": payload.get("stage") or node_name,
+                                "node": node_name or payload.get("stage"),
+                                "agent": str(agent_role or payload.get("agent") or ""),
+                                "message": payload.get("message"),
+                                "detail": payload,
+                            },
+                        )
+                        continue
+
                     # Categorized events for richer frontend consumption
                     if event_name == "route_trace":
                         yield _sse_event("routing", {"type": "route_trace", "detail": payload})

@@ -19,13 +19,11 @@ from agent_runtime.executor_factory import (
     DEFAULT_CHECKPOINTER,
     agent_config,
     build_code_agent_executor,
-    build_orchestrator_agent_executor,
     child_thread_id,
     invoke_agent_with_payload_fallback,
     resolve_thread_id,
 )
 from agent_runtime.graph_nodes import (
-    collect_orchestration_tools,
     make_search_agent_evidence_tool,
 )
 from agent_runtime.runtime_utils import (
@@ -33,6 +31,10 @@ from agent_runtime.runtime_utils import (
     build_orchestration_trace,
     extract_final_answer,
     extract_search_artifacts,
+)
+from agent_runtime.orchestrator_graph import (
+    ORCHESTRATOR_AGENT_NAMES,
+    build_orchestrator_graph,
 )
 from agent_runtime.skills import SkillRegistry
 from agent_runtime.streaming_trace import is_agent_dev, trace_context
@@ -59,11 +61,9 @@ def run_agent_query(
     checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
     skill_roots: Optional[List[str]] = None,
 ) -> dict:
-    """Run one query through the orchestrator agent pipeline."""
+    """Run one query through the hybrid orchestrator graph."""
     effective_thread_id = resolve_thread_id(thread_id, checkpointer)
-    orchestration_tools = collect_orchestration_tools(
-        query=query,
-        chat_history=chat_history,
+    graph = build_orchestrator_graph(
         llm=llm,
         verbose=verbose,
         return_intermediate_steps=return_intermediate_steps,
@@ -77,21 +77,15 @@ def run_agent_query(
         checkpointer=checkpointer,
         skill_roots=skill_roots,
     )
-    orchestrator = build_orchestrator_agent_executor(
-        llm=llm,
-        verbose=verbose,
-        return_intermediate_steps=return_intermediate_steps,
-        tools=orchestration_tools,
-        checkpointer=checkpointer,
-        skill_roots=skill_roots,
+    final_state = graph.invoke(
+        {
+            "query": query,
+            "chat_history": chat_history or [],
+            "thread_id": effective_thread_id,
+        }
     )
-    orchestration_result = invoke_agent_with_payload_fallback(
-        orchestrator,
-        query=query,
-        chat_history=chat_history,
-        config=agent_config(child_thread_id(effective_thread_id, "orchestrator")),
-    )
-    available_agent_names = [getattr(tool, "name", "") for tool in orchestration_tools if getattr(tool, "name", "")]
+    orchestration_result = final_state.get("orchestration_result")
+    available_agent_names = final_state.get("available_agent_names") or []
     skill_registry = SkillRegistry.discover(skill_roots)
     response: Dict[str, Any] = {
         "orchestration_result": orchestration_result,
@@ -103,7 +97,7 @@ def run_agent_query(
         ),
         "available_skills": skill_registry.catalog(),
     }
-    final_answer = extract_final_answer(orchestration_result)
+    final_answer = final_state.get("final_answer") or extract_final_answer(orchestration_result)
     if final_answer:
         response["final_answer"] = final_answer
     if effective_thread_id:
@@ -149,23 +143,7 @@ def stream_agent_query_events(
             "tool_strategy": tool_strategy,
         },
     }
-    orchestration_tools = collect_orchestration_tools(
-        query=query,
-        chat_history=chat_history,
-        llm=llm,
-        verbose=verbose,
-        return_intermediate_steps=return_intermediate_steps,
-        tool_strategy=tool_strategy,
-        include_mcp_tools=include_mcp_tools,
-        mcp_modules=mcp_modules,
-        enabled_search_methods=enabled_search_methods,
-        smart_tool_routing=smart_tool_routing,
-        forced_intent=forced_intent,
-        thread_id=effective_thread_id,
-        checkpointer=checkpointer,
-        skill_roots=skill_roots,
-    )
-    available_agent_names = [getattr(tool, "name", "") for tool in orchestration_tools if getattr(tool, "name", "")]
+    available_agent_names = list(ORCHESTRATOR_AGENT_NAMES)
     skill_registry = SkillRegistry.discover(skill_roots)
     yield {
         "event": "status",
@@ -188,25 +166,34 @@ def stream_agent_query_events(
     def _worker() -> None:
         try:
             with trace_context(_enqueue, agent_role="orchestrator_agent", agent_dev=agent_dev):
-                orchestrator = build_orchestrator_agent_executor(
+                graph = build_orchestrator_graph(
                     llm=llm,
                     verbose=verbose,
                     return_intermediate_steps=return_intermediate_steps,
-                    tools=orchestration_tools,
+                    tool_strategy=tool_strategy,
+                    include_mcp_tools=include_mcp_tools,
+                    mcp_modules=mcp_modules,
+                    enabled_search_methods=enabled_search_methods,
+                    smart_tool_routing=smart_tool_routing,
+                    forced_intent=forced_intent,
+                    thread_id=effective_thread_id,
                     checkpointer=checkpointer,
                     skill_roots=skill_roots,
                 )
-                orchestration_result = invoke_agent_with_payload_fallback(
-                    orchestrator,
-                    query=query,
-                    chat_history=chat_history,
-                    config=agent_config(child_thread_id(effective_thread_id, "orchestrator")),
+                final_state = graph.invoke(
+                    {
+                        "query": query,
+                        "chat_history": chat_history or [],
+                        "thread_id": effective_thread_id,
+                    }
                 )
+                orchestration_result = final_state.get("orchestration_result")
+                available_agent_names_local = final_state.get("available_agent_names") or available_agent_names
                 artifacts = extract_search_artifacts(orchestration_result if isinstance(orchestration_result, dict) else {})
                 route_trace = build_orchestration_trace(
                     query=query,
                     chat_history=chat_history,
-                    available_agent_names=available_agent_names,
+                    available_agent_names=available_agent_names_local,
                     orchestration_result=orchestration_result if isinstance(orchestration_result, dict) else {},
                 )
                 # Detail-tier replay events (routing decision, LLM interactions,
@@ -253,7 +240,7 @@ def stream_agent_query_events(
                             },
                         }
                     )
-                final_answer = extract_final_answer(orchestration_result)
+                final_answer = final_state.get("final_answer") or extract_final_answer(orchestration_result)
                 if final_answer:
                     _enqueue({"event": "final_answer", "data": {"answer": final_answer}})
                 _enqueue({"event": "status", "data": {"stage": "orchestration_agent_completed"}})

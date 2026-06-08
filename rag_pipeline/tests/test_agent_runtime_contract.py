@@ -58,7 +58,12 @@ def _canned_orchestration_result():
 
 @pytest.fixture()
 def stub_orchestrator(monkeypatch):
-    """Replace the orchestrator-invocation seam with canned data."""
+    """Replace the orchestrate-node invocation seam with canned data.
+
+    The orchestrate node (in agent_runtime.orchestrator_graph) calls these
+    functions, so they are patched there.
+    """
+    import agent_runtime.orchestrator_graph as og
 
     def fake_collect(**kwargs):
         return [
@@ -72,15 +77,48 @@ def stub_orchestrator(monkeypatch):
     def fake_invoke(*args, **kwargs):
         return _canned_orchestration_result()
 
-    monkeypatch.setattr(gr, "collect_orchestration_tools", fake_collect)
-    monkeypatch.setattr(gr, "build_orchestrator_agent_executor", fake_build)
-    monkeypatch.setattr(gr, "invoke_agent_with_payload_fallback", fake_invoke)
+    monkeypatch.setattr(og, "collect_orchestration_tools", fake_collect)
+    monkeypatch.setattr(og, "build_orchestrator_agent_executor", fake_build)
+    monkeypatch.setattr(og, "invoke_agent_with_payload_fallback", fake_invoke)
     return None
 
 
 # ---------------------------------------------------------------------------
 # Non-streaming contract
 # ---------------------------------------------------------------------------
+
+class _FakeLLM:
+    def __init__(self, text):
+        self._text = text
+
+    def invoke(self, messages):
+        return SimpleNamespace(content=self._text)
+
+
+def test_triage_fast_paths_trivial_queries():
+    from agent_runtime.orchestrator_graph import is_trivial_query
+
+    assert is_trivial_query("hi")
+    assert is_trivial_query("Hello!")
+    assert is_trivial_query("what can you do?")
+    assert not is_trivial_query("What datasets exist for floods?")
+    assert not is_trivial_query("find crime hotspots in Chicago")
+
+
+def test_fast_path_answers_without_orchestrator(monkeypatch):
+    import agent_runtime.orchestrator_graph as og
+
+    # If the orchestrate path were taken, this would blow up — proving the
+    # trivial query was fast-pathed.
+    def explode(**kwargs):
+        raise AssertionError("orchestrate path must not run for a greeting")
+
+    monkeypatch.setattr(og, "collect_orchestration_tools", explode)
+
+    result = gr.run_agent_query("hi", llm=_FakeLLM("Hello! I'm the I-GUIDE assistant."))
+    assert result["final_answer"].startswith("Hello!")
+    assert result["orchestration_result"] is None
+
 
 def test_run_agent_query_response_contract(stub_orchestrator):
     result = gr.run_agent_query("What datasets exist for floods?")
@@ -134,6 +172,17 @@ def test_stream_emits_ordered_execution_state_stages(stub_orchestrator):
     for expected in ("started", "initialized", "orchestration_agent_started", "orchestration_agent_completed"):
         assert expected in stages, f"missing stage {expected!r}; saw {stages}"
     assert stages.index("started") < stages.index("orchestration_agent_completed")
+
+
+def test_stream_emits_graph_node_lifecycle_events(stub_orchestrator):
+    events = _collect_events()
+    node_stages = {
+        e["data"].get("stage")
+        for e in events
+        if e["event"] in {"node_started", "node_completed"}
+    }
+    assert "triage" in node_stages
+    assert "orchestrate" in node_stages
 
 
 # ---------------------------------------------------------------------------
@@ -278,3 +327,67 @@ def test_fallback_does_not_retry_on_tool_ordering_400():
             config={"configurable": {"thread_id": "t"}},
         )
     assert ex.calls == 1, "a tool-ordering 400 must not trigger a legacy-payload retry"
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: history self-healing (tool_call / tool-message repair)
+# ---------------------------------------------------------------------------
+
+def _ai_tc(call_id, name="search_agent_evidence"):
+    return SimpleNamespace(content="", type="ai", tool_calls=[{"name": name, "args": {}, "id": call_id}])
+
+
+def _toolmsg(call_id, content="{}"):
+    return SimpleNamespace(content=content, type="tool", name="search_agent_evidence", tool_call_id=call_id)
+
+
+def test_repair_drops_dangling_tool_call():
+    from agent_runtime.runtime_utils import repair_tool_call_sequence
+
+    msgs = [_human("hi"), _ai_tc("call_X")]  # tool_call never answered
+    fixed, changed = repair_tool_call_sequence(msgs)
+    assert changed is True
+    assert fixed == [msgs[0]]  # dangling assistant message dropped
+
+
+def test_repair_drops_orphan_tool_message():
+    from agent_runtime.runtime_utils import repair_tool_call_sequence
+
+    msgs = [_human("hi"), _toolmsg("call_ghost"), _ai("answer")]  # tool msg with no AI tool_call
+    fixed, changed = repair_tool_call_sequence(msgs)
+    assert changed is True
+    assert _toolmsg("call_ghost") not in fixed
+    assert msgs[0] in fixed and msgs[2] in fixed
+
+
+def test_repair_passes_through_valid_history():
+    from agent_runtime.runtime_utils import repair_tool_call_sequence
+
+    msgs = [_human("hi"), _ai_tc("call_A"), _toolmsg("call_A"), _ai("final answer")]
+    fixed, changed = repair_tool_call_sequence(msgs)
+    assert changed is False
+    assert fixed is msgs  # unchanged -> same object
+
+
+def test_history_repair_middleware_sanitizes_request():
+    from agent_runtime.executor_factory import _make_history_repair_middleware
+
+    mw = _make_history_repair_middleware()
+
+    class _Req:
+        def __init__(self, messages):
+            self.messages = messages
+
+        def override(self, **kw):
+            return _Req(kw.get("messages", self.messages))
+
+    captured = {}
+
+    def handler(req):
+        captured["messages"] = req.messages
+        return "ok"
+
+    dangling = [_human("hi"), _ai_tc("call_X")]
+    result = mw.wrap_model_call(_Req(dangling), handler)
+    assert result == "ok"
+    assert captured["messages"] == [dangling[0]]  # repaired before model call

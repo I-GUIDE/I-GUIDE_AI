@@ -89,6 +89,84 @@ def extract_search_artifacts(result: Any) -> Dict[str, Any]:
     return artifacts
 
 
+# ---------------------------------------------------------------------------
+# History repair (tool_call / tool-message pairing)
+# ---------------------------------------------------------------------------
+
+def _message_tool_call_ids(msg: Any) -> List[str]:
+    """Return the tool_call ids requested by an assistant message (or [])."""
+    tool_calls = getattr(msg, "tool_calls", None)
+    if tool_calls is None and isinstance(msg, dict):
+        tool_calls = msg.get("tool_calls")
+    ids: List[str] = []
+    if isinstance(tool_calls, list):
+        for call in tool_calls:
+            if isinstance(call, dict):
+                cid = call.get("id")
+            else:
+                cid = getattr(call, "id", None)
+            if cid:
+                ids.append(cid)
+    return ids
+
+
+def _message_tool_response_id(msg: Any) -> Optional[str]:
+    """Return the tool_call_id a tool message responds to (or None)."""
+    tcid = getattr(msg, "tool_call_id", None)
+    if tcid is None and isinstance(msg, dict):
+        tcid = msg.get("tool_call_id")
+    return tcid
+
+
+def repair_tool_call_sequence(messages: Any) -> tuple[Any, bool]:
+    """Drop messages that make a tool_call/tool-message sequence invalid.
+
+    Providers like OpenAI reject a request where an assistant message with
+    ``tool_calls`` is not followed by a tool message for every ``tool_call_id``
+    (a "dangling" tool call left in checkpointer state poisons every later turn).
+
+    This returns ``(repaired_messages, changed)``:
+      * an assistant message is dropped if *any* of its tool_calls has no
+        matching tool response anywhere in the list;
+      * a tool message is dropped if its ``tool_call_id`` belongs to a dropped
+        (or absent) assistant message (orphan response);
+      * all other messages are preserved in order.
+
+    When nothing needs repair, the original list object is returned unchanged.
+    """
+    if not isinstance(messages, list) or not messages:
+        return messages, False
+
+    responded = {
+        rid
+        for rid in (_message_tool_response_id(msg) for msg in messages)
+        if rid
+    }
+
+    kept: List[Any] = []
+    kept_call_ids: set = set()
+    changed = False
+    for msg in messages:
+        call_ids = _message_tool_call_ids(msg)
+        if call_ids:
+            if all(cid in responded for cid in call_ids):
+                kept.append(msg)
+                kept_call_ids.update(call_ids)
+            else:
+                changed = True  # assistant tool_call(s) with no response -> drop
+            continue
+        response_id = _message_tool_response_id(msg)
+        if response_id is not None:
+            if response_id in kept_call_ids:
+                kept.append(msg)
+            else:
+                changed = True  # orphan tool response -> drop
+            continue
+        kept.append(msg)
+
+    return (kept, True) if changed else (messages, False)
+
+
 def extract_tool_result_json(artifacts: Dict[str, Any], tool_name: str) -> Optional[Dict[str, Any]]:
     """Find and parse the last JSON tool result for *tool_name*."""
     for item in reversed(artifacts.get("tool_results") or []):
