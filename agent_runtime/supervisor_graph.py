@@ -56,13 +56,18 @@ ANALYSIS_WORKFLOW_PROMPT = (
     "a separate step composes the final user-facing answer.\n"
     "If you need evidence from the knowledge base, prior results, or another capability "
     "before you can run the analysis, call request_capability(capability=..., reason=...) "
-    "instead of guessing — the supervisor will fulfill the request and re-run you."
+    "instead of guessing — the supervisor will fulfill the request and re-run you.\n"
+    "If an execute_code tool is available, you may use it to run computational steps and "
+    "verify results."
 )
 
 CODE_PEER_PROMPT = (
     "You are CodeAgent. Produce practical, runnable code with a short `Dependencies:` "
     "section. Ground domain facts only on the provided evidence; do not invent APIs or "
     "sources.\n"
+    "If an execute_code tool is available, RUN and DEBUG your code with it: execute the "
+    "code, read stdout/stderr, fix any errors, and re-run until it works — then report the "
+    "final working code and its output.\n"
     "If you need evidence from the knowledge base, prior analysis results, or another "
     "capability before you can write correct code, call request_capability(capability=..., "
     "reason=...) instead of guessing — the supervisor will fulfill it and re-run you. "
@@ -275,7 +280,8 @@ def default_search_fn(*, llm: Optional[Any] = None, tool_strategy: str = "granul
 
 def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = True,
                        mcp_modules: Optional[List[str]] = None,
-                       skill_roots: Optional[List[str]] = None) -> AnalyzeFn:
+                       skill_roots: Optional[List[str]] = None,
+                       code_exec: Optional[bool] = None) -> AnalyzeFn:
     """Run the GIS/data analysis workflow (QGIS + spatial-analysis MCP tools)."""
 
     def fn(query: str, evidence: List[Any], state: SupervisorState) -> Any:
@@ -296,6 +302,12 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
 
             tools.extend(make_langchain_mcp_tools(include_modules=mcp_modules or ["spatial_analysis_tools"]))
         tools.append(request_tool)
+        from agent_runtime.code_execution import is_code_exec_enabled
+
+        if code_exec if code_exec is not None else is_code_exec_enabled():
+            from agent_runtime.langchain_exec_tools import make_code_execution_tools
+
+            tools.extend(make_code_execution_tools())
         executor = build_agent_executor(
             llm=llm, preloaded_tools=tools, system_prompt_override=ANALYSIS_WORKFLOW_PROMPT,
             agent_name="analysis_agent", skill_roots=skill_roots,
@@ -321,7 +333,8 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
     return fn
 
 
-def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str]] = None) -> CodeFn:
+def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str]] = None,
+                    code_exec: Optional[bool] = None) -> CodeFn:
     """Code peer: writes code, and can request_capability(search/analyze) when it
     lacks the context to do so (model-driven — no nested search tool)."""
 
@@ -337,6 +350,12 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
 
         request_tool, requests = _make_request_tool()
         tools = [*make_skill_tools(skill_roots=skill_roots), request_tool]
+        from agent_runtime.code_execution import is_code_exec_enabled
+
+        if code_exec if code_exec is not None else is_code_exec_enabled():
+            from agent_runtime.langchain_exec_tools import make_code_execution_tools
+
+            tools.extend(make_code_execution_tools())
         executor = build_agent_executor(
             llm=llm, preloaded_tools=tools, system_prompt_override=CODE_PEER_PROMPT,
             agent_name="code_agent", skill_roots=skill_roots,

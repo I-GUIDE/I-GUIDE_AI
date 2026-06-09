@@ -416,6 +416,10 @@
               <input id="use_supervisor" type="checkbox" checked>
               Supervisor (peer agents)
             </label>
+            <label class="checkbox">
+              <input id="code_exec" type="checkbox">
+              Code execution (sandbox)
+            </label>
           </div>
 
           <div class="actions">
@@ -703,7 +707,8 @@
         file_ids: Array.from(attachedFiles.keys()),
         verbose: document.getElementById("verbose").checked,
         agent_dev: document.getElementById("agent_dev").checked,
-        use_supervisor: document.getElementById("use_supervisor").checked
+        use_supervisor: document.getElementById("use_supervisor").checked,
+        code_exec: document.getElementById("code_exec").checked
       };
     }
 

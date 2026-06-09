@@ -71,5 +71,11 @@ QUALITY_TOOL_NAMES: set[str] = {
     "audit_answer_grounding",
 }
 
+# Sandboxed code execution (container-per-run). Always allowed when present; only
+# attached to the code/analysis agents, and only when AGENT_CODE_EXEC is enabled.
+EXECUTION_TOOL_NAMES: set[str] = {
+    "execute_code",
+}
+
 # Alias kept for backward compatibility — identical to RAG_COMPONENT_TOOL_NAMES.
 IGUIDE_SEARCH_TOOL_NAMES: set[str] = RAG_COMPONENT_TOOL_NAMES.copy()

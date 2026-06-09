@@ -62,7 +62,8 @@ CODE_AGENT_PROMPT = (
     "4. Include a short `Dependencies:` section listing required packages or system dependencies.\n"
     "5. If a relevant skill is available, call `load_skill` before applying that task-specific workflow.\n"
     "6. Call `load_skill` at most once for the same skill in a user request. After it returns `status: ok` or `status: already_loaded`, do not call `load_skill` for that skill again.\n"
-    "7. If evidence is insufficient, say what is missing."
+    "7. If an `execute_code` tool is available, RUN and DEBUG your code with it (execute, read stdout/stderr, fix errors, re-run) before finalizing.\n"
+    "8. If evidence is insufficient, say what is missing."
 )
 
 DIRECT_ANSWER_AGENT_PROMPT = (

@@ -116,6 +116,7 @@ def build_orchestrator_graph(
     checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
     skill_roots: Optional[List[str]] = None,
     use_supervisor: Optional[bool] = None,
+    code_exec: Optional[bool] = None,
 ) -> Any:
     """Compile the hybrid orchestrator graph for one request's configuration.
 
@@ -203,8 +204,9 @@ def build_orchestrator_graph(
                     include_mcp_tools=include_mcp_tools,
                     mcp_modules=mcp_modules,
                     skill_roots=skill_roots,
+                    code_exec=code_exec,
                 ),
-                code_fn=default_code_fn(llm=llm, skill_roots=skill_roots),
+                code_fn=default_code_fn(llm=llm, skill_roots=skill_roots, code_exec=code_exec),
             )
             emit_trace_event(
                 "node_completed",

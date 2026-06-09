@@ -61,6 +61,7 @@ def run_agent_query(
     checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
     skill_roots: Optional[List[str]] = None,
     use_supervisor: Optional[bool] = None,
+    code_exec: Optional[bool] = None,
 ) -> dict:
     """Run one query through the hybrid orchestrator graph."""
     effective_thread_id = resolve_thread_id(thread_id, checkpointer)
@@ -78,6 +79,7 @@ def run_agent_query(
         checkpointer=checkpointer,
         skill_roots=skill_roots,
         use_supervisor=use_supervisor,
+        code_exec=code_exec,
     )
     final_state = graph.invoke(
         {
@@ -129,6 +131,7 @@ def stream_agent_query_events(
     skill_roots: Optional[List[str]] = None,
     agent_dev: Optional[bool] = None,
     use_supervisor: Optional[bool] = None,
+    code_exec: Optional[bool] = None,
 ) -> Generator[Dict[str, Any], None, None]:
     """Yield structured SSE events while running a query.
 
@@ -183,6 +186,7 @@ def stream_agent_query_events(
                     checkpointer=checkpointer,
                     skill_roots=skill_roots,
                     use_supervisor=use_supervisor,
+                    code_exec=code_exec,
                 )
                 final_state = graph.invoke(
                     {
@@ -347,6 +351,12 @@ def run_code_agent_query(
     from agent_runtime.skills import make_skill_tools
 
     code_tools = [*make_skill_tools(skill_roots=skill_roots), search_tool]
+    from agent_runtime.code_execution import is_code_exec_enabled
+
+    if is_code_exec_enabled():
+        from agent_runtime.langchain_exec_tools import make_code_execution_tools
+
+        code_tools.extend(make_code_execution_tools())
     code_executor = build_code_agent_executor(
         llm=llm,
         verbose=verbose,

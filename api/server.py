@@ -94,6 +94,10 @@ def _normalize_agent_chat_request(data: dict) -> dict:
     # AGENT_SUPERVISOR env default (on).
     use_supervisor_raw = _coalesce(data.get("useSupervisor"), data.get("use_supervisor"))
     use_supervisor = None if use_supervisor_raw is None else bool(use_supervisor_raw)
+    # code_exec is tri-state: absent (None) falls back to the AGENT_CODE_EXEC env
+    # default (off). Enables the sandboxed execute_code tool for this request.
+    code_exec_raw = _coalesce(data.get("codeExec"), data.get("code_exec"))
+    code_exec = None if code_exec_raw is None else bool(code_exec_raw)
 
     return {
         "user_query": str(user_query).strip() if user_query is not None else "",
@@ -114,6 +118,7 @@ def _normalize_agent_chat_request(data: dict) -> dict:
         "verbose": verbose,
         "agent_dev": agent_dev,
         "use_supervisor": use_supervisor,
+        "code_exec": code_exec,
     }
 
 
@@ -1240,6 +1245,7 @@ def agent_chat():
             skill_roots=normalized.get("skill_roots"),
             verbose=bool(normalized.get("verbose", False)),
             use_supervisor=normalized.get("use_supervisor"),
+            code_exec=normalized.get("code_exec"),
         )
         return jsonify(_format_agent_chat_result(raw)), 200
     except ValueError as e:
@@ -1616,6 +1622,7 @@ def agent_chat_stream():
                     verbose=bool(normalized.get("verbose", False)),
                     agent_dev=normalized.get("agent_dev"),
                     use_supervisor=normalized.get("use_supervisor"),
+                    code_exec=normalized.get("code_exec"),
                 ):
                     event_name = str(item.get("event") or "message")
                     payload = item.get("data") or {}

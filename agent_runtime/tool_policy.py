@@ -11,6 +11,7 @@ from typing import Any, List, Optional, Sequence
 from agent_runtime.graph_state import (
     ANALYSIS_TOOL_NAMES,
     DISCOVERY_TOOL_NAMES,
+    EXECUTION_TOOL_NAMES,
     FILE_TOOL_NAMES,
     QUALITY_TOOL_NAMES,
     RAG_COMPONENT_TOOL_NAMES,
@@ -48,6 +49,9 @@ def select_allowed_tools(intent: str, available_tool_names: Sequence[str]) -> Li
     for quality_tool_name in QUALITY_TOOL_NAMES:
         if quality_tool_name in available and quality_tool_name not in selected:
             selected.append(quality_tool_name)
+    for exec_tool_name in EXECUTION_TOOL_NAMES:
+        if exec_tool_name in available and exec_tool_name not in selected:
+            selected.append(exec_tool_name)
 
     if not selected:
         selected = list(available_tool_names)

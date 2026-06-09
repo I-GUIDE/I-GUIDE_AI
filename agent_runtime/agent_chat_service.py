@@ -193,6 +193,7 @@ def run_agent_chat(
     skill_roots: Optional[Sequence[Any]] = None,
     verbose: bool = False,
     use_supervisor: Optional[bool] = None,
+    code_exec: Optional[bool] = None,
 ) -> Dict[str, Any]:
     effective_thread_id = thread_id or memory_id
     effective_memory_id = memory_id or thread_id
@@ -235,6 +236,7 @@ def run_agent_chat(
         thread_id=effective_thread_id,
         skill_roots=normalized_skill_roots,
         use_supervisor=use_supervisor,
+        code_exec=code_exec,
     )
 
     answer = _extract_agent_answer(result)
@@ -292,6 +294,7 @@ def stream_agent_chat_events(
     verbose: bool = False,
     agent_dev: Optional[bool] = None,
     use_supervisor: Optional[bool] = None,
+    code_exec: Optional[bool] = None,
 ) -> Generator[Dict[str, Any], None, None]:
     effective_thread_id = thread_id or memory_id
     effective_memory_id = memory_id or thread_id
@@ -370,6 +373,7 @@ def stream_agent_chat_events(
         skill_roots=normalized_skill_roots,
         agent_dev=agent_dev,
         use_supervisor=use_supervisor,
+        code_exec=code_exec,
     ):
         if event.get("event") == "completed" and isinstance(event.get("data"), Mapping):
             completed_response = dict(event["data"])
