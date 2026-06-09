@@ -342,6 +342,7 @@ def make_analysis_agent_answer_tool(
     """
     from langchain_core.tools import StructuredTool
     from agent_runtime.langchain_mcp_tools import make_langchain_mcp_tools
+    from agent_runtime.langchain_quality_tools import make_quality_tools
 
     # Avoid circular import — import sibling at call time
     from agent_runtime.graph_runtime import run_code_agent_query
@@ -449,7 +450,12 @@ def make_analysis_agent_answer_tool(
         description="Use CodeAgent to provide runnable code and a Dependencies section when analysis alone is insufficient.",
     )
 
-    analysis_tools: List[Any] = [*make_skill_tools(skill_roots=skill_roots), search_tool, code_tool]
+    analysis_tools: List[Any] = [
+        *make_skill_tools(skill_roots=skill_roots),
+        *make_quality_tools(llm=llm),
+        search_tool,
+        code_tool,
+    ]
     if include_mcp_tools:
         analysis_tools = [
             *make_langchain_mcp_tools(include_modules=mcp_modules),

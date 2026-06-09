@@ -12,6 +12,7 @@ from agent_runtime.graph_state import (
     ANALYSIS_TOOL_NAMES,
     DISCOVERY_TOOL_NAMES,
     FILE_TOOL_NAMES,
+    QUALITY_TOOL_NAMES,
     RAG_COMPONENT_TOOL_NAMES,
     SKILL_TOOL_NAMES,
 )
@@ -44,6 +45,9 @@ def select_allowed_tools(intent: str, available_tool_names: Sequence[str]) -> Li
     for skill_tool_name in SKILL_TOOL_NAMES:
         if skill_tool_name in available and skill_tool_name not in selected:
             selected.append(skill_tool_name)
+    for quality_tool_name in QUALITY_TOOL_NAMES:
+        if quality_tool_name in available and quality_tool_name not in selected:
+            selected.append(quality_tool_name)
 
     if not selected:
         selected = list(available_tool_names)
@@ -72,6 +76,7 @@ def collect_tools(
     from agent_runtime.langchain_file_tools import make_langchain_file_tools
     from agent_runtime.langchain_granular_tools import make_langchain_granular_tools
     from agent_runtime.langchain_mcp_tools import make_langchain_mcp_tools
+    from agent_runtime.langchain_quality_tools import make_quality_tools
     from agent_runtime.langchain_tool import make_langchain_rag_tool
     from agent_runtime.skills import make_skill_tools
 
@@ -88,5 +93,6 @@ def collect_tools(
         raise ValueError("tool_strategy must be either 'full_pipeline' or 'granular'.")
     if include_mcp_tools:
         tools.extend(make_langchain_mcp_tools(include_modules=mcp_modules))
+    tools.extend(make_quality_tools())
     tools.extend(make_skill_tools(skill_roots=skill_roots))
     return tools

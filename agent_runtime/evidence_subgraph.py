@@ -1,0 +1,272 @@
+"""Shared-state evidence/quality sub-graph: retrieve → rerank → analyze → audit.
+
+This models the RAG core as an explicit LangGraph ``StateGraph`` over a single
+typed ``EvidenceState`` instead of the nested ``search_agent_evidence`` /
+``analysis_agent_answer`` tool calls. Benefits over agents-as-tools here:
+
+* **Evidence is first-class state** — no per-tool dedup workaround, no
+  serialization through tool args/returns.
+* **Rerank + grounding audit are deterministic edges** — always applied (true
+  parity with the deprecated RAG pipeline), not optional LLM tool calls.
+* **Flattened depth** — one linear pipeline rather than orchestrator→analysis→search.
+
+Context hygiene rule: the heavy retrieved documents live *in the state*; callers
+should surface only the **distilled** payload upward (``distill_evidence_state``)
+so a parent agent's context isn't bloated with full documents.
+
+Everything is dependency-injected (``retrieve_fn`` / ``compose_fn`` / ``llm``) so
+the graph is fully unit-testable without a live LLM or search backends.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any, Callable, Dict, List, Optional, TypedDict
+
+from langgraph.graph import END, START, StateGraph
+
+from agent_runtime.evidence_quality import audit_answer_grounding, rerank_documents
+from agent_runtime.streaming_trace import emit_trace_event
+
+# (query, state) -> list of document dicts
+RetrieveFn = Callable[[str, "EvidenceState"], List[Any]]
+# (query, documents, chat_history) -> answer text
+ComposeFn = Callable[[str, List[Any], Optional[List[Any]]], str]
+
+
+class EvidenceState(TypedDict, total=False):
+    """Shared state threaded through the evidence/quality sub-graph."""
+
+    query: str
+    chat_history: List[Any]
+    thread_id: Optional[str]
+    documents: List[Any]          # structured evidence (heavy; stays in state)
+    answer: str
+    audit: Dict[str, Any]
+    distilled: Dict[str, Any]     # compact payload to surface upward
+    # config
+    top_k: int
+    do_rerank: bool
+    do_audit: bool
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _doc_field(doc: Any, *keys: str, default: str = "") -> str:
+    if isinstance(doc, dict):
+        src = doc.get("document") if isinstance(doc.get("document"), dict) else doc
+        for k in keys:
+            v = src.get(k)
+            if v:
+                return str(v)
+    return default
+
+
+def _format_documents(documents: List[Any], *, limit: int = 8, max_chars: int = 500) -> str:
+    lines: List[str] = []
+    for i, doc in enumerate(documents[:limit]):
+        doc_id = _doc_field(doc, "doc_id", "id", "_id", default=f"doc-{i}")
+        title = _doc_field(doc, "title", "name", "element_type", default="Untitled")
+        contents = _doc_field(doc, "contents", "snippet", "text", "abstract", "description")
+        lines.append(f"[{doc_id}] {title}\n{contents[:max_chars]}")
+    return "\n\n".join(lines) if lines else "(no evidence)"
+
+
+def extract_documents_from_search_evidence(payload: Any) -> List[Dict[str, Any]]:
+    """Best-effort: pull structured documents out of a search-evidence payload.
+
+    Accepts the dict produced by ``runtime_utils.build_search_evidence_payload``
+    (``search_agent_tool_results`` = list of ``{name, content}`` where content is
+    a JSON string from a granular search tool). Robust to varied backend shapes.
+    """
+    docs: List[Dict[str, Any]] = []
+    if not isinstance(payload, dict):
+        return docs
+    results = payload.get("search_agent_tool_results") or []
+    list_keys = ("documents", "retrieved_documents", "results", "hits", "items", "records")
+    for item in results:
+        content = item.get("content") if isinstance(item, dict) else None
+        if not isinstance(content, str):
+            continue
+        try:
+            parsed = json.loads(content)
+        except Exception:
+            continue
+        candidates: List[Any] = []
+        if isinstance(parsed, list):
+            candidates = parsed
+        elif isinstance(parsed, dict):
+            for key in list_keys:
+                if isinstance(parsed.get(key), list):
+                    candidates = parsed[key]
+                    break
+        for c in candidates:
+            if isinstance(c, dict):
+                docs.append(c)
+    return docs
+
+
+def distill_evidence_state(state: EvidenceState) -> Dict[str, Any]:
+    """Compact payload to surface upward (keeps heavy docs out of parent context)."""
+    docs = state.get("documents") or []
+    return {
+        "answer": state.get("answer", ""),
+        "audit": state.get("audit") or {},
+        "doc_ids": [_doc_field(d, "doc_id", "id", "_id", default=f"doc-{i}") for i, d in enumerate(docs)],
+        "document_count": len(docs),
+    }
+
+
+def _content_to_text(response: Any) -> str:
+    content = getattr(response, "content", response)
+    if isinstance(content, list):
+        return "".join(
+            str(p.get("text") or p.get("content") or "") if isinstance(p, dict) else str(getattr(p, "text", p))
+            for p in content
+        )
+    return str(content or "").strip()
+
+
+def default_compose_fn(llm: Optional[Any] = None) -> ComposeFn:
+    """A grounded-answer composer using the agent's LLM (injectable for tests)."""
+
+    def compose(query: str, documents: List[Any], chat_history: Optional[List[Any]] = None) -> str:
+        active = llm
+        if active is None:
+            from agent_runtime.executor_factory import build_default_llm
+
+            active = build_default_llm()
+        prompt = (
+            "You are AnalysisAgent. Compose a concise, well-structured answer to the "
+            "question using ONLY the evidence below. Cite supporting doc_ids in [brackets]. "
+            "If the evidence is insufficient, say so explicitly.\n\n"
+            f"Question:\n{query}\n\nEvidence:\n{_format_documents(documents)}\n"
+        )
+        if hasattr(active, "invoke"):
+            return _content_to_text(active.invoke(prompt))
+        if callable(active):
+            return str(active(prompt))
+        raise TypeError("llm must expose .invoke() or be a str->str callable")
+
+    return compose
+
+
+# ---------------------------------------------------------------------------
+# Sub-graph
+# ---------------------------------------------------------------------------
+
+def build_evidence_subgraph(
+    retrieve_fn: RetrieveFn,
+    *,
+    compose_fn: Optional[ComposeFn] = None,
+    llm: Optional[Any] = None,
+    top_k: int = 5,
+    do_rerank: bool = True,
+    do_audit: bool = True,
+) -> Any:
+    """Compile the retrieve → rerank → analyze → audit sub-graph.
+
+    ``retrieve_fn(query, state) -> [documents]`` and ``compose_fn(query, docs,
+    chat_history) -> answer`` are injected; ``llm`` powers rerank + audit (and the
+    default composer). The ``do_rerank`` / ``do_audit`` defaults are baked into the
+    initial state but can be overridden per-invocation via the state.
+    """
+    composer = compose_fn or default_compose_fn(llm=llm)
+
+    def retrieve_node(state: EvidenceState) -> Dict[str, Any]:
+        emit_trace_event("node_started", {"stage": "retrieve", "message": "Retrieving evidence"}, node="retrieve")
+        docs = retrieve_fn(state.get("query", ""), state) or []
+        emit_trace_event(
+            "node_completed",
+            {"stage": "retrieve", "message": f"Retrieved {len(docs)} documents"},
+            node="retrieve",
+        )
+        return {"documents": list(docs)}
+
+    def rerank_node(state: EvidenceState) -> Dict[str, Any]:
+        docs = state.get("documents") or []
+        k = state.get("top_k", top_k)
+        if not state.get("do_rerank", do_rerank):
+            return {"documents": docs[:k] if k else docs}
+        emit_trace_event("node_started", {"stage": "rerank", "message": "Re-ranking evidence"}, node="rerank")
+        reranked = rerank_documents(state.get("query", ""), docs, top_k=k, llm=llm)
+        emit_trace_event(
+            "node_completed",
+            {"stage": "rerank", "message": f"Ranked {len(reranked)} documents"},
+            node="rerank",
+        )
+        return {"documents": reranked}
+
+    def analyze_node(state: EvidenceState) -> Dict[str, Any]:
+        emit_trace_event("node_started", {"stage": "analyze", "message": "Composing answer"}, node="analyze")
+        answer = composer(state.get("query", ""), state.get("documents") or [], state.get("chat_history"))
+        emit_trace_event("node_completed", {"stage": "analyze", "message": "Answer composed"}, node="analyze")
+        return {"answer": answer}
+
+    def audit_node(state: EvidenceState) -> Dict[str, Any]:
+        if not state.get("do_audit", do_audit):
+            distilled_state = {**state, "audit": {}}
+            return {"audit": {}, "distilled": distill_evidence_state(distilled_state)}
+        emit_trace_event("node_started", {"stage": "audit", "message": "Auditing grounding"}, node="audit")
+        verdict = audit_answer_grounding(
+            state.get("query", ""), state.get("answer", ""), state.get("documents") or [], llm=llm
+        )
+        emit_trace_event(
+            "node_completed",
+            {"stage": "audit", "message": verdict.get("summary") or "Grounding audited"},
+            node="audit",
+        )
+        merged = {**state, "audit": verdict}
+        return {"audit": verdict, "distilled": distill_evidence_state(merged)}
+
+    builder = StateGraph(EvidenceState)
+    builder.add_node("retrieve", retrieve_node)
+    builder.add_node("rerank", rerank_node)
+    builder.add_node("analyze", analyze_node)
+    builder.add_node("audit", audit_node)
+    builder.add_edge(START, "retrieve")
+    builder.add_edge("retrieve", "rerank")
+    builder.add_edge("rerank", "analyze")
+    builder.add_edge("analyze", "audit")
+    builder.add_edge("audit", END)
+    return builder.compile()
+
+
+def run_evidence_pipeline(
+    query: str,
+    retrieve_fn: RetrieveFn,
+    *,
+    chat_history: Optional[List[Any]] = None,
+    compose_fn: Optional[ComposeFn] = None,
+    llm: Optional[Any] = None,
+    top_k: int = 5,
+    do_rerank: bool = True,
+    do_audit: bool = True,
+    thread_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Convenience: build + invoke the sub-graph; return the full final state."""
+    graph = build_evidence_subgraph(
+        retrieve_fn, compose_fn=compose_fn, llm=llm, top_k=top_k, do_rerank=do_rerank, do_audit=do_audit
+    )
+    return graph.invoke(
+        {
+            "query": query,
+            "chat_history": chat_history or [],
+            "thread_id": thread_id,
+            "top_k": top_k,
+            "do_rerank": do_rerank,
+            "do_audit": do_audit,
+        }
+    )
+
+
+__all__ = [
+    "EvidenceState",
+    "build_evidence_subgraph",
+    "run_evidence_pipeline",
+    "default_compose_fn",
+    "extract_documents_from_search_evidence",
+    "distill_evidence_state",
+]

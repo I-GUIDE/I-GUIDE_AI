@@ -112,11 +112,24 @@ def _transform_thumbnail(value: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 def _openai_endpoint(path: str) -> str:
-    base = os.getenv("ANVILGPT_URL", "https://api.openai.com/v1").rstrip("/")
+    """Resolve an OpenAI-compatible URL, preferring the *agent's* LLM config.
+
+    Text2Cypher (and the other agent-search LLM call) use the same LLM as the
+    main agent: ``VLLM_PROXY`` / ``OPENAI_BASE_URL`` first, then the legacy
+    dedicated ``ANVILGPT_URL``, then the OpenAI default.
+    """
+    base = (
+        os.getenv("VLLM_PROXY")
+        or os.getenv("OPENAI_BASE_URL")
+        or os.getenv("ANVILGPT_URL")
+        or "https://api.openai.com/v1"
+    ).rstrip("/")
     # If URL already ends with the full path (e.g. /api/chat/completions), return as-is
-    if base.endswith("/chat/completions"):
+    if base.lower().endswith("/chat/completions"):
         return base
-    return f"{base}/{path.lstrip('/')}"
+    if base.lower().endswith("/v1"):
+        return f"{base}/{path.lstrip('/')}"
+    return f"{base}/v1/{path.lstrip('/')}"
 
 
 def _llm_chat(
@@ -125,8 +138,20 @@ def _llm_chat(
     temperature: float = 0.0,
 ) -> str:
     url = _openai_endpoint("chat/completions")
-    api_key = _getenv("ANVILGPT_KEY")
-    model = (os.getenv("ANVILGPT_MODEL") or "gpt-4o-mini").strip()
+    # Same LLM as the agent (VLLM_*/OPENAI_*); ANVILGPT_* kept as legacy fallback.
+    api_key = (
+        os.getenv("VLLM_API_KEY")
+        or os.getenv("OPENAI_KEY")
+        or os.getenv("ANVILGPT_KEY")
+        or ""
+    )
+    model = (
+        os.getenv("VLLM_MODEL")
+        or os.getenv("OPENAI_CHAT_MODEL")
+        or os.getenv("OPENAI_MODEL")
+        or os.getenv("ANVILGPT_MODEL")
+        or "gpt-4o-mini"
+    ).strip()
     payload = {
         "model": model,
         "messages": messages,

@@ -64,5 +64,12 @@ SKILL_TOOL_NAMES: set[str] = {
     "load_skill",
 }
 
+# Evidence-quality tools (LLM rerank + grounding/hallucination audit). Always
+# allowed regardless of intent — they are post-processing helpers, not retrieval.
+QUALITY_TOOL_NAMES: set[str] = {
+    "rerank_evidence",
+    "audit_answer_grounding",
+}
+
 # Alias kept for backward compatibility — identical to RAG_COMPONENT_TOOL_NAMES.
 IGUIDE_SEARCH_TOOL_NAMES: set[str] = RAG_COMPONENT_TOOL_NAMES.copy()

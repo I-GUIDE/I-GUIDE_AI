@@ -165,6 +165,46 @@ def build_orchestrator_graph(
             agent_role="orchestrator_agent",
             node="orchestrate",
         )
+
+        # Opt-in: shared-state supervisor-over-peers graph (search/analyze/code as
+        # peers sharing evidence state). Off by default; the agents-as-tools path below
+        # remains the default until validated live.
+        from agent_runtime.supervisor_graph import is_supervisor_enabled
+
+        if is_supervisor_enabled():
+            from agent_runtime.supervisor_graph import (
+                default_code_fn,
+                default_search_fn,
+                run_supervisor,
+            )
+
+            sup_state = run_supervisor(
+                query,
+                chat_history=chat_history,
+                llm=llm,
+                thread_id=thread_id,
+                search_fn=default_search_fn(
+                    llm=llm,
+                    tool_strategy=tool_strategy,
+                    include_mcp_tools=include_mcp_tools,
+                    mcp_modules=mcp_modules,
+                    enabled_search_methods=enabled_search_methods,
+                    skill_roots=skill_roots,
+                ),
+                code_fn=default_code_fn(llm=llm, skill_roots=skill_roots),
+            )
+            emit_trace_event(
+                "node_completed",
+                {"stage": "orchestrate", "message": "Supervisor graph completed"},
+                agent_role="orchestrator_agent",
+                node="orchestrate",
+            )
+            return {
+                "orchestration_result": sup_state,
+                "final_answer": sup_state.get("final_answer", ""),
+                "available_agent_names": ["search", "analyze", "code"],
+            }
+
         tools = collect_orchestration_tools(
             query=query,
             chat_history=chat_history,
