@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from .file_store import get_file_record
 from .graph_runtime import run_agent_query, stream_agent_query_events
+from .session_memory import append_session_turn, build_session_memory_doc
 from rag_pipeline.memory_module import create_memory, get_or_create_memory, update_memory
 
 logger = logging.getLogger(__name__)
@@ -215,8 +216,13 @@ def run_agent_chat(
             logger.warning("Persistent agent chat memory unavailable: %s", exc)
             memory_warning = f"persistent_memory_unavailable: {exc}"
             effective_memory_id = memory_id
+            # Fall back to session-local memory so the turn is not memoryless.
+            memory_doc = build_session_memory_doc(effective_thread_id)
     else:
         effective_memory_id = None
+        # Persistent memory is off, but conversation context must still be
+        # preserved locally within the session (keyed by thread_id).
+        memory_doc = build_session_memory_doc(effective_thread_id)
 
     chat_history = _build_chat_history(memory_doc, recent_k=recent_k)
     effective_input = _augment_user_input_with_files(user_input, normalized_file_paths)
@@ -241,6 +247,8 @@ def run_agent_chat(
 
     answer = _extract_agent_answer(result)
     message_id = str(uuid4())
+    effective_thread_id = result.get("thread_id") or effective_thread_id
+    persisted_to_opensearch = False
     if use_persistent_memory and effective_memory_id:
         try:
             update_memory(
@@ -250,10 +258,17 @@ def run_agent_chat(
                 answer=answer,
                 elements=[],
             )
+            persisted_to_opensearch = True
         except Exception as exc:
             logger.warning("Failed to persist agent chat turn for %s: %s", effective_memory_id, exc)
             if memory_warning is None:
                 memory_warning = f"persistent_memory_update_failed: {exc}"
+
+    # Always record the turn in session-local memory unless it was already
+    # durably persisted to OpenSearch, so follow-up turns keep their context
+    # within the process even when persistent memory is off (or unavailable).
+    if not persisted_to_opensearch:
+        append_session_turn(effective_thread_id, user_input, answer)
 
     response: Dict[str, Any] = {
         "answer": answer,
@@ -338,6 +353,8 @@ def stream_agent_chat_events(
             logger.warning("Persistent agent chat memory unavailable: %s", exc)
             memory_warning = f"persistent_memory_unavailable: {exc}"
             effective_memory_id = memory_id
+            # Fall back to session-local memory so the turn is not memoryless.
+            memory_doc = build_session_memory_doc(effective_thread_id)
             yield {
                 "event": "warning",
                 "data": {
@@ -347,10 +364,14 @@ def stream_agent_chat_events(
             }
     else:
         effective_memory_id = None
+        # Persistent memory is off, but conversation context must still be
+        # preserved locally within the session (keyed by thread_id).
+        memory_doc = build_session_memory_doc(effective_thread_id)
         yield {
             "event": "status",
             "data": {
                 "stage": "persistent_memory_disabled",
+                "history_length": len((memory_doc or {}).get("chat_history") or []),
             },
         }
 
@@ -381,6 +402,8 @@ def stream_agent_chat_events(
 
     answer = _extract_agent_answer(completed_response or {})
     message_id = str(uuid4())
+    effective_thread_id = (completed_response or {}).get("thread_id") or effective_thread_id
+    persisted_to_opensearch = False
     if use_persistent_memory and effective_memory_id:
         try:
             update_memory(
@@ -390,6 +413,7 @@ def stream_agent_chat_events(
                 answer=answer,
                 elements=[],
             )
+            persisted_to_opensearch = True
             yield {
                 "event": "memory_saved",
                 "data": {
@@ -408,6 +432,20 @@ def stream_agent_chat_events(
                     "message": memory_warning,
                 },
             }
+
+    # Record the turn in session-local memory unless it was already durably
+    # persisted to OpenSearch, so follow-up turns keep their context within the
+    # process even when persistent memory is off (or unavailable).
+    if not persisted_to_opensearch:
+        append_session_turn(effective_thread_id, user_input, answer)
+        yield {
+            "event": "memory_saved",
+            "data": {
+                "scope": "session",
+                "thread_id": effective_thread_id,
+                "message_id": message_id,
+            },
+        }
 
     final_response: Dict[str, Any] = {
         "answer": answer,

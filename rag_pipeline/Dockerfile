@@ -1,12 +1,23 @@
 FROM python:3.11-slim
 
-# Install system dependencies
+# Install system dependencies (GDAL for geopandas/fiona used by the in-process
+# MCP spatial tools the analysis agent loads)
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
+    gdal-bin \
+    libgdal-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+
+# Headless matplotlib + package root on PYTHONPATH so the agent can import the
+# in-process MCP tool modules (MCP_server/tools/*) and rag_pipeline/agent_runtime.
+# GDAL include paths so fiona/rasterio build against the system GDAL.
+ENV MPLBACKEND=Agg \
+    PYTHONPATH=/app \
+    CPLUS_INCLUDE_PATH=/usr/include/gdal \
+    C_INCLUDE_PATH=/usr/include/gdal
 
 # Copy requirements and install Python dependencies
 COPY requirements.txt .
@@ -15,10 +26,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Install spaCy model for NLP processing
 RUN python -m spacy download en_core_web_sm
 
-# Copy application packages
+# Copy application packages. MCP_server is required because the agent loads MCP
+# tools in-process (agent_runtime.langchain_mcp_tools imports MCP_server/tools/*).
 COPY rag_pipeline/ ./rag_pipeline/
 COPY agent_runtime/ ./agent_runtime/
 COPY api/ ./api/
+COPY MCP_server/ ./MCP_server/
 
 # Pre-download SentenceTransformer model so the container doesn't need
 # outbound network access to HuggingFace on first request

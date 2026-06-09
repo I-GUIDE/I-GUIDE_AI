@@ -13,8 +13,10 @@ RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && \
 
 WORKDIR /app
 
-# Copy requirements and install Python dependencies
-COPY requirements.txt .
+# Copy requirements and install Python dependencies (minimal — this service does
+# not need the geospatial/LLM stack, so it uses its own requirements file and
+# does NOT need GDAL system libs)
+COPY embedding-server/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy Node.js dependencies

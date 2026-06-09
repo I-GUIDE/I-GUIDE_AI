@@ -267,6 +267,32 @@
         grid-template-columns: 1fr;
       }
     }
+
+    /* Markdown rendering for the final answer */
+    .answer.markdown-body { white-space: normal; }
+    .markdown-body > *:first-child { margin-top: 0; }
+    .markdown-body > *:last-child { margin-bottom: 0; }
+    .markdown-body h1, .markdown-body h2, .markdown-body h3,
+    .markdown-body h4 { line-height: 1.25; margin: 0.9em 0 0.4em; font-weight: 700; }
+    .markdown-body h1 { font-size: 1.5rem; border-bottom: 1px solid var(--line); padding-bottom: .2em; }
+    .markdown-body h2 { font-size: 1.28rem; border-bottom: 1px solid var(--line); padding-bottom: .2em; }
+    .markdown-body h3 { font-size: 1.12rem; }
+    .markdown-body p { margin: 0.6em 0; }
+    .markdown-body ul, .markdown-body ol { margin: 0.5em 0; padding-left: 1.5em; }
+    .markdown-body li { margin: 0.2em 0; }
+    .markdown-body code { background: #f1f5f9; border: 1px solid var(--line); border-radius: 6px;
+      padding: 0.1em 0.35em; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.9em; }
+    .markdown-body pre { background: #0f172a; color: #e2e8f0; border-radius: 10px; padding: 12px 14px;
+      overflow: auto; margin: 0.7em 0; }
+    .markdown-body pre code { background: none; border: none; color: inherit; padding: 0; font-size: 0.85rem; }
+    .markdown-body blockquote { margin: 0.6em 0; padding: 0.2em 0.9em; border-left: 4px solid var(--accent);
+      background: #f8fafc; color: var(--muted); }
+    .markdown-body a { color: var(--accent); text-decoration: underline; }
+    .markdown-body hr { border: none; border-top: 1px solid var(--line); margin: 1em 0; }
+    .markdown-body table { border-collapse: collapse; margin: 0.7em 0; }
+    .markdown-body th, .markdown-body td { border: 1px solid var(--line); padding: 6px 10px; text-align: left; }
+    .markdown-body th { background: #f1f5f9; font-weight: 700; }
+    .markdown-body strong { font-weight: 700; }
   </style>
 </head>
 <body>
@@ -466,6 +492,61 @@
   </div>
 
   <script>
+    // --- Minimal, dependency-free, XSS-safe Markdown renderer (escape first, then format) ---
+    function renderMarkdown(src) {
+      const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      const inline = (s) => s
+        .replace(/`([^`]+)`/g, (_, c) => `<code>${c}</code>`)
+        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+        .replace(/__([^_]+)__/g, "<strong>$1</strong>")
+        .replace(/(^|[^*])\*(?!\s)([^*]+?)\*/g, "$1<em>$2</em>")
+        .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, t, u) => {
+          const safe = /^(https?:|mailto:|\/)/i.test(u) ? u : "#";
+          return `<a href="${safe}" target="_blank" rel="noopener noreferrer">${t}</a>`;
+        });
+      const lines = String(src || "").replace(/\r\n?/g, "\n").split("\n");
+      let html = "", i = 0, inUl = false, inOl = false, para = [];
+      const closeLists = () => { if (inUl) { html += "</ul>"; inUl = false; } if (inOl) { html += "</ol>"; inOl = false; } };
+      const flushPara = () => { if (para.length) { html += "<p>" + inline(esc(para.join("\n"))).replace(/\n/g, "<br>") + "</p>"; para = []; } };
+      const isSep = (l) => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/.test(l);
+      const cells = (l) => l.replace(/^\s*\|/, "").replace(/\|\s*$/, "").split("|").map((c) => c.trim());
+      while (i < lines.length) {
+        const line = lines[i];
+        const fence = line.match(/^```(\w*)\s*$/);
+        if (fence) { flushPara(); closeLists(); i++; const code = [];
+          while (i < lines.length && !/^```\s*$/.test(lines[i])) { code.push(lines[i]); i++; }
+          i++; html += `<pre><code>${esc(code.join("\n"))}</code></pre>`; continue; }
+        const h = line.match(/^(#{1,6})\s+(.*)$/);
+        if (h) { flushPara(); closeLists(); const lvl = h[1].length; html += `<h${lvl}>${inline(esc(h[2]))}</h${lvl}>`; i++; continue; }
+        if (/^\s*([-*_])\1{2,}\s*$/.test(line)) { flushPara(); closeLists(); html += "<hr>"; i++; continue; }
+        // GFM table: header row + separator row
+        if (line.includes("|") && i + 1 < lines.length && isSep(lines[i + 1])) {
+          flushPara(); closeLists();
+          const head = cells(line); i += 2; const rows = [];
+          while (i < lines.length && lines[i].includes("|") && lines[i].trim() !== "") { rows.push(cells(lines[i])); i++; }
+          html += "<table><thead><tr>" + head.map((c) => `<th>${inline(esc(c))}</th>`).join("") + "</tr></thead><tbody>"
+            + rows.map((r) => "<tr>" + r.map((c) => `<td>${inline(esc(c))}</td>`).join("") + "</tr>").join("") + "</tbody></table>";
+          continue;
+        }
+        const bq = line.match(/^>\s?(.*)$/);
+        if (bq) { flushPara(); closeLists(); const q = [];
+          while (i < lines.length) { const m = lines[i].match(/^>\s?(.*)$/); if (!m) break; q.push(m[1]); i++; }
+          html += `<blockquote>${inline(esc(q.join("\n"))).replace(/\n/g, "<br>")}</blockquote>`; continue; }
+        const ul = line.match(/^\s*[-*+]\s+(.*)$/);
+        if (ul) { flushPara(); if (inOl) { html += "</ol>"; inOl = false; } if (!inUl) { html += "<ul>"; inUl = true; }
+          html += `<li>${inline(esc(ul[1]))}</li>`; i++; continue; }
+        const ol = line.match(/^\s*\d+\.\s+(.*)$/);
+        if (ol) { flushPara(); if (inUl) { html += "</ul>"; inUl = false; } if (!inOl) { html += "<ol>"; inOl = true; }
+          html += `<li>${inline(esc(ol[1]))}</li>`; i++; continue; }
+        if (/^\s*$/.test(line)) { flushPara(); closeLists(); i++; continue; }
+        para.push(line); i++;
+      }
+      flushPara(); closeLists();
+      return html;
+    }
+    function setAnswerMarkdown(md) { answerEl.classList.add("markdown-body"); answerEl.innerHTML = renderMarkdown(md); }
+    function setAnswerText(t) { answerEl.classList.remove("markdown-body"); answerEl.textContent = t; }
+
     const form = document.getElementById("chat-form");
     const stopBtn = document.getElementById("stop-btn");
     const answerEl = document.getElementById("answer");
@@ -718,7 +799,7 @@
       statusChip.textContent = "connecting";
       memoryChip.textContent = `memory: ${payload.memory_id || "auto"}`;
       threadChip.textContent = `thread: ${payload.thread_id || "auto"}`;
-      answerEl.textContent = "Waiting for streamed events...";
+      setAnswerText("Waiting for streamed events...");
       docRefSet.clear();
       downloadableFiles.clear();
       renderDocRefs();
@@ -819,26 +900,29 @@
       if (eventName === "answer") {
         const text = payload.answer || payload.final_answer;
         if (text) {
-          answerEl.textContent = text;
+          setAnswerMarkdown(text);
           statusChip.textContent = "completed";
         }
       }
       if (eventName === "result") {
         if (payload.answer) {
-          answerEl.textContent = payload.answer;
+          setAnswerMarkdown(payload.answer);
         }
         if (payload.threadId) {
           threadChip.textContent = `thread: ${payload.threadId}`;
+          // Reuse the same thread/memory on the next turn so conversation memory persists.
+          document.getElementById("thread_id").value = payload.threadId;
         }
         if (payload.memoryId) {
           memoryChip.textContent = `memory: ${payload.memoryId}`;
+          document.getElementById("memory_id").value = payload.memoryId;
         }
         statusChip.textContent = "completed";
       }
       if (eventName === "error") {
         statusChip.textContent = "error";
         if (payload.error) {
-          answerEl.textContent = payload.error;
+          setAnswerText(payload.error);
         }
       }
     }
@@ -856,7 +940,7 @@
       } catch (error) {
         statusChip.textContent = "error";
         const message = String(error.message || error);
-        answerEl.textContent = message;
+        setAnswerText(message);
         appendTrace("client_error", {
           label: "Client error",
           message,

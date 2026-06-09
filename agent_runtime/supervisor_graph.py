@@ -67,7 +67,9 @@ CODE_PEER_PROMPT = (
     "sources.\n"
     "If an execute_code tool is available, RUN and DEBUG your code with it: execute the "
     "code, read stdout/stderr, fix any errors, and re-run until it works — then report the "
-    "final working code and its output.\n"
+    "final working code and its output. If your code needs third-party packages, pass them "
+    "via execute_code's `dependencies` argument (e.g. dependencies=[\"numpy\",\"pandas\"]); "
+    "they are installed before the code runs.\n"
     "If you need evidence from the knowledge base, prior analysis results, or another "
     "capability before you can write correct code, call request_capability(capability=..., "
     "reason=...) instead of guessing — the supervisor will fulfill it and re-run you. "
@@ -209,10 +211,28 @@ def _heuristic_decision(distilled: Dict[str, Any]) -> str:
     return "done"
 
 
+def _format_chat_history(chat_history: Optional[List[Any]], *, max_items: int = 8, max_chars: int = 4000) -> str:
+    """Render recent chat history as compact 'role: content' lines for prompts."""
+    if not chat_history:
+        return ""
+    lines: List[str] = []
+    for item in list(chat_history)[-max_items:]:
+        if isinstance(item, dict) and "role" in item and "content" in item:
+            role, content = item.get("role"), item.get("content")
+        elif isinstance(item, (list, tuple)) and len(item) == 2:
+            role, content = item[0], item[1]
+        else:
+            role, content = "user", item
+        lines.append(f"{role}: {content}")
+    text = "\n".join(lines)
+    return text if len(text) <= max_chars else "…" + text[-max_chars:]
+
+
 def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
     """LLM-driven next-action chooser with a deterministic heuristic fallback."""
 
     def decide(state: SupervisorState, distilled: Dict[str, Any]) -> str:
+        history = _format_chat_history(state.get("chat_history"))
         prompt = (
             "You are the orchestration supervisor for a geospatial research agent.\n"
             "Choose the SINGLE next action. Capabilities are peers you can use in any "
@@ -221,12 +241,17 @@ def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
             "- analyze: run a GIS/data analysis workflow (spatial ops, statistics) over the evidence\n"
             "- code: produce runnable code / implementation\n"
             "- done: stop; a grounded final answer is composed automatically from the "
-            "evidence + analysis results + code\n\n"
-            "Note: peers may also REQUEST a capability they need (e.g. code needs evidence); "
-            "such requests are fulfilled automatically before you are consulted again.\n\n"
+            "conversation + evidence + analysis results + code\n\n"
+            "Use the conversation so far for context. If the request refers to something "
+            "ALREADY produced earlier in the conversation (e.g. 'show me the code', 'explain "
+            "that', 'what did you find'), do NOT search again — choose 'done' so the answer is "
+            "composed from the conversation, unless genuinely new external information is needed.\n"
+            "Peers may also REQUEST a capability they need (e.g. code needs evidence); such "
+            "requests are fulfilled automatically before you are consulted again.\n\n"
             "Respond ONLY with JSON: {\"next\": \"search|analyze|code|done\", \"reason\": \"...\"}\n\n"
-            f"User request:\n{state.get('query', '')}\n\n"
-            f"Progress so far:\n{json.dumps(distilled, ensure_ascii=True)}\n"
+            + (f"Conversation so far:\n{history}\n\n" if history else "")
+            + f"User request:\n{state.get('query', '')}\n\n"
+            + f"Progress so far:\n{json.dumps(distilled, ensure_ascii=True)}\n"
         )
         try:
             active = llm
@@ -316,7 +341,7 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
         if evidence:
             q = f"{query}\n\nContext evidence:\n{_format_documents(evidence)}"
         resp = invoke_agent_with_payload_fallback(
-            executor, query=q, chat_history=None,
+            executor, query=q, chat_history=state.get("chat_history"),
             config=agent_config(child_thread_id(thread_id, "analysis")),
         )
         artifacts = extract_search_artifacts(resp)
@@ -368,7 +393,7 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
                 f"Analysis results:\n{json.dumps(state['analysis_results'], ensure_ascii=True, default=str)[:1500]}"
             )
         resp = invoke_agent_with_payload_fallback(
-            executor, query="\n\n".join(parts), chat_history=None,
+            executor, query="\n\n".join(parts), chat_history=state.get("chat_history"),
             config=agent_config(child_thread_id(state.get("thread_id"), "code")),
         )
         result: Dict[str, Any] = {"answer": extract_final_answer(resp) or "", "code_result": resp}
@@ -394,10 +419,14 @@ def default_synthesize_fn(llm: Optional[Any] = None) -> SynthesizeFn:
             active = build_default_llm()
         parts = [
             ANALYSIS_AGENT_PROMPT,
-            "(Compose the final answer from the materials below; do not call tools.)",
-            f"Question:\n{query}",
-            f"Evidence:\n{_format_documents(evidence)}",
+            "(Compose the final answer from the materials below — including the conversation "
+            "so far — and do not call tools.)",
         ]
+        history = _format_chat_history(chat_history)
+        if history:
+            parts.append(f"Conversation so far:\n{history}")
+        parts.append(f"Question:\n{query}")
+        parts.append(f"Evidence:\n{_format_documents(evidence)}")
         if analysis_results:
             parts.append(f"Analysis results:\n{json.dumps(analysis_results, ensure_ascii=True, default=str)[:2000]}")
         if code_result:

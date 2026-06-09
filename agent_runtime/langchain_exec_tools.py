@@ -12,9 +12,14 @@ def make_code_execution_tools(executor: Optional[Any] = None) -> List[Any]:
 
     from agent_runtime.code_execution import DEFAULT_TIMEOUT, get_code_executor
 
-    def execute_code(code: str, language: str = "python", timeout_seconds: int = DEFAULT_TIMEOUT) -> str:
+    def execute_code(
+        code: str,
+        language: str = "python",
+        timeout_seconds: int = DEFAULT_TIMEOUT,
+        dependencies: Optional[List[str]] = None,
+    ) -> str:
         ex = executor or get_code_executor()
-        result = ex.execute(code, language=language, timeout=timeout_seconds)
+        result = ex.execute(code, language=language, timeout=timeout_seconds, dependencies=dependencies)
         return json.dumps(result.to_dict(), ensure_ascii=True, default=str)
 
     tool = StructuredTool.from_function(
@@ -22,10 +27,12 @@ def make_code_execution_tools(executor: Optional[Any] = None) -> List[Any]:
         name="execute_code",
         description=(
             "Execute code in an isolated, sandboxed container and return JSON with "
-            "exit_code, stdout, stderr, timed_out, and any output file artifacts. "
-            "Use this to RUN and DEBUG code: run it, read stdout/stderr, fix errors, and "
-            "re-run until it works. No network access; only files written to the working "
-            "directory are returned as artifacts."
+            "exit_code, stdout, stderr, timed_out, the executed `code`, `installed`, and "
+            "`artifacts` (the source is saved as a downloadable `executed_code.py`, plus "
+            "any files the run wrote). Pass `dependencies` (a list of pip specs, e.g. "
+            "[\"numpy\", \"pandas==2.2\"]) to install third-party packages before running — "
+            "they are installed with network in a separate step, then the code runs with NO "
+            "network. Use this to RUN and DEBUG code: run, read stdout/stderr, fix, re-run."
         ),
     )
     return [tool]

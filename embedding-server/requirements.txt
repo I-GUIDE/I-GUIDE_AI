@@ -1,0 +1,15 @@
+# Minimal deps for the dense embedding server.
+# Deliberately excludes the geospatial stack (geopandas/fiona/rasterio -> GDAL)
+# and the LLM/agent stack, which this service does not use — keeps the image
+# small and avoids needing GDAL system libs to build.
+flask
+flask-cors
+gunicorn
+requests
+opensearch-py
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+transformers
+sentence-transformers
+shapely
+python-dotenv

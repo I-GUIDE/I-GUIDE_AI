@@ -159,6 +159,60 @@ def test_code_request_routes_then_reruns():
     assert state["final_answer"] == "final:code-done"
 
 
+def test_decider_uses_chat_history():
+    """The supervisor decider sees the conversation; a follow-up like 'show me the code'
+    should NOT trigger a fresh search."""
+    from agent_runtime.supervisor_graph import default_decide_fn
+
+    captured = {}
+
+    def rec(prompt):
+        captured["prompt"] = prompt
+        return '{"next": "done", "reason": "already in conversation"}'
+
+    decide = default_decide_fn(llm=rec)
+    nxt = decide(
+        {"query": "show me the code", "chat_history": [{"role": "assistant", "content": "PRIOR_FIB_CODE"}]},
+        {"has_evidence": False, "actions_taken": []},
+    )
+    assert "PRIOR_FIB_CODE" in captured["prompt"]
+    assert "Conversation so far" in captured["prompt"]
+    assert nxt == "done"
+
+
+def test_synthesize_uses_chat_history():
+    from agent_runtime.supervisor_graph import default_synthesize_fn
+
+    captured = {}
+
+    def rec(prompt):
+        captured["prompt"] = prompt
+        return "final"
+
+    out = default_synthesize_fn(llm=rec)(
+        "show me the code", [], None, None, [{"role": "assistant", "content": "PRIOR_CODE_X"}]
+    )
+    assert out == "final"
+    assert "PRIOR_CODE_X" in captured["prompt"]
+
+
+def test_code_worker_passes_chat_history(monkeypatch):
+    import agent_runtime.executor_factory as ef
+    import agent_runtime.supervisor_graph as sg
+
+    captured = {}
+    monkeypatch.setattr(ef, "build_agent_executor", lambda **k: object())
+
+    def fake_invoke(executor, *, query, chat_history, config):
+        captured["chat_history"] = chat_history
+        return {"messages": []}
+
+    monkeypatch.setattr(ef, "invoke_agent_with_payload_fallback", fake_invoke)
+    hist = [{"role": "user", "content": "H"}]
+    sg.default_code_fn()("q", [], {"chat_history": hist})
+    assert captured["chat_history"] == hist
+
+
 def test_request_capability_tool_records_needs():
     """The request_capability tool (the model-driven signal) records valid requests."""
     from agent_runtime.supervisor_graph import _make_request_tool

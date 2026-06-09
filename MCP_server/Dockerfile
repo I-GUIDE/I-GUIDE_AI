@@ -11,9 +11,12 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Headless matplotlib and package root on PYTHONPATH so MCP tools can do
-# `from rag_pipeline...` / `from agent_runtime...` without sys.path hacks
+# `from rag_pipeline...` / `from agent_runtime...` without sys.path hacks.
+# GDAL include paths so fiona/rasterio build against the system GDAL.
 ENV MPLBACKEND=Agg \
-    PYTHONPATH=/app
+    PYTHONPATH=/app \
+    CPLUS_INCLUDE_PATH=/usr/include/gdal \
+    C_INCLUDE_PATH=/usr/include/gdal
 
 # Copy requirements and install Python deps
 COPY requirements.txt .

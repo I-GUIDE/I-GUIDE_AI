@@ -55,7 +55,9 @@ Thumbs.db
 
 # Generated notebook workflows (runtime artifacts)
 MCP_server/generated_notebook_workflows/
-agent_chat_files/qgis_jobs/
+
+# Agent chat runtime artifacts (uploads, generated outputs, metadata, qgis jobs)
+agent_chat_files/
 
 # Temporary files
 *.tmp

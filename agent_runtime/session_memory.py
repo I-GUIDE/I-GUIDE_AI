@@ -1,0 +1,121 @@
+"""Process-local, per-``thread_id`` conversation memory.
+
+This is the session-local analogue of the durable OpenSearch store in
+``rag_pipeline/memory_module.py``.  The two layers are intentionally distinct:
+
+* **Persistent memory** (OpenSearch, gated by ``use_persistent_memory``) is the
+  durable record that survives process restarts.
+* **Session memory** (this module) preserves conversation turns *within a single
+  process lifetime* keyed by ``thread_id`` so that, even when persistent memory is
+  switched OFF, follow-up turns ("show me the code", "explain that") still see the
+  prior conversation.
+
+Both layers store turns in the same shape — ``{"userQuery": ..., "answer": ...}`` —
+so ``agent_chat_service._build_chat_history`` can consume either one transparently.
+
+The store is bounded (per-thread turn cap + global LRU thread cap) to avoid
+unbounded growth in a long-lived process, and is thread-safe (the streaming and
+non-streaming entry points may run concurrently).
+"""
+
+from __future__ import annotations
+
+import os
+import threading
+from collections import OrderedDict
+from typing import Any, Dict, List, Optional
+
+_LOCK = threading.RLock()
+# Insertion-ordered so we can evict the least-recently-used thread first.
+_STORE: "OrderedDict[str, List[Dict[str, Any]]]" = OrderedDict()
+
+_DEFAULT_MAX_TURNS = 50
+_DEFAULT_MAX_THREADS = 500
+
+
+def _max_turns() -> int:
+    try:
+        return max(1, int(os.getenv("AGENT_SESSION_MEMORY_MAX_TURNS", str(_DEFAULT_MAX_TURNS))))
+    except (TypeError, ValueError):
+        return _DEFAULT_MAX_TURNS
+
+
+def _max_threads() -> int:
+    try:
+        return max(1, int(os.getenv("AGENT_SESSION_MEMORY_MAX_THREADS", str(_DEFAULT_MAX_THREADS))))
+    except (TypeError, ValueError):
+        return _DEFAULT_MAX_THREADS
+
+
+def get_session_history(thread_id: Optional[str]) -> List[Dict[str, Any]]:
+    """Return a copy of the recorded turns for *thread_id* (oldest first).
+
+    Returns an empty list when *thread_id* is falsy or unknown.
+    """
+    if not thread_id:
+        return []
+    with _LOCK:
+        turns = _STORE.get(thread_id)
+        if not turns:
+            return []
+        _STORE.move_to_end(thread_id)  # mark as recently used
+        return [dict(turn) for turn in turns]
+
+
+def build_session_memory_doc(thread_id: Optional[str]) -> Dict[str, Any]:
+    """Return a ``memory_doc``-shaped dict ``{"chat_history": [...]}``.
+
+    This mirrors the shape returned by ``rag_pipeline.memory_module.get_memory`` so
+    it can be fed directly to ``agent_chat_service._build_chat_history``.
+    """
+    return {"chat_history": get_session_history(thread_id)}
+
+
+def append_session_turn(thread_id: Optional[str], user_query: str, answer: str) -> None:
+    """Record one conversation turn for *thread_id*.
+
+    No-op when *thread_id* is falsy (there is no stable key to attach the turn to).
+    Enforces the per-thread turn cap and the global LRU thread cap.
+    """
+    if not thread_id:
+        return
+    entry = {"userQuery": str(user_query or ""), "answer": str(answer or "")}
+    with _LOCK:
+        turns = _STORE.get(thread_id)
+        if turns is None:
+            turns = []
+            _STORE[thread_id] = turns
+        turns.append(entry)
+
+        max_turns = _max_turns()
+        if len(turns) > max_turns:
+            del turns[: len(turns) - max_turns]
+
+        _STORE.move_to_end(thread_id)  # most-recently used
+
+        max_threads = _max_threads()
+        while len(_STORE) > max_threads:
+            _STORE.popitem(last=False)  # evict least-recently used
+
+
+def clear_session(thread_id: Optional[str]) -> None:
+    """Drop all recorded turns for *thread_id* (no-op if unknown)."""
+    if not thread_id:
+        return
+    with _LOCK:
+        _STORE.pop(thread_id, None)
+
+
+def reset_all() -> None:
+    """Clear the entire session store (primarily for tests)."""
+    with _LOCK:
+        _STORE.clear()
+
+
+__all__ = [
+    "append_session_turn",
+    "build_session_memory_doc",
+    "clear_session",
+    "get_session_history",
+    "reset_all",
+]

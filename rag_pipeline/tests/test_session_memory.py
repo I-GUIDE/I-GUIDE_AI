@@ -1,0 +1,202 @@
+"""Tests for session-local (process-local) conversation memory.
+
+Covers (1) the session_memory store directly and (2) the agent_chat_service
+integration: with persistent (OpenSearch) memory OFF, a follow-up turn must
+still see the prior conversation, keyed by thread_id.
+
+The orchestrator seam (run_agent_query / stream_agent_query_events) is stubbed,
+so there is no real LLM, search backend, or OpenSearch.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+import agent_runtime.agent_chat_service as acs
+from agent_runtime import session_memory as sm
+
+
+@pytest.fixture(autouse=True)
+def _clean_store():
+    sm.reset_all()
+    yield
+    sm.reset_all()
+
+
+# --- session_memory store --------------------------------------------------
+
+def test_append_and_get_round_trip():
+    sm.append_session_turn("t1", "what is the capital of france?", "Paris.")
+    hist = sm.get_session_history("t1")
+    assert hist == [{"userQuery": "what is the capital of france?", "answer": "Paris."}]
+
+
+def test_threads_are_isolated():
+    sm.append_session_turn("t1", "q1", "a1")
+    sm.append_session_turn("t2", "q2", "a2")
+    assert sm.get_session_history("t1") == [{"userQuery": "q1", "answer": "a1"}]
+    assert sm.get_session_history("t2") == [{"userQuery": "q2", "answer": "a2"}]
+
+
+def test_falsy_thread_id_is_noop():
+    sm.append_session_turn(None, "q", "a")
+    sm.append_session_turn("", "q", "a")
+    assert sm.get_session_history(None) == []
+    assert sm.get_session_history("") == []
+
+
+def test_unknown_thread_returns_empty():
+    assert sm.get_session_history("never-seen") == []
+
+
+def test_get_returns_a_copy_not_the_internal_list():
+    sm.append_session_turn("t1", "q1", "a1")
+    hist = sm.get_session_history("t1")
+    hist.append({"userQuery": "x", "answer": "y"})  # mutate the copy
+    assert sm.get_session_history("t1") == [{"userQuery": "q1", "answer": "a1"}]
+
+
+def test_per_thread_turn_cap(monkeypatch):
+    monkeypatch.setenv("AGENT_SESSION_MEMORY_MAX_TURNS", "3")
+    for i in range(5):
+        sm.append_session_turn("t1", f"q{i}", f"a{i}")
+    hist = sm.get_session_history("t1")
+    assert [h["userQuery"] for h in hist] == ["q2", "q3", "q4"]  # oldest dropped
+
+
+def test_global_thread_lru_eviction(monkeypatch):
+    monkeypatch.setenv("AGENT_SESSION_MEMORY_MAX_THREADS", "2")
+    sm.append_session_turn("t1", "q", "a")
+    sm.append_session_turn("t2", "q", "a")
+    sm.append_session_turn("t3", "q", "a")  # evicts least-recently-used (t1)
+    assert sm.get_session_history("t1") == []
+    assert sm.get_session_history("t2")
+    assert sm.get_session_history("t3")
+
+
+def test_build_session_memory_doc_shape():
+    sm.append_session_turn("t1", "q1", "a1")
+    doc = sm.build_session_memory_doc("t1")
+    assert doc == {"chat_history": [{"userQuery": "q1", "answer": "a1"}]}
+
+
+def test_clear_session():
+    sm.append_session_turn("t1", "q", "a")
+    sm.clear_session("t1")
+    assert sm.get_session_history("t1") == []
+
+
+# --- agent_chat_service integration (persistence OFF) ----------------------
+
+def _stub_run_agent_query(monkeypatch, answer="ANSWER", record=None):
+    """Patch run_agent_query to capture chat_history and return a canned result."""
+
+    def fake(query, *, chat_history=None, thread_id=None, **kwargs):
+        if record is not None:
+            record.append({"chat_history": list(chat_history or []), "thread_id": thread_id})
+        return {
+            "final_answer": answer,
+            "thread_id": thread_id,
+            "available_skills": [],
+            "route_trace": {},
+        }
+
+    monkeypatch.setattr(acs, "run_agent_query", fake)
+
+
+def test_session_memory_preserved_when_persistent_off(monkeypatch):
+    """Turn 1 records; turn 2 (same thread_id) sees the prior turn as chat_history,
+    even though use_persistent_memory is False."""
+    record = []
+    _stub_run_agent_query(monkeypatch, answer="def fib(): ...", record=record)
+
+    # Turn 1: no prior history.
+    r1 = acs.run_agent_chat(
+        user_input="write python for the first 15 fibonacci numbers",
+        thread_id="sess-1",
+        use_persistent_memory=False,
+    )
+    assert record[0]["chat_history"] == []  # nothing yet
+    assert r1["memory_id"] is None  # OpenSearch not used
+    assert r1["thread_id"] == "sess-1"
+
+    # Turn 2: a follow-up on the SAME thread must carry turn-1 context.
+    acs.run_agent_chat(
+        user_input="show me the code",
+        thread_id="sess-1",
+        use_persistent_memory=False,
+    )
+    turn2_history = record[1]["chat_history"]
+    assert {"role": "user", "content": "write python for the first 15 fibonacci numbers"} in turn2_history
+    assert {"role": "assistant", "content": "def fib(): ..."} in turn2_history
+
+
+def test_no_session_record_when_thread_id_absent(monkeypatch):
+    """Without a stable thread_id there is nothing to key session memory on; the
+    auto-generated thread_id from the result is used for the write side."""
+    record = []
+    _stub_run_agent_query(monkeypatch, answer="A", record=record)
+
+    out = acs.run_agent_chat(user_input="hi", use_persistent_memory=False)
+    # run_agent_query received None thread_id (stub echoes it back as None) so
+    # nothing is recorded; this is acceptable (no session continuity w/o an id).
+    assert out["memory_id"] is None
+    assert sm.get_session_history(None) == []
+
+
+def test_persistent_on_does_not_double_write_session(monkeypatch):
+    """When OpenSearch persistence succeeds, the turn is NOT also written to the
+    session store (avoids duplication); chat_history comes from the memory_doc."""
+    record = []
+    _stub_run_agent_query(monkeypatch, answer="A", record=record)
+
+    seen = {}
+
+    def fake_get_or_create(mid):
+        return {"chat_history": [{"userQuery": "earlier", "answer": "prior-answer"}]}
+
+    def fake_update(mid, **kwargs):
+        seen["updated"] = mid
+
+    monkeypatch.setattr(acs, "get_or_create_memory", fake_get_or_create)
+    monkeypatch.setattr(acs, "update_memory", fake_update)
+
+    acs.run_agent_chat(
+        user_input="follow up",
+        memory_id="mem-1",
+        use_persistent_memory=True,
+    )
+    # chat_history sourced from OpenSearch memory_doc
+    assert {"role": "user", "content": "earlier"} in record[0]["chat_history"]
+    assert seen.get("updated") == "mem-1"
+    # session store left untouched
+    assert sm.get_session_history("mem-1") == []
+
+
+def test_stream_session_memory_preserved_when_persistent_off(monkeypatch):
+    """Streaming twin: turn 2 over the same thread sees turn-1 context with
+    persistence OFF."""
+    record = []
+
+    def fake_stream(query, *, chat_history=None, thread_id=None, **kwargs):
+        record.append({"chat_history": list(chat_history or []), "thread_id": thread_id})
+        yield {"event": "status", "data": {"stage": "orchestrate"}}
+        yield {
+            "event": "completed",
+            "data": {"final_answer": "STREAM-ANSWER", "thread_id": thread_id,
+                     "available_skills": [], "route_trace": {}},
+        }
+
+    monkeypatch.setattr(acs, "stream_agent_query_events", fake_stream)
+
+    list(acs.stream_agent_chat_events(
+        user_input="first question", thread_id="s-stream", use_persistent_memory=False))
+    events2 = list(acs.stream_agent_chat_events(
+        user_input="second question", thread_id="s-stream", use_persistent_memory=False))
+
+    turn2_history = record[1]["chat_history"]
+    assert {"role": "user", "content": "first question"} in turn2_history
+    assert {"role": "assistant", "content": "STREAM-ANSWER"} in turn2_history
+    # a session-scoped memory_saved event is emitted
+    saved = [e for e in events2 if e.get("event") == "memory_saved"]
+    assert saved and saved[0]["data"].get("scope") == "session"

@@ -1,4 +1,14 @@
-version: '3.8'
+# I-GUIDE agent stack.
+#
+#   docker compose up --build      # launches the agent: embedding-server, mcp-server, agent-api
+#   dashboard endpoint -> http://localhost:3500/agent/chat/stream
+#
+# Optional ingestion pipeline (needs MinIO):  docker compose --profile ingestion up
+#
+# All secrets / backends (OpenSearch, Neo4j, LLM keys, MinIO, Vision API) come from
+# .env via `env_file`, which injects values LITERALLY — so passwords containing a `$`
+# are passed unchanged. (Do NOT reference secrets with ${VAR} in this file: Compose
+# would try to interpolate a `$` inside the value and silently corrupt it.)
 
 services:
   embedding-server:
@@ -8,12 +18,6 @@ services:
     container_name: embedding-server
     ports:
       - "5000:5000"
-    environment:
-      - OPENSEARCH_NODE=${OPENSEARCH_NODE}
-      - OPENSEARCH_INDEX=${OPENSEARCH_INDEX}
-      - OPENSEARCH_USERNAME=${OPENSEARCH_USERNAME}
-      - OPENSEARCH_PASSWORD=${OPENSEARCH_PASSWORD}
-      - FLASK_EMBEDDING_URL=${FLASK_EMBEDDING_URL:-http://embedding-server:5000}
     env_file:
       - .env
     restart: unless-stopped
@@ -26,75 +30,68 @@ services:
     networks:
       - iguide-network
 
-  metadata-extraction-server:
+  mcp-server:
     build:
       context: .
-      dockerfile: metadata-extraction-server/Dockerfile
-    container_name: metadata-extraction-server
+      dockerfile: MCP_server/Dockerfile
+    container_name: mcp-server
     ports:
-      - "5001:5001"
+      - "8000:8000"
     environment:
-      - MINIO_ENDPOINT_URL=${MINIO_ENDPOINT_URL}
-      - MINIO_ACCESS_KEY_ID=${MINIO_ACCESS_KEY_ID}
-      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
-      - OPENSEARCH_NODE=${OPENSEARCH_NODE}
-      - OPENSEARCH_INDEX=${OPENSEARCH_INDEX}
-    env_file:
-      - .env
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:5001/health', timeout=5)"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-    networks:
-      - iguide-network
-
-  rag-pipeline:
-    build:
-      context: .
-      dockerfile: rag_pipeline/Dockerfile
-    container_name: rag-pipeline
-    ports:
-      - "5002:5002"
-    environment:
-      # OpenSearch Configuration
-      - OPENSEARCH_NODE=${OPENSEARCH_NODE}
-      - OPENSEARCH_INDEX=${OPENSEARCH_INDEX}
-      - OPENSEARCH_USERNAME=${OPENSEARCH_USERNAME}
-      - OPENSEARCH_PASSWORD=${OPENSEARCH_PASSWORD}
-      - OPENSEARCH_MEMORY_INDEX=${OPENSEARCH_MEMORY_INDEX:-chat_memory}
-      # Embedding Service
-      - FLASK_EMBEDDING_URL=http://embedding-server:5000
-      # MCP Tool Server
-      - MCP_SERVER_URL=http://mcp-server:8000/mcp/
-      # LLM Configuration
-      - ANVILGPT_URL=${ANVILGPT_URL}
-      - ANVILGPT_KEY=${ANVILGPT_KEY}
-      - ANVILGPT_MODEL=${ANVILGPT_MODEL:-gpt-oss:120b}
-      # Neo4j Configuration
-      - NEO4J_CONNECTION_STRING=${NEO4J_CONNECTION_STRING}
-      - NEO4J_URI=${NEO4J_URI}
-      - NEO4J_USER=${NEO4J_USER}
-      - NEO4J_USERNAME=${NEO4J_USERNAME}
-      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
-      - NEO4J_DB=${NEO4J_DB:-neo4j}
-      # Feature Flags
-      - SPATIAL_BACKEND_ENABLED=${SPATIAL_BACKEND_ENABLED:-1}
-      - SEMANTIC_BACKEND_ENABLED=${SEMANTIC_BACKEND_ENABLED:-1}
-      - USE_LLM_ROUTER=${USE_LLM_ROUTER:-1}
-      # Memory Configuration
-      - MEMORY_EMBEDDER_MODEL=${MEMORY_EMBEDDER_MODEL:-all-MiniLM-L6-v2}
-      - MEMORY_CONTEXT_THRESHOLD=${MEMORY_CONTEXT_THRESHOLD:-0.35}
-      # Logging
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - PORT=5002
+      - MCP_ALLOWED_HOSTS=${MCP_ALLOWED_HOSTS:-mcp-server:*,127.0.0.1:*,localhost:*}
+      - MCP_ALLOWED_ORIGINS=${MCP_ALLOWED_ORIGINS:-http://mcp-server:*,http://127.0.0.1:*,http://localhost:*}
       - AGENT_FILE_STORAGE_ROOT=/app/agent_chat_files
     env_file:
       - .env
     volumes:
       - agent_chat_files:/app/agent_chat_files
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - iguide-network
+
+  # The agent API (api/server.py) — serves /agent/chat and /agent/chat/stream.
+  agent-api:
+    build:
+      context: .
+      dockerfile: rag_pipeline/Dockerfile
+    container_name: agent-api
+    ports:
+      - "3500:5002"   # host:container — agent reachable on http://localhost:3500
+    # Secrets + backend config (OPENSEARCH_*, NEO4J_*, ANVILGPT_*, VLLM_*/OPENAI_*) are
+    # injected literally from .env below. Only fixed/defaulted values live here:
+    environment:
+      # Service wiring (override anything in .env)
+      - FLASK_EMBEDDING_URL=http://embedding-server:5000
+      - MCP_SERVER_URL=http://mcp-server:8000/mcp/
+      - PORT=5002
+      - AGENT_FILE_STORAGE_ROOT=/app/agent_chat_files
+      # Search feature flags (defaults; override in .env if desired)
+      - SPATIAL_BACKEND_ENABLED=${SPATIAL_BACKEND_ENABLED:-1}
+      - SEMANTIC_BACKEND_ENABLED=${SEMANTIC_BACKEND_ENABLED:-1}
+      - USE_LLM_ROUTER=${USE_LLM_ROUTER:-1}
+      # Agent runtime flags
+      - AGENT_SUPERVISOR=${AGENT_SUPERVISOR:-1}
+      - AGENT_DEV=${AGENT_DEV:-0}
+      - AGENT_RECURSION_LIMIT=${AGENT_RECURSION_LIMIT:-60}
+      # Sandboxed code execution — OFF by default (needs host Docker access to enable; see note)
+      - AGENT_CODE_EXEC=${AGENT_CODE_EXEC:-0}
+      - AGENT_CODE_EXEC_BACKEND=${AGENT_CODE_EXEC_BACKEND:-docker}
+      - AGENT_CODE_EXEC_IMAGE=${AGENT_CODE_EXEC_IMAGE:-python:3.11-slim}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    env_file:
+      - .env
+    volumes:
+      - agent_chat_files:/app/agent_chat_files
+      # To use sandboxed code execution (AGENT_CODE_EXEC=1): the agent shells out to
+      # `docker run`, so add the docker CLI to rag_pipeline/Dockerfile and uncomment the
+      # mount below (the non-root appuser needs socket access, or run this service as root).
+      # - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
     depends_on:
       embedding-server:
@@ -110,31 +107,25 @@ services:
     networks:
       - iguide-network
 
-  mcp-server:
+  # Ingestion pipeline (MinIO -> metadata -> OpenSearch). Not needed by the agent.
+  # Start with:  docker compose --profile ingestion up
+  metadata-extraction-server:
+    profiles: ["ingestion"]
     build:
       context: .
-      dockerfile: MCP_server/Dockerfile
-    container_name: mcp-server
+      dockerfile: metadata-extraction-server/Dockerfile
+    container_name: metadata-extraction-server
     ports:
-      - "8000:8000"
-    environment:
-      - VISION_API_URL=${VISION_API_URL}
-      - VISION_API_KEY=${VISION_API_KEY}
-      - VISION_API_MODEL=${VISION_API_MODEL}
-      - MCP_ALLOWED_HOSTS=${MCP_ALLOWED_HOSTS:-mcp-server:*,127.0.0.1:*,localhost:*}
-      - MCP_ALLOWED_ORIGINS=${MCP_ALLOWED_ORIGINS:-http://mcp-server:*,http://127.0.0.1:*,http://localhost:*}
-      - AGENT_FILE_STORAGE_ROOT=/app/agent_chat_files
+      - "5001:5001"
     env_file:
       - .env
-    volumes:
-      - agent_chat_files:/app/agent_chat_files
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=5)"]
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:5001/health', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 30s
+      start_period: 10s
     networks:
       - iguide-network
 
