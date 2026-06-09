@@ -90,6 +90,10 @@ def _normalize_agent_chat_request(data: dict) -> dict:
     # (None) falls back to the AGENT_DEV env var in the streaming layer.
     agent_dev_raw = _coalesce(data.get("agentDev"), data.get("agent_dev"))
     agent_dev = None if agent_dev_raw is None else bool(agent_dev_raw)
+    # use_supervisor is tri-state too: absent (None) falls back to the
+    # AGENT_SUPERVISOR env default (on).
+    use_supervisor_raw = _coalesce(data.get("useSupervisor"), data.get("use_supervisor"))
+    use_supervisor = None if use_supervisor_raw is None else bool(use_supervisor_raw)
 
     return {
         "user_query": str(user_query).strip() if user_query is not None else "",
@@ -109,6 +113,7 @@ def _normalize_agent_chat_request(data: dict) -> dict:
         "skill_roots": skill_roots,
         "verbose": verbose,
         "agent_dev": agent_dev,
+        "use_supervisor": use_supervisor,
     }
 
 
@@ -1234,6 +1239,7 @@ def agent_chat():
             file_ids=normalized.get("file_ids"),
             skill_roots=normalized.get("skill_roots"),
             verbose=bool(normalized.get("verbose", False)),
+            use_supervisor=normalized.get("use_supervisor"),
         )
         return jsonify(_format_agent_chat_result(raw)), 200
     except ValueError as e:
@@ -1609,6 +1615,7 @@ def agent_chat_stream():
                     skill_roots=normalized.get("skill_roots"),
                     verbose=bool(normalized.get("verbose", False)),
                     agent_dev=normalized.get("agent_dev"),
+                    use_supervisor=normalized.get("use_supervisor"),
                 ):
                     event_name = str(item.get("event") or "message")
                     payload = item.get("data") or {}

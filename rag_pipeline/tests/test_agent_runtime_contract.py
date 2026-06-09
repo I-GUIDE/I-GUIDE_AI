@@ -65,6 +65,10 @@ def stub_orchestrator(monkeypatch):
     """
     import agent_runtime.orchestrator_graph as og
 
+    # These tests characterize the agents-as-tools orchestrate path; the supervisor
+    # path is now the default, so pin it off here.
+    monkeypatch.setenv("AGENT_SUPERVISOR", "0")
+
     def fake_collect(**kwargs):
         return [
             SimpleNamespace(name="search_agent_evidence"),

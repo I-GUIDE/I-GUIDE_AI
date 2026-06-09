@@ -60,6 +60,7 @@ def run_agent_query(
     thread_id: Optional[str] = None,
     checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
     skill_roots: Optional[List[str]] = None,
+    use_supervisor: Optional[bool] = None,
 ) -> dict:
     """Run one query through the hybrid orchestrator graph."""
     effective_thread_id = resolve_thread_id(thread_id, checkpointer)
@@ -76,6 +77,7 @@ def run_agent_query(
         thread_id=effective_thread_id,
         checkpointer=checkpointer,
         skill_roots=skill_roots,
+        use_supervisor=use_supervisor,
     )
     final_state = graph.invoke(
         {
@@ -126,6 +128,7 @@ def stream_agent_query_events(
     checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
     skill_roots: Optional[List[str]] = None,
     agent_dev: Optional[bool] = None,
+    use_supervisor: Optional[bool] = None,
 ) -> Generator[Dict[str, Any], None, None]:
     """Yield structured SSE events while running a query.
 
@@ -179,6 +182,7 @@ def stream_agent_query_events(
                     thread_id=effective_thread_id,
                     checkpointer=checkpointer,
                     skill_roots=skill_roots,
+                    use_supervisor=use_supervisor,
                 )
                 final_state = graph.invoke(
                     {

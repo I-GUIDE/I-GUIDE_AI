@@ -1,23 +1,23 @@
 """Shared-state supervisor-over-peers orchestration.
 
-Search / analysis / code are **peer** capability nodes (same level) that share one
+Search / analyze / code are **peer** capability nodes (same level) that share one
 typed ``SupervisorState``; an LLM **supervisor** decides the next action and the
-graph **loops** back to it — so the agent can search-only, analyze-from-memory,
-or multi-hop (analyze → "need more" → search → analyze). This is the agentic
-alternative to nesting search under analysis.
+graph **loops** back to it. When the supervisor is ``done``, a dedicated
+**synthesize** node composes the final, grounded answer.
 
-Design rules (from the architecture discussion):
-* **Peers, not pipeline stages** — the supervisor routes dynamically and loops.
-* **Operators bundled into capabilities** — rerank lives inside the search node,
-  grounding audit inside the analysis node (deterministic, applied whenever that
-  capability runs).
-* **Context hygiene** — the heavy ``evidence`` lives in shared state; the
-  supervisor only ever sees a *distilled* view (counts/flags/summaries).
+Single-responsibility split:
+* **search**   — retrieve evidence (rerank bundled in).
+* **analyze**  — *execute a GIS/data analysis workflow* (run spatial/stat tools),
+  writing ``analysis_results`` to shared state. It does NOT compose prose.
+* **code**     — produce runnable code, writing ``code_result``.
+* **synthesize** — compose the final answer (original ``ANALYSIS_AGENT_PROMPT``
+  format) from evidence + analysis_results + code_result, then audit grounding.
 
-Everything is dependency-injected (``decide_fn`` / ``search_fn`` / ``analyze_fn`` /
-``code_fn`` / ``llm``) so the graph is unit-testable without a live LLM/backends.
-Default adapters wire to the existing agents and are best-effort (need live
-validation). Gated by ``AGENT_SUPERVISOR``; the agents-as-tools path stays default.
+The supervisor only ever sees a *distilled* view (counts/flags), never the heavy
+documents. Everything is dependency-injected so the graph is unit-testable with no
+live LLM/backends. Default adapters wire to existing agents (best-effort; need
+live validation). Default ON; per-request override ``use_supervisor``; env opt-out
+``AGENT_SUPERVISOR=0``.
 """
 
 from __future__ import annotations
@@ -30,9 +30,9 @@ from langgraph.graph import END, START, StateGraph
 
 from agent_runtime.evidence_quality import audit_answer_grounding, rerank_documents
 from agent_runtime.evidence_subgraph import (
+    _content_to_text,
     _doc_field,
-    default_compose_fn,
-    distill_evidence_state,
+    _format_documents,
     extract_documents_from_search_evidence,
 )
 from agent_runtime.streaming_trace import emit_trace_event
@@ -41,21 +41,46 @@ ALLOWED_ACTIONS = ("search", "analyze", "code", "done")
 DEFAULT_MAX_STEPS = 8
 
 # Injected callables
-DecideFn = Callable[["SupervisorState", Dict[str, Any]], str]   # (state, distilled) -> action
-SearchFn = Callable[[str, "SupervisorState"], List[Any]]         # (query, state) -> documents
-AnalyzeFn = Callable[[str, List[Any], Optional[List[Any]]], str] # (query, evidence, chat_history) -> answer
-CodeFn = Callable[[str, List[Any]], Any]                         # (query, evidence) -> code_result
+DecideFn = Callable[["SupervisorState", Dict[str, Any]], str]    # (state, distilled) -> action
+SearchFn = Callable[[str, "SupervisorState"], List[Any]]          # (query, state) -> documents
+AnalyzeFn = Callable[[str, List[Any], "SupervisorState"], Any]    # (query, evidence, state) -> analysis_results
+CodeFn = Callable[[str, List[Any], "SupervisorState"], Any]       # (query, evidence, state) -> code_result
+# (query, evidence, analysis_results, code_result, chat_history) -> answer
+SynthesizeFn = Callable[[str, List[Any], Any, Any, Optional[List[Any]]], str]
+
+ANALYSIS_WORKFLOW_PROMPT = (
+    "You are AnalysisAgent. Execute the geospatial / data ANALYSIS WORKFLOW the user "
+    "needs using the available tools (QGIS/PyQGIS, spatial operations, statistics). "
+    "Actually CALL the tools to compute results — do not merely describe them. Use the "
+    "provided evidence for context. Report the concrete results/artifacts you produced; "
+    "a separate step composes the final user-facing answer.\n"
+    "If you need evidence from the knowledge base, prior results, or another capability "
+    "before you can run the analysis, call request_capability(capability=..., reason=...) "
+    "instead of guessing — the supervisor will fulfill the request and re-run you."
+)
+
+CODE_PEER_PROMPT = (
+    "You are CodeAgent. Produce practical, runnable code with a short `Dependencies:` "
+    "section. Ground domain facts only on the provided evidence; do not invent APIs or "
+    "sources.\n"
+    "If you need evidence from the knowledge base, prior analysis results, or another "
+    "capability before you can write correct code, call request_capability(capability=..., "
+    "reason=...) instead of guessing — the supervisor will fulfill it and re-run you. "
+    "If evidence is insufficient, say what is missing."
+)
 
 
 class SupervisorState(TypedDict, total=False):
     query: str
     chat_history: List[Any]
     thread_id: Optional[str]
-    evidence: List[Any]        # accumulated, dedup'd documents (shared, heavy)
-    answer: str
+    evidence: List[Any]            # accumulated, dedup'd documents (shared, heavy)
+    analysis_results: Any          # outputs of the analysis workflow
     code_result: Any
+    answer: str
     audit: Dict[str, Any]
-    actions: List[str]         # supervisor decision history
+    needs: List[Dict[str, Any]]    # queue of capability requests from peers (FIFO)
+    actions: List[str]             # supervisor decision history
     next_action: str
     step: int
     max_steps: int
@@ -64,8 +89,12 @@ class SupervisorState(TypedDict, total=False):
 
 
 def is_supervisor_enabled() -> bool:
-    """Whether the orchestrate path should use the supervisor-over-peers graph."""
-    return (os.getenv("AGENT_SUPERVISOR") or "").strip().lower() in {"1", "true", "yes", "on"}
+    """Whether the orchestrate path should use the supervisor-over-peers graph.
+
+    Default **on**; set ``AGENT_SUPERVISOR`` to a falsy value (0/false/no/off) to
+    fall back to the legacy agents-as-tools orchestrator.
+    """
+    return (os.getenv("AGENT_SUPERVISOR") or "").strip().lower() not in {"0", "false", "no", "off"}
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +102,6 @@ def is_supervisor_enabled() -> bool:
 # ---------------------------------------------------------------------------
 
 def _merge_dedup(existing: List[Any], new: List[Any]) -> List[Any]:
-    """Merge new documents into existing, dedup by doc id, preserving order."""
     merged = list(existing or [])
     seen = {_doc_field(d, "doc_id", "id", "_id", default=f"_{i}") for i, d in enumerate(merged)}
     for j, d in enumerate(new or []):
@@ -86,28 +114,93 @@ def _merge_dedup(existing: List[Any], new: List[Any]) -> List[Any]:
 
 
 def _distill(state: SupervisorState) -> Dict[str, Any]:
-    """Compact view of progress for the supervisor (no heavy documents)."""
+    """Compact progress view for the supervisor (no heavy documents)."""
     docs = state.get("evidence") or []
     audit = state.get("audit") or {}
     return {
         "has_evidence": bool(docs),
         "document_count": len(docs),
-        "has_answer": bool((state.get("answer") or "").strip()),
+        "has_analysis": state.get("analysis_results") is not None,
         "has_code": state.get("code_result") is not None,
+        "has_answer": bool((state.get("answer") or "").strip()),
         "audit_severity": audit.get("severity"),
+        "pending_needs": [n.get("capability") for n in (state.get("needs") or []) if isinstance(n, dict)],
         "actions_taken": list(state.get("actions") or []),
     }
 
 
-# ---------------------------------------------------------------------------
-# Default decider (LLM with heuristic fallback)
-# ---------------------------------------------------------------------------
+_CAPABILITIES = ("search", "analyze", "code")
+
+
+def _extract_needs(result: Any):
+    """Split a worker result into ``(clean_result, [request, ...])``.
+
+    A worker signals what it needs by returning a dict containing a ``needs`` key —
+    a list of capability names (``"search"``/``"analyze"``/``"code"``) or
+    ``{"capability", "reason"}`` dicts it wants fulfilled before its work completes.
+    """
+    if isinstance(result, dict) and result.get("needs"):
+        raw = result.get("needs") or []
+        clean = {k: v for k, v in result.items() if k != "needs"}
+        norm: List[Dict[str, Any]] = []
+        for n in raw:
+            if isinstance(n, str) and n in _CAPABILITIES:
+                norm.append({"capability": n, "reason": ""})
+            elif isinstance(n, dict) and n.get("capability") in _CAPABILITIES:
+                norm.append({"capability": n["capability"], "reason": str(n.get("reason") or "")})
+        return clean, norm
+    return result, []
+
+
+def _enqueue_needs(existing: Optional[List[Dict[str, Any]]], raw_needs: List[Dict[str, Any]], requester: str):
+    """Append the requested capabilities + a re-run of the requester to the queue."""
+    if not raw_needs:
+        return None
+    queue = [{**n, "by": requester} for n in raw_needs]
+    queue.append({"capability": requester, "reason": "re-run after needs met", "by": requester})
+    return [*(existing or []), *queue]
+
+
+def _make_request_tool():
+    """A `request_capability` tool an agent can call to signal what it needs.
+
+    Returns ``(tool, requests)`` where ``requests`` accumulates the agent's calls.
+    A tool call is structured LLM output, so this makes the "needs" signal
+    model-driven — the agent decides, mid-reasoning, that it needs another peer.
+    """
+    from langchain_core.tools import StructuredTool
+
+    requests: List[Dict[str, str]] = []
+
+    def request_capability(capability: str, reason: str = "") -> str:
+        cap = (capability or "").strip().lower()
+        if cap in _CAPABILITIES:
+            requests.append({"capability": cap, "reason": reason or ""})
+            return (
+                f"Recorded request for '{cap}'. The supervisor will fulfill it and re-run "
+                "you afterward; stop now and do not guess the missing information."
+            )
+        return f"Ignored: '{capability}' is not a known capability (search/analyze/code)."
+
+    tool = StructuredTool.from_function(
+        func=request_capability,
+        name="request_capability",
+        description=(
+            "Request another capability (search/analyze/code) when you cannot complete your "
+            "task without it — e.g. you need evidence from the knowledge base, prior analysis "
+            "results, or generated code. The supervisor fulfills the request and re-runs you."
+        ),
+    )
+    return tool, requests
+
 
 def _heuristic_decision(distilled: Dict[str, Any]) -> str:
+    """Fallback decider: search once if there's no evidence, then finish.
+
+    (The LLM decider drives analyze/code; this only prevents runaway loops.)
+    """
     if not distilled.get("has_evidence") and "search" not in distilled.get("actions_taken", []):
         return "search"
-    if distilled.get("has_evidence") and not distilled.get("has_answer"):
-        return "analyze"
     return "done"
 
 
@@ -120,9 +213,12 @@ def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
             "Choose the SINGLE next action. Capabilities are peers you can use in any "
             "order and repeat as needed:\n"
             "- search: retrieve evidence (datasets, publications, notebooks)\n"
-            "- analyze: compose an answer from the evidence gathered so far\n"
+            "- analyze: run a GIS/data analysis workflow (spatial ops, statistics) over the evidence\n"
             "- code: produce runnable code / implementation\n"
-            "- done: the user's request is satisfied\n\n"
+            "- done: stop; a grounded final answer is composed automatically from the "
+            "evidence + analysis results + code\n\n"
+            "Note: peers may also REQUEST a capability they need (e.g. code needs evidence); "
+            "such requests are fulfilled automatically before you are consulted again.\n\n"
             "Respond ONLY with JSON: {\"next\": \"search|analyze|code|done\", \"reason\": \"...\"}\n\n"
             f"User request:\n{state.get('query', '')}\n\n"
             f"Progress so far:\n{json.dumps(distilled, ensure_ascii=True)}\n"
@@ -134,11 +230,9 @@ def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
 
                 active = build_default_llm()
             raw = active.invoke(prompt) if hasattr(active, "invoke") else active(prompt)
-            text = getattr(raw, "content", raw)
-            if isinstance(text, list):
-                text = "".join(str(getattr(p, "text", p)) for p in text)
-            start, end = str(text).find("{"), str(text).rfind("}")
-            parsed = json.loads(str(text)[start : end + 1]) if start != -1 else {}
+            text = _content_to_text(raw)
+            start, end = text.find("{"), text.rfind("}")
+            parsed = json.loads(text[start : end + 1]) if start != -1 else {}
             nxt = str(parsed.get("next") or "").strip().lower()
             if nxt in ALLOWED_ACTIONS:
                 return nxt
@@ -179,12 +273,122 @@ def default_search_fn(*, llm: Optional[Any] = None, tool_strategy: str = "granul
     return fn
 
 
-def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str]] = None) -> CodeFn:
-    def fn(query: str, evidence: List[Any]) -> Any:
-        from agent_runtime.graph_runtime import run_code_agent_query
+def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = True,
+                       mcp_modules: Optional[List[str]] = None,
+                       skill_roots: Optional[List[str]] = None) -> AnalyzeFn:
+    """Run the GIS/data analysis workflow (QGIS + spatial-analysis MCP tools)."""
 
-        result = run_code_agent_query(query, llm=llm, skill_roots=skill_roots)
-        return {"answer": result.get("final_answer", ""), "code_result": result.get("code_result")}
+    def fn(query: str, evidence: List[Any], state: SupervisorState) -> Any:
+        from agent_runtime.executor_factory import (
+            agent_config,
+            build_agent_executor,
+            child_thread_id,
+            invoke_agent_with_payload_fallback,
+        )
+        from agent_runtime.langchain_granular_tools import make_langchain_qgis_tools
+        from agent_runtime.runtime_utils import extract_final_answer, extract_search_artifacts
+
+        thread_id = state.get("thread_id")
+        request_tool, requests = _make_request_tool()
+        tools = list(make_langchain_qgis_tools(session_id=child_thread_id(thread_id, "analysis_qgis")))
+        if include_mcp_tools:
+            from agent_runtime.langchain_mcp_tools import make_langchain_mcp_tools
+
+            tools.extend(make_langchain_mcp_tools(include_modules=mcp_modules or ["spatial_analysis_tools"]))
+        tools.append(request_tool)
+        executor = build_agent_executor(
+            llm=llm, preloaded_tools=tools, system_prompt_override=ANALYSIS_WORKFLOW_PROMPT,
+            agent_name="analysis_agent", skill_roots=skill_roots,
+        )
+        q = query
+        if evidence:
+            q = f"{query}\n\nContext evidence:\n{_format_documents(evidence)}"
+        resp = invoke_agent_with_payload_fallback(
+            executor, query=q, chat_history=None,
+            config=agent_config(child_thread_id(thread_id, "analysis")),
+        )
+        artifacts = extract_search_artifacts(resp)
+        result: Dict[str, Any] = {
+            "summary": extract_final_answer(resp) or "",
+            "tool_calls": artifacts.get("tool_calls") or [],
+            "tool_results": artifacts.get("tool_results") or [],
+        }
+        caps = list(dict.fromkeys(r["capability"] for r in requests))
+        if caps:
+            result["needs"] = caps  # model-driven request(s)
+        return result
+
+    return fn
+
+
+def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str]] = None) -> CodeFn:
+    """Code peer: writes code, and can request_capability(search/analyze) when it
+    lacks the context to do so (model-driven — no nested search tool)."""
+
+    def fn(query: str, evidence: List[Any], state: "SupervisorState") -> Any:
+        from agent_runtime.executor_factory import (
+            agent_config,
+            build_agent_executor,
+            child_thread_id,
+            invoke_agent_with_payload_fallback,
+        )
+        from agent_runtime.runtime_utils import extract_final_answer
+        from agent_runtime.skills import make_skill_tools
+
+        request_tool, requests = _make_request_tool()
+        tools = [*make_skill_tools(skill_roots=skill_roots), request_tool]
+        executor = build_agent_executor(
+            llm=llm, preloaded_tools=tools, system_prompt_override=CODE_PEER_PROMPT,
+            agent_name="code_agent", skill_roots=skill_roots,
+        )
+        parts = [query]
+        if evidence:
+            parts.append(f"Evidence:\n{_format_documents(evidence)}")
+        if state.get("analysis_results"):
+            parts.append(
+                f"Analysis results:\n{json.dumps(state['analysis_results'], ensure_ascii=True, default=str)[:1500]}"
+            )
+        resp = invoke_agent_with_payload_fallback(
+            executor, query="\n\n".join(parts), chat_history=None,
+            config=agent_config(child_thread_id(state.get("thread_id"), "code")),
+        )
+        result: Dict[str, Any] = {"answer": extract_final_answer(resp) or "", "code_result": resp}
+        caps = list(dict.fromkeys(r["capability"] for r in requests))
+        if caps:
+            result["needs"] = caps  # model-driven request(s)
+        return result
+
+    return fn
+
+
+def default_synthesize_fn(llm: Optional[Any] = None) -> SynthesizeFn:
+    """Compose the final grounded answer in the original AnalysisAgent format."""
+
+    def fn(query: str, evidence: List[Any], analysis_results: Any, code_result: Any,
+           chat_history: Optional[List[Any]] = None) -> str:
+        from agent_runtime.executor_factory import ANALYSIS_AGENT_PROMPT
+
+        active = llm
+        if active is None:
+            from agent_runtime.executor_factory import build_default_llm
+
+            active = build_default_llm()
+        parts = [
+            ANALYSIS_AGENT_PROMPT,
+            "(Compose the final answer from the materials below; do not call tools.)",
+            f"Question:\n{query}",
+            f"Evidence:\n{_format_documents(evidence)}",
+        ]
+        if analysis_results:
+            parts.append(f"Analysis results:\n{json.dumps(analysis_results, ensure_ascii=True, default=str)[:2000]}")
+        if code_result:
+            parts.append(f"Code result:\n{json.dumps(code_result, ensure_ascii=True, default=str)[:2000]}")
+        prompt = "\n\n".join(parts)
+        if hasattr(active, "invoke"):
+            return _content_to_text(active.invoke(prompt))
+        if callable(active):
+            return str(active(prompt))
+        raise TypeError("llm must expose .invoke() or be a str->str callable")
 
     return fn
 
@@ -199,6 +403,7 @@ def build_supervisor_graph(
     search_fn: Optional[SearchFn] = None,
     analyze_fn: Optional[AnalyzeFn] = None,
     code_fn: Optional[CodeFn] = None,
+    synthesize_fn: Optional[SynthesizeFn] = None,
     llm: Optional[Any] = None,
     top_k: int = 5,
     do_rerank: bool = True,
@@ -207,86 +412,113 @@ def build_supervisor_graph(
     """Compile the supervisor-over-peers graph. Workers default to existing agents."""
     decide = decide_fn or default_decide_fn(llm=llm)
     do_search = search_fn or default_search_fn(llm=llm)
-    do_analyze = analyze_fn or default_compose_fn(llm=llm)
+    do_analyze = analyze_fn or default_analyze_fn(llm=llm)
     do_code = code_fn or default_code_fn(llm=llm)
+    do_synthesize = synthesize_fn or default_synthesize_fn(llm=llm)
 
     def supervisor_node(state: SupervisorState) -> Dict[str, Any]:
         step = state.get("step", 0)
-        distilled = _distill(state)
+        needs = list(state.get("needs") or [])
         if step >= state.get("max_steps", DEFAULT_MAX_STEPS):
-            nxt = "done"
+            nxt, remaining, why = "done", [], "max_steps"
+        elif needs:
+            # Fulfill the oldest peer request first (FIFO), then continue the loop.
+            req = needs[0]
+            cap = req.get("capability")
+            nxt = cap if cap in _CAPABILITIES else "done"
+            remaining, why = needs[1:], f"request by {req.get('by')}"
         else:
-            nxt = decide(state, distilled)
+            nxt = decide(state, _distill(state))
             if nxt not in ALLOWED_ACTIONS:
                 nxt = "done"
+            remaining, why = needs, "decision"
         emit_trace_event(
             "node_completed",
-            {"stage": "supervisor", "route": nxt, "message": f"supervisor → {nxt}"},
+            {"stage": "supervisor", "route": nxt, "message": f"supervisor → {nxt} ({why})"},
             node="supervisor",
         )
-        return {"next_action": nxt, "actions": [*(state.get("actions") or []), nxt], "step": step + 1}
+        return {
+            "next_action": nxt,
+            "actions": [*(state.get("actions") or []), nxt],
+            "step": step + 1,
+            "needs": remaining,
+        }
 
     def search_node(state: SupervisorState) -> Dict[str, Any]:
         q = state.get("query", "")
         emit_trace_event("node_started", {"stage": "search", "message": "Searching"}, node="search")
-        docs = do_search(q, state) or []
+        raw = do_search(q, state) or []
+        if isinstance(raw, dict):
+            docs = raw.get("documents") or []
+            _, needs = _extract_needs(raw)
+        else:
+            docs, needs = raw, []
         if do_rerank and len(docs) > 1:
             docs = rerank_documents(q, docs, top_k=top_k, llm=llm)  # operator bundled into search
         merged = _merge_dedup(state.get("evidence") or [], docs)
         emit_trace_event(
             "node_completed", {"stage": "search", "message": f"{len(merged)} docs in evidence"}, node="search"
         )
-        return {"evidence": merged}
+        update: Dict[str, Any] = {"evidence": merged}
+        enq = _enqueue_needs(state.get("needs"), needs, "search")
+        if enq is not None:
+            update["needs"] = enq
+        return update
 
     def analysis_node(state: SupervisorState) -> Dict[str, Any]:
         q = state.get("query", "")
-        evidence = state.get("evidence") or []
-        emit_trace_event("node_started", {"stage": "analyze", "message": "Composing answer"}, node="analyze")
-        answer = do_analyze(q, evidence, state.get("chat_history"))
-        audit = audit_answer_grounding(q, answer, evidence, llm=llm) if do_audit else {}  # operator bundled in
-        emit_trace_event(
-            "node_completed",
-            {"stage": "analyze", "message": audit.get("summary") or "Answer composed"},
-            node="analyze",
-        )
-        return {"answer": answer, "audit": audit}
+        emit_trace_event("node_started", {"stage": "analyze", "message": "Running analysis workflow"}, node="analyze")
+        clean, needs = _extract_needs(do_analyze(q, state.get("evidence") or [], state))
+        emit_trace_event("node_completed", {"stage": "analyze", "message": "Analysis workflow complete"}, node="analyze")
+        update: Dict[str, Any] = {"analysis_results": clean}
+        enq = _enqueue_needs(state.get("needs"), needs, "analyze")
+        if enq is not None:
+            update["needs"] = enq
+        return update
 
     def code_node(state: SupervisorState) -> Dict[str, Any]:
         q = state.get("query", "")
         emit_trace_event("node_started", {"stage": "code", "message": "Generating code"}, node="code")
-        result = do_code(q, state.get("evidence") or [])
+        clean, needs = _extract_needs(do_code(q, state.get("evidence") or [], state))
         emit_trace_event("node_completed", {"stage": "code", "message": "Code ready"}, node="code")
-        update: Dict[str, Any] = {"code_result": result}
-        # If code produced an answer and analysis hasn't, surface it.
-        if isinstance(result, dict) and result.get("answer") and not (state.get("answer") or "").strip():
-            update["answer"] = result["answer"]
+        update: Dict[str, Any] = {"code_result": clean}
+        enq = _enqueue_needs(state.get("needs"), needs, "code")
+        if enq is not None:
+            update["needs"] = enq
         return update
 
-    def finalize_node(state: SupervisorState) -> Dict[str, Any]:
-        final = (state.get("answer") or "").strip()
-        if not final and isinstance(state.get("code_result"), dict):
-            final = str(state["code_result"].get("answer") or "")
-        merged = {**state, "final_answer": final}
-        return {"final_answer": final, "distilled": {**_distill(state), "answer": final}}
+    def synthesize_node(state: SupervisorState) -> Dict[str, Any]:
+        q = state.get("query", "")
+        evidence = state.get("evidence") or []
+        emit_trace_event("node_started", {"stage": "synthesize", "message": "Composing answer"}, node="synthesize")
+        answer = do_synthesize(q, evidence, state.get("analysis_results"), state.get("code_result"), state.get("chat_history"))
+        audit = audit_answer_grounding(q, answer, evidence, llm=llm) if (do_audit and (answer or "").strip()) else {}
+        emit_trace_event(
+            "node_completed",
+            {"stage": "synthesize", "message": audit.get("summary") or "Answer composed"},
+            node="synthesize",
+        )
+        merged = {**state, "answer": answer, "audit": audit}
+        return {"answer": answer, "final_answer": answer, "audit": audit, "distilled": {**_distill(merged), "answer": answer}}
 
     builder = StateGraph(SupervisorState)
     builder.add_node("supervisor", supervisor_node)
     builder.add_node("search", search_node)
     builder.add_node("analyze", analysis_node)
     builder.add_node("code", code_node)
-    builder.add_node("finalize", finalize_node)
+    builder.add_node("synthesize", synthesize_node)
 
     builder.add_edge(START, "supervisor")
     builder.add_conditional_edges(
         "supervisor",
         lambda s: s.get("next_action", "done"),
-        {"search": "search", "analyze": "analyze", "code": "code", "done": "finalize"},
+        {"search": "search", "analyze": "analyze", "code": "code", "done": "synthesize"},
     )
-    # Peers loop back to the supervisor (this is what restores dynamic ordering / multi-hop).
+    # Peers loop back to the supervisor (restores dynamic ordering / multi-hop).
     builder.add_edge("search", "supervisor")
     builder.add_edge("analyze", "supervisor")
     builder.add_edge("code", "supervisor")
-    builder.add_edge("finalize", END)
+    builder.add_edge("synthesize", END)
     return builder.compile()
 
 
@@ -307,6 +539,7 @@ def run_supervisor(
             "chat_history": chat_history or [],
             "thread_id": thread_id,
             "evidence": [],
+            "needs": [],
             "actions": [],
             "step": 0,
             "max_steps": max_steps,
@@ -321,5 +554,7 @@ __all__ = [
     "is_supervisor_enabled",
     "default_decide_fn",
     "default_search_fn",
+    "default_analyze_fn",
     "default_code_fn",
+    "default_synthesize_fn",
 ]

@@ -412,6 +412,10 @@
               <input id="agent_dev" type="checkbox">
               Agent Dev (detailed trace)
             </label>
+            <label class="checkbox">
+              <input id="use_supervisor" type="checkbox" checked>
+              Supervisor (peer agents)
+            </label>
           </div>
 
           <div class="actions">
@@ -698,7 +702,8 @@
         forced_intent: document.getElementById("forced_intent").value || null,
         file_ids: Array.from(attachedFiles.keys()),
         verbose: document.getElementById("verbose").checked,
-        agent_dev: document.getElementById("agent_dev").checked
+        agent_dev: document.getElementById("agent_dev").checked,
+        use_supervisor: document.getElementById("use_supervisor").checked
       };
     }
 
@@ -854,6 +859,14 @@
         }, true);
       } finally {
         currentAbortController = null;
+      }
+    });
+
+    // Enter submits (Start Stream); Shift+Enter keeps a newline in the query box.
+    form.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+        event.preventDefault();
+        form.requestSubmit();
       }
     });
 

@@ -115,8 +115,13 @@ def build_orchestrator_graph(
     thread_id: Optional[str] = None,
     checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
     skill_roots: Optional[List[str]] = None,
+    use_supervisor: Optional[bool] = None,
 ) -> Any:
-    """Compile the hybrid orchestrator graph for one request's configuration."""
+    """Compile the hybrid orchestrator graph for one request's configuration.
+
+    ``use_supervisor`` overrides the orchestrate strategy for this request
+    (None falls back to the ``AGENT_SUPERVISOR`` env default, which is on).
+    """
 
     def triage_node(state: OrchestratorState) -> Dict[str, Any]:
         query = state.get("query", "")
@@ -166,13 +171,15 @@ def build_orchestrator_graph(
             node="orchestrate",
         )
 
-        # Opt-in: shared-state supervisor-over-peers graph (search/analyze/code as
-        # peers sharing evidence state). Off by default; the agents-as-tools path below
-        # remains the default until validated live.
+        # Shared-state supervisor-over-peers graph (search/analyze/code as peers
+        # sharing evidence state). Default on; per-request override via use_supervisor,
+        # global opt-out via AGENT_SUPERVISOR=0.
         from agent_runtime.supervisor_graph import is_supervisor_enabled
 
-        if is_supervisor_enabled():
+        supervisor_on = use_supervisor if use_supervisor is not None else is_supervisor_enabled()
+        if supervisor_on:
             from agent_runtime.supervisor_graph import (
+                default_analyze_fn,
                 default_code_fn,
                 default_search_fn,
                 run_supervisor,
@@ -189,6 +196,12 @@ def build_orchestrator_graph(
                     include_mcp_tools=include_mcp_tools,
                     mcp_modules=mcp_modules,
                     enabled_search_methods=enabled_search_methods,
+                    skill_roots=skill_roots,
+                ),
+                analyze_fn=default_analyze_fn(
+                    llm=llm,
+                    include_mcp_tools=include_mcp_tools,
+                    mcp_modules=mcp_modules,
                     skill_roots=skill_roots,
                 ),
                 code_fn=default_code_fn(llm=llm, skill_roots=skill_roots),

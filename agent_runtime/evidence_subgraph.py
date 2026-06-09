@@ -130,18 +130,24 @@ def _content_to_text(response: Any) -> str:
 
 
 def default_compose_fn(llm: Optional[Any] = None) -> ComposeFn:
-    """A grounded-answer composer using the agent's LLM (injectable for tests)."""
+    """A grounded-answer composer using the agent's LLM (injectable for tests).
+
+    Uses the canonical ``ANALYSIS_AGENT_PROMPT`` so answers from this path follow
+    the *same format/grounding rules* as the original AnalysisAgent (use-only-
+    evidence, cite doc_ids, state uncertainty, never invent).
+    """
 
     def compose(query: str, documents: List[Any], chat_history: Optional[List[Any]] = None) -> str:
+        from agent_runtime.executor_factory import ANALYSIS_AGENT_PROMPT
+
         active = llm
         if active is None:
             from agent_runtime.executor_factory import build_default_llm
 
             active = build_default_llm()
         prompt = (
-            "You are AnalysisAgent. Compose a concise, well-structured answer to the "
-            "question using ONLY the evidence below. Cite supporting doc_ids in [brackets]. "
-            "If the evidence is insufficient, say so explicitly.\n\n"
+            f"{ANALYSIS_AGENT_PROMPT}\n\n"
+            "(Compose the answer directly from the Evidence below; do not call tools.)\n\n"
             f"Question:\n{query}\n\nEvidence:\n{_format_documents(documents)}\n"
         )
         if hasattr(active, "invoke"):
