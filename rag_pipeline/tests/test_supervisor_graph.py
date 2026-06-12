@@ -672,3 +672,41 @@ def test_use_supervisor_false_forces_agents_as_tools(monkeypatch):
 
     result = gr.run_agent_query("substantive query", use_supervisor=False)
     assert result["final_answer"] == "agents-as-tools answer"
+
+
+# --- inline image embedding in the final answer ----------------------------
+
+def test_collect_image_artifacts_walks_json_tool_results():
+    import json as _json
+    from agent_runtime.supervisor_graph import _collect_image_artifacts
+    analysis = {"tool_results": [
+        {"name": "plot_vector", "content": _json.dumps(
+            {"ok": True, "file_id": "f1", "filename": "vector_plot.png",
+             "download_url": "/agent/files/f1/download"})},
+        {"name": "inspect_vector", "content": _json.dumps({"ok": True, "feature_count": 3})},
+    ]}
+    code = {"tool_results": [{"name": "execute_code", "content": _json.dumps(
+        {"artifacts": [
+            {"file_id": "f2", "filename": "result.png", "download_url": "/agent/files/f2/download"},
+            {"file_id": "f3", "filename": "out.csv", "download_url": "/agent/files/f3/download"},
+        ]})}]}
+    imgs = _collect_image_artifacts(analysis, code)
+    assert {i["file_id"] for i in imgs} == {"f1", "f2"}  # csv excluded
+
+
+def test_append_image_embeds_appends_and_dedupes():
+    from agent_runtime.supervisor_graph import _append_image_embeds
+    imgs = [{"filename": "m.png", "download_url": "/agent/files/f1/download", "file_id": "f1"},
+            {"filename": "r.jpg", "download_url": "/agent/files/f2/download", "file_id": "f2"}]
+    out = _append_image_embeds("Here you go.", imgs)
+    assert "![m.png](/agent/files/f1/download)" in out
+    assert "![r.jpg](/agent/files/f2/download)" in out
+    # already referenced by exact url (f1) or by file_id as a URL path segment (f2) -> not duplicated
+    out2 = _append_image_embeds("![x](/agent/files/f1/download) see http://h/agent/files/f2/download", imgs)
+    assert out2.count("/agent/files/f1/download") == 1
+    assert out2.count("![r.jpg]") == 0
+    # a BARE file_id mention in prose must NOT suppress the embed (image isn't actually shown)
+    out3 = _append_image_embeds("the file f2 holds the plot", imgs[1:])
+    assert "![r.jpg](/agent/files/f2/download)" in out3
+    # no-op safety
+    assert _append_image_embeds("x", []) == "x"

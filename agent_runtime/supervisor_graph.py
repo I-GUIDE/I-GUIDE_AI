@@ -345,6 +345,64 @@ def _apply_grounding_caveat(answer: str, audit: Optional[Dict[str, Any]]) -> str
     return f"{answer}\n\n---\n\n{note}" if (answer or "").strip() else note
 
 
+_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".avif")
+
+
+def _collect_image_artifacts(*sources: Any) -> List[Dict[str, str]]:
+    """Walk peer results (analysis_results / code_result, incl. JSON-encoded tool outputs)
+    for image artifacts and return ``[{filename, download_url, file_id}]`` (deduped, ordered).
+    """
+    found: Dict[str, Dict[str, str]] = {}
+
+    def walk(v: Any) -> None:
+        if isinstance(v, dict):
+            url = v.get("download_url")
+            name = str(v.get("filename") or "")
+            if url and name.lower().endswith(_IMAGE_EXTS):
+                key = str(v.get("file_id") or url)
+                found.setdefault(key, {"filename": name, "download_url": str(url),
+                                       "file_id": str(v.get("file_id") or "")})
+            for child in v.values():
+                walk(child)
+        elif isinstance(v, (list, tuple)):
+            for child in v:
+                walk(child)
+        elif isinstance(v, str):  # tool results are usually JSON-encoded strings
+            s = v.strip()
+            if s[:1] in ("{", "["):
+                try:
+                    walk(json.loads(s))
+                except Exception:
+                    pass
+
+    for src in sources:
+        walk(src)
+    return list(found.values())
+
+
+def _append_image_embeds(answer: str, images: List[Dict[str, str]]) -> str:
+    """Append markdown image embeds for produced images not already referenced in *answer*.
+
+    This guarantees a generated map/plot renders inline in the (always-delivered) final
+    answer, independent of whether the model embedded it and of detail-event gating.
+    """
+    if not images:
+        return answer or ""
+    body = answer or ""
+    blocks: List[str] = []
+    for img in images:
+        url, name, fid = img["download_url"], img["filename"], img.get("file_id") or ""
+        # Skip if already referenced: by exact url, or by the file_id as a URL path segment
+        # (/<file_id>/) — a bare-substring match would false-trip on incidental occurrences.
+        if (url and url in body) or (fid and (f"/{fid}/" in body or f"/{fid}?" in body)):
+            continue
+        blocks.append(f"![{name}]({url})")
+    if not blocks:
+        return body
+    sep = "\n\n" if body.strip() else ""
+    return f"{body}{sep}" + "\n\n".join(blocks)
+
+
 def _format_chat_history(chat_history: Optional[List[Any]], *, max_items: int = 8, max_chars: int = 4000) -> str:
     """Render recent chat history as compact 'role: content' lines for prompts."""
     if not chat_history:
@@ -641,6 +699,10 @@ def default_synthesize_fn(llm: Optional[Any] = None) -> SynthesizeFn:
             ANALYSIS_AGENT_PROMPT,
             "(Compose the final answer from the materials below — including the conversation "
             "so far — and do not call tools.)",
+            "If the materials include an image artifact (a PNG/JPG map, plot, or figure with a "
+            "download_url, e.g. from plot_vector or execute_code), embed it inline in your answer "
+            "using markdown image syntax `![short caption](download_url)` with the EXACT "
+            "download_url provided. Do not invent URLs.",
         ]
         history = _format_chat_history(chat_history)
         if history:
@@ -798,6 +860,10 @@ def build_supervisor_graph(
         # Act on the verdict: a flagged audit appends a user-visible caveat to the
         # answer (so an ungrounded answer never ships silently).
         final = _apply_grounding_caveat(answer, audit)
+        # Embed any produced image artifacts (maps/plots) inline so they render in the
+        # final answer markdown, even when detail (tool_result) events are gated off.
+        final = _append_image_embeds(final, _collect_image_artifacts(
+            state.get("analysis_results"), state.get("code_result")))
         # Surface the verdict as its own event so clients can show grounded/flagged.
         if audit:
             emit_trace_event(

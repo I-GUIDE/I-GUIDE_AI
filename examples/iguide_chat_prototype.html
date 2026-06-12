@@ -106,6 +106,18 @@
   .md th,.md td{border:1px solid var(--line);padding:6px 10px;text-align:left}
   .md blockquote{border-left:3px solid var(--line);margin:.5em 0;padding:.1em 0 .1em 12px;color:var(--muted)}
   .md a{word-break:break-word}
+  .md img{display:block;max-width:100%;height:auto;margin:.6em 0;border:1px solid var(--line);border-radius:10px;background:#fff}
+
+  /* image artifacts rendered inline (plots, maps, figures) */
+  .art-imgs{display:flex;flex-wrap:wrap;gap:12px;margin-top:12px}
+  .art-imgs:empty{display:none}
+  .art{margin:0;max-width:440px;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:#fff;box-shadow:var(--shadow)}
+  .art > a{display:block}
+  .art img{display:block;width:100%;height:auto}
+  .art figcaption{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 12px;font-size:13px;color:var(--muted);border-top:1px solid var(--line)}
+  .art figcaption .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .art figcaption a.dl{display:inline-flex;align-items:center;gap:5px;color:var(--link);text-decoration:none;flex:0 0 auto}
+  .art figcaption a.dl:hover{text-decoration:underline}
 
   /* ---------- composer ---------- */
   .composer-wrap{position:fixed;left:0;right:0;bottom:0;background:linear-gradient(180deg,rgba(251,251,250,0),#fbfbfa 38%);padding:14px 20px 10px}
@@ -236,21 +248,46 @@ function authHeaders(json){
   return h;
 }
 
+/* png/jpg/… detection for rendering image artifacts inline */
+const IMG_EXT_RE=/\.(png|jpe?g|gif|webp|svg|bmp|avif)(?:[?#].*)?$/i;
+function isImageName(name){ return IMG_EXT_RE.test(String(name||"")); }
+
 /* ===================== markdown (escape-first, XSS-safe) ===================== */
 function renderMarkdown(src){
   const esc=(s)=>String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-  const inline=(s)=>s
-    .replace(/`([^`]+)`/g,(_,c)=>`<code>${c}</code>`)
-    .replace(/\*\*([^*]+)\*\*/g,"<strong>$1</strong>")
-    .replace(/__([^_]+)__/g,"<strong>$1</strong>")
-    .replace(/(^|[^*])\*(?!\s)([^*]+?)\*/g,"$1<em>$2</em>")
-    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g,(_,t,u)=>{
-      const href=String(u).replace(/^sandbox:/i,"");
-      let safe; if(/^(https?:|mailto:)/i.test(href)) safe=href;
-      else if(href.charAt(0)==="/") safe=absoluteUrl(href); else safe="#";
-      safe=safe.replace(/"/g,"%22");
-      return `<a href="${safe}" target="_blank" rel="noopener noreferrer">${t}</a>`;
-    });
+  // Inline rules. Code/images/links are "stashed" as  N  placeholders BEFORE the
+  // bold/em rules run, so an emphasis rule can never corrupt a URL, alt text, or code that
+  // happens to contain * or __ (e.g. ![a](.../my__file.png)). Placeholders are restored last.
+  const inline=(s)=>{
+    const stash=[];
+    const hold=(html)=>{ stash.push(html); return "\uE000"+(stash.length-1)+"\uE000"; };
+    const emph=(t)=>t
+      .replace(/\*\*([^*]+)\*\*/g,"<strong>$1</strong>")
+      .replace(/__([^_]+)__/g,"<strong>$1</strong>")
+      .replace(/(^|[^*])\*(?!\s)([^*]+?)\*/g,"$1<em>$2</em>");
+    let out=String(s)
+      .replace(/`([^`]+)`/g,(_,c)=>hold(`<code>${c}</code>`))
+      .replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g,(_,alt,u)=>{  // ![alt](url) -> inline image (before the link rule)
+        const href=String(u).replace(/^sandbox:/i,"");
+        let safe; if(/^(https?:|data:image\/)/i.test(href)) safe=href;
+        else if(href.charAt(0)==="/") safe=absoluteUrl(href); else safe="";
+        if(!safe) return "";
+        safe=safe.replace(/"/g,"%22");
+        const a=String(alt).replace(/"/g,"&quot;");
+        return hold(`<img class="md-img" src="${safe}" alt="${a}" loading="lazy">`);
+      })
+      .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g,(_,t,u)=>{
+        const href=String(u).replace(/^sandbox:/i,"");
+        let safe; if(/^(https?:|mailto:)/i.test(href)) safe=href;
+        else if(href.charAt(0)==="/") safe=absoluteUrl(href); else safe="#";
+        safe=safe.replace(/"/g,"%22");
+        return hold(`<a href="${safe}" target="_blank" rel="noopener noreferrer">${emph(t)}</a>`);
+      });
+    out=emph(out);  // emphasis on the remaining text only; placeholders contain no * or _
+    // restore high->low: a later-stashed item (link) may embed an earlier placeholder (code/image)
+    for(let k=stash.length-1;k>=0;k--){ out=out.split("\uE000"+k+"\uE000").join(stash[k]); }
+    return out;
+  };
   const lines=String(src||"").replace(/\r\n?/g,"\n").split("\n");
   let html="",i=0,inUl=false,inOl=false,para=[];
   const closeLists=()=>{if(inUl){html+="</ul>";inUl=false;}if(inOl){html+="</ol>";inOl=false;}};
@@ -331,12 +368,13 @@ function addAiTurn(){
 
   const card=el("div","answer-card"); card.style.display="none";
   const ans=el("div","md");
-  const files=el("div","files");
-  card.appendChild(ans); card.appendChild(files);
+  const images=el("div","art-imgs");   // image artifacts (plots/maps) rendered inline
+  const files=el("div","files");       // non-image artifacts as download chips
+  card.appendChild(ans); card.appendChild(images); card.appendChild(files);
   col.appendChild(card);
 
   row.appendChild(col); turn.appendChild(row); thread.appendChild(turn); scrollDown();
-  return {turn,reason,spin,title,body,card,ans,files};
+  return {turn,reason,spin,title,body,card,ans,images,files};
 }
 
 function pushLine(ui,text){
@@ -378,12 +416,35 @@ function collectDownloads(value, into){
   Object.values(value).forEach(v=>collectDownloads(v,into));
 }
 function renderFiles(ui,map){
-  ui.files.innerHTML="";
+  // URLs/ids already embedded as <img> in the answer prose — don't render them twice.
+  const embedded=new Set();
+  if(ui.ans && ui.ans.querySelectorAll){ ui.ans.querySelectorAll("img").forEach(im=>embedded.add(im.getAttribute("src")||"")); }
+  // already inline if an embedded <img> has the same resolved URL, or references this file_id
+  // as a URL path segment (/<file_id>/) — NOT a bare substring (would false-match base64/long URLs).
+  const seenInline=(f,url)=> embedded.has(url) || (f.file_id && [...embedded].some(s=>s && s.indexOf("/"+f.file_id+"/")>=0));
+
+  ui.images.innerHTML=""; ui.files.innerHTML="";
   for(const f of map.values()){
-    const a=el("a",null,(f.kind==="source"?ICONS.fileCode:ICONS.file));
-    a.href=absoluteUrl(f.download_url); a.target="_blank"; a.rel="noopener noreferrer";
-    a.appendChild(document.createTextNode(f.filename||f.file_id));
-    ui.files.appendChild(a);
+    const url=absoluteUrl(f.download_url);
+    const isImg = f.kind==="image" || isImageName(f.filename) || isImageName(f.download_url);
+    if(isImg){
+      if(seenInline(f,url)) continue;                 // already shown inline in the answer
+      const fig=el("figure","art");
+      const link=el("a"); link.href=url; link.target="_blank"; link.rel="noopener noreferrer";
+      const im=new Image(); im.src=url; im.alt=f.filename||"image"; im.loading="lazy";
+      link.appendChild(im); fig.appendChild(link);
+      const cap=el("figcaption");
+      cap.appendChild(el("span","nm")).textContent=f.filename||f.file_id||"image";
+      const dl=el("a","dl",ICONS.file); dl.href=url; dl.target="_blank"; dl.rel="noopener noreferrer";
+      dl.appendChild(document.createTextNode("Download"));
+      cap.appendChild(dl); fig.appendChild(cap);
+      ui.images.appendChild(fig);
+    }else{
+      const a=el("a",null,(f.kind==="source"?ICONS.fileCode:ICONS.file));
+      a.href=url; a.target="_blank"; a.rel="noopener noreferrer";
+      a.appendChild(document.createTextNode(f.filename||f.file_id));
+      ui.files.appendChild(a);
+    }
   }
 }
 

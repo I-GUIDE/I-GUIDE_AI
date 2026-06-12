@@ -595,15 +595,31 @@ def download_agent_file(file_id):
         path = resolve_file_id(file_id)
         mimetype = None
         suffix = Path(record.get("filename", "")).suffix.lower()
+        image_types = {
+            ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml",
+            ".bmp": "image/bmp", ".avif": "image/avif",
+        }
         if suffix == ".csv":
             mimetype = "text/csv"
         elif suffix == ".json":
             mimetype = "application/json"
-        elif suffix == ".png":
-            mimetype = "image/png"
+        elif suffix in image_types:
+            mimetype = image_types[suffix]
         elif suffix in {".txt", ".md", ".py"}:
             mimetype = "text/plain"
-        return send_file(path, as_attachment=True, download_name=record.get("filename") or path.name, mimetype=mimetype)
+        # Raster images are previewable inline (so an <img>/new-tab view renders instead of
+        # forcing a download); everything else, and any explicit ?download=1, is an attachment.
+        # SVG is EXCLUDED from inline: it can carry script that executes on top-level navigation
+        # (stored XSS). An <img src> still renders an SVG fine; only a direct tab-open would have
+        # run it — and that now downloads instead.
+        inline_ok = suffix in image_types and suffix != ".svg"
+        force_download = request.args.get("download") in ("1", "true", "yes")
+        resp = send_file(path, as_attachment=(force_download or not inline_ok),
+                         download_name=record.get("filename") or path.name, mimetype=mimetype)
+        # Never let a browser content-sniff a stored file into an executable type.
+        resp.headers["X-Content-Type-Options"] = "nosniff"
+        return resp
     except ValueError as e:
         logger.error(f"Agent file download validation error: {str(e)}")
         return jsonify({"error": str(e)}), 404

@@ -224,7 +224,8 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             plt.close(fig)
             rec = create_output_file_from_path(png, filename="vector_plot.png")
             return json.dumps({
-                "ok": True, "file_id": rec["file_id"], "download_url": rec.get("download_url"),
+                "ok": True, "file_id": rec["file_id"], "filename": rec.get("filename"),
+                "download_url": rec.get("download_url"),
                 "plotted_features": int(len(gdf)), "total_features": int(total),
                 "downsampled": bool(downsampled), "crs": _epsg(getattr(gdf, "crs", None)),
             }, default=str)
@@ -255,7 +256,8 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             gdf.to_file(out, driver="GeoJSON")
             rec = create_output_file_from_path(out, filename="vector.geojson")
             return json.dumps({
-                "ok": True, "file_id": rec["file_id"], "download_url": rec.get("download_url"),
+                "ok": True, "file_id": rec["file_id"], "filename": rec.get("filename"),
+                "download_url": rec.get("download_url"),
                 "feature_count": int(len(gdf)), "crs": _epsg(getattr(gdf, "crs", None)),
             }, default=str)
         except Exception as exc:
@@ -285,7 +287,8 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             gdf.to_parquet(out)
             rec = create_output_file_from_path(out, filename="reprojected.parquet")
             return json.dumps({
-                "ok": True, "file_id": rec["file_id"], "download_url": rec.get("download_url"),
+                "ok": True, "file_id": rec["file_id"], "filename": rec.get("filename"),
+                "download_url": rec.get("download_url"),
                 "feature_count": int(len(gdf)), "crs": _epsg(gdf.crs),
             }, default=str)
         except Exception as exc:
@@ -323,7 +326,8 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             out = Path(tempfile.mkdtemp(prefix="vec_sj_")) / "spatial_join.parquet"
             joined.to_parquet(out)
             rec = create_output_file_from_path(out, filename="spatial_join.parquet")
-            res = {"ok": True, "file_id": rec["file_id"], "download_url": rec.get("download_url"),
+            res = {"ok": True, "file_id": rec["file_id"], "filename": rec.get("filename"),
+                   "download_url": rec.get("download_url"),
                    "feature_count": int(len(joined)), "crs": _epsg(getattr(joined, "crs", None))}
             if note:
                 res["note"] = note
