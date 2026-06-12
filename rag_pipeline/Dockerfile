@@ -44,6 +44,9 @@ COPY rag_pipeline/ ./rag_pipeline/
 COPY agent_runtime/ ./agent_runtime/
 COPY api/ ./api/
 COPY MCP_server/ ./MCP_server/
+# Agent knowledge-base ingestion package — the search/code peers' agent_kb_search and
+# get_kb_block tools import `extractors` (kb_store, indices) at call time.
+COPY extractors/ ./extractors/
 
 # Pre-download SentenceTransformer model so the container doesn't need
 # outbound network access to HuggingFace on first request

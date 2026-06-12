@@ -180,12 +180,13 @@ def agent_kb_search(query: str, *, size: int = 8, client=None, embed: bool = Tru
     Backend is LOCAL by default (file-backed store) so this runs offline and never
     touches the real OpenSearch; set AGENT_KB_BACKEND=opensearch (or inject a client)
     to use the cluster. Never raises (agent tools must return, not throw)."""
-    from extractors import kb_store
-    from extractors.indices import all_agent_indices
-
     base = {"source": "agent_kb", "count": 0, "documents": [], "citation_ids": [], "elements": {}}
-    use_opensearch = client is not None or kb_store.kb_backend() == "opensearch"
     try:
+        # Imported inside the try so a missing/unpackaged `extractors` degrades to a
+        # benign note instead of crashing the agent turn.
+        from extractors import kb_store
+        from extractors.indices import all_agent_indices
+        use_opensearch = client is not None or kb_store.kb_backend() == "opensearch"
         if not use_opensearch:
             hits = kb_store.local_search(query, all_agent_indices(), size)
             docs = normalize_hits(hits, [], size)
@@ -224,11 +225,10 @@ def get_kb_block(doc_id: str, *, client=None) -> Dict[str, Any]:
 
     The search/evidence view truncates contents; this lets a consumer pull a block's
     complete code/method body for verbatim reuse. Local by default; never raises."""
-    from extractors import kb_store
-    from extractors.indices import all_agent_indices
-
-    use_opensearch = client is not None or kb_store.kb_backend() == "opensearch"
     try:
+        from extractors import kb_store
+        from extractors.indices import all_agent_indices
+        use_opensearch = client is not None or kb_store.kb_backend() == "opensearch"
         if not use_opensearch:
             idx, src = kb_store.local_get(doc_id, all_agent_indices())
             if src is None:

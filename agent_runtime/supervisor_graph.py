@@ -85,7 +85,13 @@ ANALYSIS_WORKFLOW_PROMPT = (
     "If an execute_code tool is available, you may use it to run computational steps and "
     "verify results. To read an UPLOADED file inside execute_code, pass its file_id(s) in "
     "the `input_files` argument; the file is then available in the working directory under "
-    "both its file_id and its original filename."
+    "both its file_id and its original filename.\n"
+    "For an UPLOADED vector dataset or shapefile (e.g. Census TIGER/Line), use the geo "
+    "tools: inspect_vector to read CRS/extent/columns/feature-count, plot_vector to "
+    "visualize a map, reproject_vector / vector_spatial_join / vector_to_geojson to "
+    "analyze and export. A TIGER .zip is read directly by file_id; an EXTRACTED shapefile "
+    "is several files — pass the .shp's file_id and the .shx/.dbf/.prj as sibling_file_ids "
+    "(or ask the user to upload the .zip)."
 )
 
 CODE_PEER_PROMPT = (
@@ -104,6 +110,12 @@ CODE_PEER_PROMPT = (
     "`plt.savefig('result.png', bbox_inches='tight')` — the headless sandbox cannot "
     "display windows, so do NOT rely on `plt.show()`; the saved image is returned as a "
     "downloadable artifact.\n"
+    "For an UPLOADED vector dataset / shapefile (e.g. Census TIGER), call inspect_vector "
+    "first to learn its CRS, columns, and geometry type before writing code, and use "
+    "plot_vector / vector_to_geojson when a map or export is enough. For an EXTRACTED "
+    "shapefile pass the .shp file_id plus the .shx/.dbf/.prj as sibling_file_ids (or upload "
+    "the .zip). If you read it in execute_code instead, geopandas needs the whole shapefile "
+    "set — prefer a .zip via input_files, and include geopandas in `dependencies`.\n"
     "When the evidence references ingested knowledge-base blocks (by doc_id), call "
     "get_kb_block(doc_id) to read the FULL source of a referenced function/notebook and "
     "REUSE it verbatim — including real data-loading URLs/APIs — instead of stubbing "
@@ -494,6 +506,13 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
             from agent_runtime.langchain_file_tools import make_langchain_file_tools
 
             tools.extend(make_langchain_file_tools())
+            # Vector / shapefile tools (read + visualize + analyze uploaded TIGER files,
+            # zip or extracted). Guarded so a missing geopandas never breaks the agent.
+            try:
+                from agent_runtime.langchain_geo_tools import make_langchain_geo_tools
+                tools.extend(make_langchain_geo_tools())
+            except Exception:
+                pass
         from agent_runtime.code_execution import is_code_exec_enabled
 
         if code_exec if code_exec is not None else is_code_exec_enabled():
@@ -556,6 +575,15 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
                 if getattr(t, "name", "") in {"agent_kb_search", "get_kb_block"})
         except Exception:
             pass
+        # When files are attached, give the code peer the vector/shapefile tools too, so it
+        # can inspect an uploaded TIGER shapefile's schema/CRS before writing code (and
+        # plot/convert/reproject without round-tripping through the sandbox).
+        if input_file_ids:
+            try:
+                from agent_runtime.langchain_geo_tools import make_langchain_geo_tools
+                tools.extend(make_langchain_geo_tools())
+            except Exception:
+                pass
         from agent_runtime.code_execution import is_code_exec_enabled
 
         if code_exec if code_exec is not None else is_code_exec_enabled():

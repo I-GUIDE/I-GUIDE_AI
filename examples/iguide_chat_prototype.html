@@ -31,6 +31,10 @@
   .brand-link:hover{background:var(--soft)}
   .iglogo path{fill:none;stroke-width:11;stroke-linecap:round;stroke-linejoin:round}
   img.iglogo{height:32px;width:auto;display:block}
+  .ic{flex:0 0 auto;vertical-align:middle}
+  .iconbtn{display:inline-flex;align-items:center;justify-content:center}
+  .search svg,.conn summary svg{vertical-align:-3px;margin-right:3px}
+  .bubble.user .att .chip{display:inline-flex;align-items:center;gap:6px}
   nav.top{display:flex;gap:22px;align-items:center;font-weight:600;color:#2b2f36}
   nav.top span{display:inline-flex;align-items:center;gap:5px;cursor:default;white-space:nowrap}
   nav.top .caret{color:#9aa0a6;font-size:12px}
@@ -147,7 +151,7 @@
         <span>Support <span class="caret">▾</span></span>
       </nav>
       <div class="grow"></div>
-      <div class="search"><span>🔍</span><input placeholder="Search…" disabled></div>
+      <div class="search"><svg class="ic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><input placeholder="Search…" disabled></div>
       <div class="jpy">jupyter</div>
       <div class="avatar"></div>
     </div>
@@ -170,7 +174,7 @@
         </button>
       </form>
       <details class="conn">
-        <summary>⚙︎ Connection</summary>
+        <summary><svg class="ic" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg> Connection</summary>
         <div class="grid">
           <div><label>Chat endpoint</label><input id="endpoint" value="http://149.165.147.219:3500/agent/chat/stream"></div>
           <div><label>Upload endpoint</label><input id="upload_endpoint" value="http://149.165.147.219:3500/agent/files/upload"></div>
@@ -196,7 +200,13 @@ const CONFIG = {
   enabled_search_methods: [],     // empty = all
   recent_k: 8,
 };
-let threadId = null, memoryId = null;          // reused across turns (session memory)
+function newSessionId(){
+  try { if (window.crypto && crypto.randomUUID) return "sess-" + crypto.randomUUID(); } catch(e){}
+  return "sess-" + Date.now().toString(36) + Math.random().toString(36).slice(2,10);
+}
+// Fresh random session id on every page open/refresh -> each load is its own isolated
+// session; reused across turns within the page so the conversation keeps continuity.
+let threadId = newSessionId(), memoryId = null;
 const pendingFiles = new Map();                // file_id -> {file_id, filename}
 let busy = false, aborter = null;
 
@@ -273,6 +283,22 @@ const LOGO = `<img class="iglogo logo" src="data:image/png;base64,iVBORw0KGgoAAA
 const el=(t,c,h)=>{const n=document.createElement(t);if(c)n.className=c;if(h!=null)n.innerHTML=h;return n;};
 const scrollDown=()=>window.scrollTo({top:document.body.scrollHeight,behavior:"smooth"});
 
+/* ---- inline flat line-icons (no external deps; inherit color via currentColor) ---- */
+function svg(body, size){
+  return `<svg class="ic" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
+}
+const THUMB_UP = '<path d="M7 22V11H4a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1z"/><path d="M7 11l4.3-8.2a2 2 0 0 1 3.7 1.2V9h4.6a2 2 0 0 1 2 2.4l-1.5 8A2 2 0 0 1 18 21H7"/>';
+const ICONS = {
+  search:   svg('<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>', 16),
+  paperclip:svg('<path d="M21.4 11.1l-9.2 9.2a5 5 0 0 1-7.1-7.1l9.2-9.2a3.3 3.3 0 0 1 4.7 4.7l-9.2 9.2a1.6 1.6 0 0 1-2.3-2.3l8.5-8.5"/>', 14),
+  thumbUp:  svg(THUMB_UP, 17),
+  thumbDown:svg('<g transform="translate(0 24) scale(1 -1)">'+THUMB_UP+'</g>', 17),  // vertical mirror of thumb-up
+  file:     svg('<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>', 15),
+  fileCode: svg('<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M9.5 13.5 8 15l1.5 1.5"/><path d="M13.5 13.5 15 15l-1.5 1.5"/>', 15),
+  gear:     svg('<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/>', 14),
+  x:        svg('<path d="M18 6 6 18M6 6l12 12"/>', 13),
+};
+
 function addUserTurn(text, files){
   const turn=el("div","turn");
   turn.appendChild(el("div","who you","You"));
@@ -280,7 +306,7 @@ function addUserTurn(text, files){
   const b=el("div","bubble user"); b.textContent=text;
   if(files && files.length){
     const att=el("div","att");
-    files.forEach(f=>att.appendChild(el("span","chip","📎 "+(f.filename||f.file_id))));
+    files.forEach(f=>{const c=el("span","chip",ICONS.paperclip);c.appendChild(document.createTextNode(f.filename||f.file_id));att.appendChild(c);});
     b.appendChild(att);
   }
   row.appendChild(b); turn.appendChild(row); thread.appendChild(turn); scrollDown();
@@ -293,7 +319,7 @@ function addAiTurn(){
   const col=el("div","ai-col");
   col.appendChild(el("div","ai-label","I-GUIDE AI"));
 
-  const reason=el("details","reason"); reason.open=true;
+  const reason=el("details","reason"); reason.open=false;  // folded by default; header shows the live step
   const sum=el("summary");
   const spin=el("span","spin");
   const title=el("span",null,"Reasoning");
@@ -326,7 +352,8 @@ function addFeedback(col){
   const fb=el("div","feedback");
   const q=el("div","q");
   q.appendChild(el("span",null,"Was this answer helpful?"));
-  const up=el("button","iconbtn","👍"), down=el("button","iconbtn","👎");
+  const up=el("button","iconbtn",ICONS.thumbUp), down=el("button","iconbtn",ICONS.thumbDown);
+  up.title="Helpful"; down.title="Not helpful";
   up.onclick=()=>{up.classList.add("on");down.classList.remove("on");};
   down.onclick=()=>{down.classList.add("on");up.classList.remove("on");};
   q.appendChild(up); q.appendChild(down); fb.appendChild(q);
@@ -353,9 +380,9 @@ function collectDownloads(value, into){
 function renderFiles(ui,map){
   ui.files.innerHTML="";
   for(const f of map.values()){
-    const a=el("a",null,null);
+    const a=el("a",null,(f.kind==="source"?ICONS.fileCode:ICONS.file));
     a.href=absoluteUrl(f.download_url); a.target="_blank"; a.rel="noopener noreferrer";
-    a.textContent=(f.kind==="source"?"🐍 ":"📄 ")+(f.filename||f.file_id);
+    a.appendChild(document.createTextNode(f.filename||f.file_id));
     ui.files.appendChild(a);
   }
 }
@@ -500,8 +527,9 @@ const attbar=document.getElementById("attbar");
 function renderAttbar(){
   attbar.innerHTML="";
   for(const f of pendingFiles.values()){
-    const chip=el("span","chip","📎 "+(f.filename||f.file_id));
-    const x=el("button",null,"✕"); x.title="Remove"; x.onclick=()=>{pendingFiles.delete(String(f.file_id));renderAttbar();};
+    const chip=el("span","chip",ICONS.paperclip);
+    chip.appendChild(document.createTextNode(f.filename||f.file_id));
+    const x=el("button",null,ICONS.x); x.title="Remove"; x.onclick=()=>{pendingFiles.delete(String(f.file_id));renderAttbar();};
     chip.appendChild(x); attbar.appendChild(chip);
   }
 }
