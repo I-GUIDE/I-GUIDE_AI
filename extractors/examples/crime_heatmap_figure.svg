@@ -1,0 +1,84 @@
+<svg viewBox="0 0 1060 600" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, Segoe UI, Roboto, sans-serif" role="img" aria-labelledby="ttl dsc">
+  <title id="ttl">From notebook submission to grounded agent execution</title>
+  <desc id="dsc">A notebook is extracted into the agent knowledge base; a user query retrieves the extracted blocks; the code peer reuses the data loader and writes the violent-crime filter and heat map; the answer cites the original element.</desc>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#475569"/>
+    </marker>
+  </defs>
+
+  <text x="34" y="34" font-size="21" font-weight="700" fill="#0f172a">From notebook submission to grounded agent execution</text>
+  <text x="34" y="56" font-size="13" fill="#475569">Preliminary example — Chicago crime "code agent" notebook → agent KB → "heat map of violent crime"</text>
+  <rect x="690" y="24" width="14" height="14" rx="3" fill="#dcfce7" stroke="#16a34a"/>
+  <text x="710" y="35" font-size="12" fill="#334155">reuse (extracted)</text>
+  <rect x="838" y="24" width="14" height="14" rx="3" fill="#fef3c7" stroke="#d97706"/>
+  <text x="858" y="35" font-size="12" fill="#334155">write (code peer)</text>
+
+  <text x="34" y="92" font-size="14" font-weight="700" fill="#6366f1">1 · SUBMIT &amp; EXTRACT</text>
+  <rect x="34" y="104" width="270" height="42" rx="8" fill="#e0f2fe" stroke="#0284c7"/>
+  <text x="48" y="125" font-size="13" font-weight="600" fill="#0f172a">code_agent_analysis.ipynb</text>
+  <text x="48" y="139" font-size="11" fill="#475569">user submits via form → element_id assigned</text>
+  <line x1="169" y1="146" x2="169" y2="172" stroke="#475569" stroke-width="1.5" marker-end="url(#ah)"/>
+  <rect x="34" y="172" width="270" height="36" rx="8" fill="#eef2ff" stroke="#6366f1"/>
+  <text x="48" y="194" font-size="13" font-weight="600" fill="#0f172a">NotebookExtractor (R1)</text>
+  <line x1="169" y1="208" x2="169" y2="234" stroke="#475569" stroke-width="1.5" marker-end="url(#ah)"/>
+  <rect x="34" y="234" width="270" height="56" rx="8" fill="#f5f3ff" stroke="#7c3aed"/>
+  <text x="48" y="255" font-size="13" font-weight="700" fill="#0f172a">Agent KB (local · agent-only index)</text>
+  <text x="48" y="272" font-size="11" fill="#475569">element ke_crimeagent</text>
+  <text x="48" y="285" font-size="11" fill="#475569">5 blocks + 1 workflow + 1 skill</text>
+  <rect x="34" y="304" width="270" height="118" rx="8" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="46" y="322" font-size="11" font-weight="700" fill="#334155">functions captured in blocks</text>
+  <text x="46" y="342" font-size="11" font-family="ui-monospace, monospace" fill="#16a34a">load_chicago_crime_data()</text>
+  <text x="46" y="360" font-size="11" font-family="ui-monospace, monospace" fill="#334155">filter_dataframe_by_value()</text>
+  <text x="46" y="378" font-size="11" font-family="ui-monospace, monospace" fill="#334155">spatial_join_and_count()</text>
+  <text x="46" y="396" font-size="11" font-family="ui-monospace, monospace" fill="#334155">plot_choropleth_map()</text>
+  <text x="46" y="414" font-size="11" font-family="ui-monospace, monospace" fill="#334155">load_chicago_community_areas()</text>
+
+  <line x1="304" y1="262" x2="392" y2="262" stroke="#475569" stroke-width="1.5" marker-end="url(#ah)"/>
+  <text x="396" y="92" font-size="14" font-weight="700" fill="#0e7490">2 · RETRIEVE</text>
+  <rect x="396" y="104" width="262" height="42" rx="8" fill="#e0f2fe" stroke="#0284c7"/>
+  <text x="410" y="124" font-size="12" font-weight="600" fill="#0f172a">user: "heat map of violent</text>
+  <text x="410" y="139" font-size="12" font-weight="600" fill="#0f172a">crime cases in Chicago"</text>
+  <line x1="527" y1="146" x2="527" y2="172" stroke="#475569" stroke-width="1.5" marker-end="url(#ah)"/>
+  <rect x="396" y="172" width="262" height="36" rx="8" fill="#eef2ff" stroke="#6366f1"/>
+  <text x="410" y="194" font-size="13" font-weight="600" fill="#0f172a">search peer → agent_kb_search</text>
+  <line x1="527" y1="208" x2="527" y2="234" stroke="#475569" stroke-width="1.5" marker-end="url(#ah)"/>
+  <rect x="396" y="234" width="262" height="56" rx="8" fill="#ecfeff" stroke="#0e7490"/>
+  <text x="410" y="255" font-size="12" font-weight="700" fill="#0f172a">block hits → evidence</text>
+  <text x="410" y="272" font-size="11" fill="#475569">all cite original element</text>
+  <text x="410" y="285" font-size="11" font-family="ui-monospace, monospace" fill="#0e7490">ke_crimeagent</text>
+
+  <line x1="658" y1="262" x2="744" y2="262" stroke="#475569" stroke-width="1.5" marker-end="url(#ah)"/>
+  <text x="748" y="92" font-size="14" font-weight="700" fill="#b45309">3 · REUSE vs WRITE — code peer</text>
+  <rect x="748" y="104" width="278" height="64" rx="8" fill="#dcfce7" stroke="#16a34a"/>
+  <text x="762" y="124" font-size="13" font-weight="700" fill="#0f172a">♻ REUSE — verbatim</text>
+  <text x="762" y="142" font-size="11" font-family="ui-monospace, monospace" fill="#166534">load_chicago_crime_data()</text>
+  <text x="762" y="158" font-size="11" fill="#475569">data source + GeoDataFrame (no hallucination)</text>
+  <rect x="748" y="180" width="278" height="86" rx="8" fill="#fef3c7" stroke="#d97706"/>
+  <text x="762" y="200" font-size="13" font-weight="700" fill="#0f172a">✎ WRITE — the gap</text>
+  <text x="762" y="219" font-size="11" fill="#334155">• violent-crime <tspan font-weight="700">category</tspan> filter (set)</text>
+  <text x="762" y="236" font-size="11" fill="#334155">• <tspan font-weight="700">heat map</tspan> render (hexbin / KDE)</text>
+  <text x="762" y="253" font-size="10.5" fill="#92400e">no heat tool extracted — only a choropleth</text>
+  <line x1="887" y1="266" x2="887" y2="292" stroke="#475569" stroke-width="1.5" marker-end="url(#ah)"/>
+  <rect x="748" y="292" width="278" height="44" rx="8" fill="#f1f5f9" stroke="#64748b"/>
+  <text x="762" y="312" font-size="12" font-weight="600" fill="#0f172a">answer + grounding audit</text>
+  <text x="762" y="328" font-size="11" fill="#475569">cites ke_crimeagent (the source notebook)</text>
+
+  <rect x="34" y="452" width="992" height="120" rx="10" fill="#fafafa" stroke="#e2e8f0"/>
+  <text x="50" y="476" font-size="13" font-weight="700" fill="#334155">supervisor-over-peers (how it runs)</text>
+  <rect x="50" y="492" width="150" height="40" rx="8" fill="#ede9fe" stroke="#7c3aed"/>
+  <text x="125" y="516" font-size="12" font-weight="600" fill="#0f172a" text-anchor="middle">supervisor</text>
+  <line x1="200" y1="512" x2="236" y2="512" stroke="#475569" stroke-width="1.5" marker-end="url(#ah)"/>
+  <rect x="236" y="492" width="170" height="40" rx="8" fill="#ecfeff" stroke="#0e7490"/>
+  <text x="321" y="510" font-size="12" font-weight="600" fill="#0f172a" text-anchor="middle">search</text>
+  <text x="321" y="524" font-size="10" fill="#475569" text-anchor="middle">agent_kb_search → evidence</text>
+  <line x1="406" y1="512" x2="442" y2="512" stroke="#475569" stroke-width="1.5" marker-end="url(#ah)"/>
+  <rect x="442" y="492" width="220" height="40" rx="8" fill="#fff7ed" stroke="#d97706"/>
+  <text x="552" y="510" font-size="12" font-weight="600" fill="#0f172a" text-anchor="middle">code</text>
+  <text x="552" y="524" font-size="10" fill="#475569" text-anchor="middle">reuse loader + write filter &amp; heat map</text>
+  <line x1="662" y1="512" x2="698" y2="512" stroke="#475569" stroke-width="1.5" marker-end="url(#ah)"/>
+  <rect x="698" y="492" width="170" height="40" rx="8" fill="#dcfce7" stroke="#16a34a"/>
+  <text x="783" y="510" font-size="12" font-weight="600" fill="#0f172a" text-anchor="middle">synthesize</text>
+  <text x="783" y="524" font-size="10" fill="#475569" text-anchor="middle">compose + cite source</text>
+  <text x="50" y="556" font-size="11" fill="#64748b">Extraction supplies trusted data/spatial code (highest hallucination risk); the code peer writes only the query-specific logic. Everything links back to the original element.</text>
+</svg>

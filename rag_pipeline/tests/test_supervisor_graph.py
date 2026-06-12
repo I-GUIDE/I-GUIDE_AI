@@ -86,6 +86,112 @@ def test_max_steps_guard_terminates():
     assert len(state["actions"]) <= 4
 
 
+def test_unproductive_code_repeat_is_blocked():
+    """A decider that keeps choosing 'code' must NOT re-run the code peer once it
+    has produced a result — the supervisor short-circuits to synthesize."""
+    calls = {"code": 0}
+
+    def code_fn(q, ev, st):
+        calls["code"] += 1
+        return {"answer": "the heatmap", "code_result": {"png": "heatmap.png"}}
+
+    state = run_supervisor(
+        "make a heatmap", llm=_fake_llm,
+        decide_fn=lambda s, d: "code",  # always wants code (the looping LLM)
+        search_fn=lambda q, s: [], code_fn=code_fn,
+        synthesize_fn=lambda *a: "final", do_rerank=False, do_audit=False,
+    )
+    assert calls["code"] == 1  # ran once, not repeatedly
+    assert state["actions"] == ["code", "done"]  # back-to-back repeat -> done
+    assert state["final_answer"] == "final"
+
+
+def test_needs_driven_rerun_is_not_blocked_by_repeat_guard():
+    """The repeat guard must not interfere with a legitimate needs-driven re-run."""
+    calls = {"code": 0}
+
+    def code_fn(q, ev, st):
+        calls["code"] += 1
+        if calls["code"] == 1:
+            return {"needs": ["search"]}  # request evidence -> supervisor re-runs code after
+        return {"answer": "done-code", "code_result": {"ok": True}}
+
+    def decide(state, distilled):
+        return "code" if not state.get("actions") else "done"
+
+    state = run_supervisor(
+        "write code", llm=_fake_llm, decide_fn=decide,
+        search_fn=lambda q, s: list(DOCS), code_fn=code_fn,
+        synthesize_fn=lambda *a: "final", do_rerank=False, do_audit=False,
+    )
+    assert calls["code"] == 2  # needs-driven re-run still happened
+    assert state["actions"] == ["code", "search", "code", "done"]
+
+
+def test_search_not_repeated_when_it_returns_nothing():
+    """The supervisor must stop routing to search once it returns no results,
+    instead of hammering the search agent."""
+    calls = {"search": 0}
+
+    def search_fn(q, s):
+        calls["search"] += 1
+        return []  # knowledge base has nothing for this query
+
+    state = run_supervisor(
+        "q", llm=_fake_llm,
+        decide_fn=lambda s, d: "search",   # decider keeps wanting search
+        search_fn=search_fn, synthesize_fn=lambda *a: "ans",
+        do_rerank=False, do_audit=False,
+    )
+    assert calls["search"] == 1            # ran once, then stopped (not looped)
+    assert state["actions"][-1] == "done"
+    assert state["final_answer"] == "ans"
+
+
+def test_exhausted_search_requests_are_dropped_and_loop_terminates():
+    """A peer that keeps requesting search after it's exhausted can't loop forever:
+    dead search needs are dropped and per-peer runs are capped."""
+    calls = {"search": 0, "analyze": 0}
+
+    def search_fn(q, s):
+        calls["search"] += 1
+        return []
+
+    def analyze_fn(q, ev, st):
+        calls["analyze"] += 1
+        return {"summary": "need data", "needs": ["search"]}  # always asks for search
+
+    def decide(s, d):
+        return "analyze" if (s.get("actions", []).count("analyze") == 0) else "done"
+
+    state = run_supervisor(
+        "q", llm=_fake_llm, decide_fn=decide,
+        search_fn=search_fn, analyze_fn=analyze_fn, synthesize_fn=lambda *a: "final",
+        do_rerank=False, do_audit=False,
+    )
+    assert calls["search"] == 1                 # search not hammered
+    assert calls["analyze"] <= 3                # per-peer run cap honored
+    assert len(state["actions"]) < state["max_steps"] + 1  # terminated before the hard cap
+    assert state["final_answer"] == "final"
+
+
+def test_productive_consecutive_searches_still_allowed():
+    """Two searches that each add NEW evidence are not blocked (only empty ones are)."""
+    seq = [["x1"], ["x2"]]
+    box = {"i": 0}
+
+    def search_fn(q, s):
+        d = seq[box["i"]] if box["i"] < len(seq) else []
+        box["i"] += 1
+        return [{"doc_id": v} for v in d]
+
+    state = run_supervisor(
+        "q", llm=_fake_llm, decide_fn=_scripted(["search", "search", "done"]),
+        search_fn=search_fn, synthesize_fn=lambda *a: "ok", do_rerank=False, do_audit=False,
+    )
+    assert {d["doc_id"] for d in state["evidence"]} == {"x1", "x2"}  # both searches ran + added
+
+
 def test_code_peer_feeds_synthesis():
     state = run_supervisor(
         "write code", llm=_fake_llm,
@@ -196,7 +302,9 @@ def test_synthesize_uses_chat_history():
     assert "PRIOR_CODE_X" in captured["prompt"]
 
 
-def test_code_worker_passes_chat_history(monkeypatch):
+def test_code_worker_does_not_refeed_chat_history(monkeypatch):
+    """P1-3: the code peer does NOT re-feed chat_history into its payload (continuity
+    is owned by its checkpointed child thread); mirrors the search peer."""
     import agent_runtime.executor_factory as ef
     import agent_runtime.supervisor_graph as sg
 
@@ -210,7 +318,68 @@ def test_code_worker_passes_chat_history(monkeypatch):
     monkeypatch.setattr(ef, "invoke_agent_with_payload_fallback", fake_invoke)
     hist = [{"role": "user", "content": "H"}]
     sg.default_code_fn()("q", [], {"chat_history": hist})
-    assert captured["chat_history"] == hist
+    assert captured["chat_history"] is None  # not double-fed
+
+
+def test_code_fn_result_is_flat(monkeypatch):
+    """P1-1: code-peer result is flat (no nested raw response object)."""
+    import agent_runtime.executor_factory as ef
+    import agent_runtime.supervisor_graph as sg
+
+    monkeypatch.setattr(ef, "build_agent_executor", lambda **k: object())
+    monkeypatch.setattr(ef, "invoke_agent_with_payload_fallback", lambda *a, **k: {"messages": []})
+    out = sg.default_code_fn()("q", [], {"thread_id": None, "chat_history": []})
+    assert "answer" in out
+    assert "code_result" not in out  # the giant raw response is no longer nested
+
+
+def test_synthesize_prefers_code_answer_text():
+    """P1-1: synthesis feeds the code peer's answer text, not a serialized dump."""
+    from agent_runtime.supervisor_graph import default_synthesize_fn
+
+    captured = {}
+
+    def rec(prompt):
+        captured["prompt"] = prompt
+        return "final"
+
+    code_result = {"answer": "RUNNABLE_CODE_SNIPPET", "tool_results": [{"x": "huge" * 500}]}
+    out = default_synthesize_fn(llm=rec)("q", [], None, code_result, None)
+    assert out == "final"
+    assert "RUNNABLE_CODE_SNIPPET" in captured["prompt"]
+
+
+def test_merge_dedup_collapses_idless_docs_by_content():
+    """P1-4: ID-less documents dedup by content hash (not disjoint positional keys)."""
+    from agent_runtime.supervisor_graph import _merge_dedup
+
+    existing = [{"title": "T", "contents": "same body"}]
+    new = [
+        {"title": "T", "contents": "same body"},   # duplicate of existing (no id)
+        {"title": "U", "contents": "different"},    # genuinely new
+    ]
+    merged = _merge_dedup(existing, new)
+    assert len(merged) == 2  # the duplicate id-less doc collapsed
+
+
+def test_initialized_advertises_supervisor_peers(monkeypatch):
+    """P1-7: the initialized event advertises the peers that actually run."""
+    import agent_runtime.graph_runtime as gr
+
+    monkeypatch.delenv("AGENT_SUPERVISOR", raising=False)
+
+    class _Graph:
+        def invoke(self, *a, **k):
+            return {
+                "final_answer": "x",
+                "available_agent_names": ["search", "analyze", "code"],
+                "orchestration_result": {"actions": ["done"]},
+            }
+
+    monkeypatch.setattr(gr, "build_orchestrator_graph", lambda **k: _Graph())
+    events = list(gr.stream_agent_query_events("q", use_supervisor=True))
+    init = [e for e in events if (e.get("data") or {}).get("stage") == "initialized"]
+    assert init and init[0]["data"]["available_agents"] == ["search", "analyze", "code"]
 
 
 def test_request_capability_tool_records_needs():
@@ -283,6 +452,203 @@ def test_orchestrate_uses_supervisor_by_default(monkeypatch):
 
     result = gr.run_agent_query("find flood datasets for texas and summarize")
     assert result["final_answer"] == "supervisor answer"
+
+
+# --- P0-2: grounding audit acts on its verdict --------------------------------
+
+def _audit_llm(*, flagged: bool):
+    def llm(prompt: str) -> str:
+        if "auditing a retrieval-augmented answer" in prompt.lower():
+            if flagged:
+                return json.dumps({"hallucination_detected": True, "severity": "high",
+                                   "issues": ["claim X unsupported"], "summary": "claim X unsupported"})
+            return json.dumps({"hallucination_detected": False, "severity": "none", "issues": [], "summary": "grounded"})
+        return "x"
+    return llm
+
+
+def test_grounding_audit_appends_caveat_when_flagged():
+    # A search populates evidence so the audit actually evaluates (it no-ops on
+    # empty evidence).
+    state = run_supervisor(
+        "q", llm=_audit_llm(flagged=True), decide_fn=_scripted(["search", "done"]),
+        search_fn=lambda q, s: list(DOCS), synthesize_fn=lambda *a: "raw answer",
+        do_rerank=False, do_audit=True,
+    )
+    assert "raw answer" in state["final_answer"]
+    assert "Grounding check" in state["final_answer"]  # caveat appended -> not cosmetic
+    assert state["audit"]["severity"] == "high"
+
+
+def test_grounding_audit_no_caveat_when_grounded():
+    state = run_supervisor(
+        "q", llm=_audit_llm(flagged=False), decide_fn=_scripted(["search", "done"]),
+        search_fn=lambda q, s: list(DOCS), synthesize_fn=lambda *a: "clean answer",
+        do_rerank=False, do_audit=True,
+    )
+    assert state["final_answer"] == "clean answer"  # unchanged when grounded
+    assert "Grounding check" not in state["final_answer"]
+
+
+def test_audit_surfaced_in_orchestrate_return(monkeypatch):
+    """orchestrate_node lifts sup_state['audit'] so it can reach the response."""
+    import agent_runtime.supervisor_graph as sg
+    import agent_runtime.graph_runtime as gr
+
+    monkeypatch.delenv("AGENT_SUPERVISOR", raising=False)
+    monkeypatch.setattr(
+        sg, "run_supervisor",
+        lambda query, **kwargs: {
+            "final_answer": "ans", "evidence": [], "actions": ["code", "done"],
+            "audit": {"hallucination_detected": True, "severity": "high", "summary": "bad"},
+        },
+    )
+    result = gr.run_agent_query("plot something")
+    assert result["grounding_audit"]["severity"] == "high"
+
+
+# --- P0-3: route trace is supervisor-aware ------------------------------------
+
+def test_route_trace_supervisor_aware():
+    from agent_runtime.runtime_utils import build_orchestration_trace
+
+    sup = {"actions": ["search", "code", "code", "done"], "evidence": [{"doc_id": "a"}],
+           "code_result": {"x": 1}, "audit": {"severity": "low"}}
+    t = build_orchestration_trace(
+        query="q", chat_history=None,
+        available_agent_names=["search", "analyze", "code"], orchestration_result=sup,
+    )
+    assert "search_agent_evidence" in t["called_tools"]  # search ran
+    assert "code_agent_answer" in t["called_tools"]       # code ran
+    assert t["route"] == "supervisor:search→code"          # distinct peers, in order
+    assert t["document_count"] == 1 and t["has_code"] is True
+    assert t["supervisor_actions"] == ["search", "code", "code", "done"]
+
+
+def test_route_trace_legacy_message_shape_still_works():
+    from agent_runtime.runtime_utils import build_orchestration_trace
+    from types import SimpleNamespace
+
+    legacy = {"messages": [SimpleNamespace(content="hi", type="ai", tool_calls=[])]}
+    t = build_orchestration_trace(
+        query="q", chat_history=None, available_agent_names=[], orchestration_result=legacy,
+    )
+    assert t["route"] == "orchestrator_only"  # legacy path unchanged
+
+
+# --- P0-1: search peer forwards enabled_search_methods ------------------------
+
+def test_search_peer_forwards_enabled_search_methods(monkeypatch):
+    import agent_runtime.executor_factory as ef
+    from agent_runtime.supervisor_graph import default_search_fn
+
+    captured = {}
+
+    def fake_build(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(ef, "build_search_agent_executor", fake_build)
+    monkeypatch.setattr(ef, "invoke_agent_with_payload_fallback", lambda *a, **k: {"messages": []})
+
+    default_search_fn(enabled_search_methods=["keyword_search"])("q", {"thread_id": None})
+    assert captured["enabled_search_methods"] == ["keyword_search"]
+
+
+# --- P0-4: collect_tools no longer silently defaults to full_pipeline ---------
+
+def test_collect_tools_defaults_to_granular_not_full_pipeline(monkeypatch):
+    import agent_runtime.langchain_granular_tools as gt
+    import agent_runtime.langchain_quality_tools as qt
+    import agent_runtime.skills as sk
+    import agent_runtime.langchain_tool as lt
+    from agent_runtime.tool_policy import collect_tools
+
+    monkeypatch.setattr(gt, "make_langchain_granular_tools", lambda **k: ["GRANULAR"])
+    monkeypatch.setattr(qt, "make_quality_tools", lambda: [])
+    monkeypatch.setattr(sk, "make_skill_tools", lambda **k: [])
+
+    def boom():
+        raise AssertionError("deprecated full_pipeline rag_tool must not be built by default")
+
+    monkeypatch.setattr(lt, "make_langchain_rag_tool", boom)
+
+    # empty/falsy strategy must resolve to granular, not full_pipeline
+    tools = collect_tools(tool_strategy="", include_mcp_tools=False, mcp_modules=None)
+    assert tools == ["GRANULAR"]
+
+
+# --- P2-7: decider uses the fenced-block JSON extractor ----------------------
+
+def test_decider_parses_fenced_json():
+    from agent_runtime.supervisor_graph import default_decide_fn
+
+    def llm(prompt):
+        return "Here is my choice:\n```json\n{\"next\": \"analyze\", \"reason\": \"run it\"}\n```"
+
+    nxt = default_decide_fn(llm=llm)(
+        {"query": "q", "chat_history": []}, {"has_evidence": True, "actions_taken": []}
+    )
+    assert nxt == "analyze"  # fenced JSON parsed (naive slicing would have failed)
+
+
+def test_decider_falls_back_when_output_unparseable():
+    from agent_runtime.supervisor_graph import default_decide_fn
+
+    def llm(prompt):
+        return "I cannot produce JSON right now, sorry."
+
+    nxt = default_decide_fn(llm=llm)(
+        {"query": "q", "chat_history": []}, {"has_evidence": False, "actions_taken": []}
+    )
+    assert nxt == "search"  # deterministic heuristic: no evidence yet -> search
+
+
+# --- P2-2: analyze peer gets file tools when files are attached ---------------
+
+def test_analyze_peer_gets_file_tools_only_when_files_present(monkeypatch):
+    from types import SimpleNamespace
+
+    import agent_runtime.executor_factory as ef
+    import agent_runtime.langchain_granular_tools as gt
+    import agent_runtime.langchain_file_tools as ft
+    import agent_runtime.supervisor_graph as sg
+
+    monkeypatch.delenv("AGENT_CODE_EXEC", raising=False)
+    monkeypatch.setattr(gt, "make_langchain_qgis_tools", lambda **k: [])
+    monkeypatch.setattr(ft, "make_langchain_file_tools", lambda: [SimpleNamespace(name="read_text_file")])
+
+    captured = {}
+
+    def fake_build(**kwargs):
+        captured["tools"] = [getattr(t, "name", "") for t in (kwargs.get("preloaded_tools") or [])]
+        return object()
+
+    monkeypatch.setattr(ef, "build_agent_executor", fake_build)
+    monkeypatch.setattr(ef, "invoke_agent_with_payload_fallback", lambda *a, **k: {"messages": []})
+
+    sg.default_analyze_fn(include_mcp_tools=False, input_file_ids=["file_x"])("q", [], {"thread_id": None})
+    assert "read_text_file" in captured["tools"]
+
+    captured.clear()
+    sg.default_analyze_fn(include_mcp_tools=False, input_file_ids=None)("q", [], {"thread_id": None})
+    assert "read_text_file" not in captured["tools"]
+
+
+# --- P2-6: the checkpointer is bounded (LRU thread eviction) ------------------
+
+def test_bounded_checkpointer_evicts_least_recently_used_thread():
+    from agent_runtime.executor_factory import BoundedInMemorySaver
+
+    saver = BoundedInMemorySaver(max_threads=2)
+    for tid in ("t1", "t2"):
+        saver.storage[tid]["ns"] = {"cid": tid}
+        saver._touch_thread(tid)
+    saver.storage["t3"]["ns"] = {"cid": "t3"}
+    saver._touch_thread("t3")  # over cap -> evicts t1 (LRU)
+
+    assert "t1" not in saver.storage
+    assert "t2" in saver.storage and "t3" in saver.storage
 
 
 def test_use_supervisor_false_forces_agents_as_tools(monkeypatch):

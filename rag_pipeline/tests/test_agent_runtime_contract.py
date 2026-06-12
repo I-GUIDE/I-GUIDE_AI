@@ -261,8 +261,12 @@ def test_agent_dev_on_emits_detail(stub_orchestrator, monkeypatch):
     events = _collect_events()
     names = {e["event"] for e in events}
 
+    # Dev-tier post-run summary (route trace + routing decision). Per-step
+    # tool_call/tool_result/llm_interaction now come from the LIVE callback handler
+    # during the run (not a post-run replay), which the stubbed orchestrator here
+    # does not exercise.
     assert "route_trace" in names
-    assert "tool_call" in names  # canned orchestration result contains a tool call
+    assert "decision" in names
     assert "completed" in names
 
 
@@ -270,12 +274,12 @@ def test_agent_dev_request_flag_overrides_env(stub_orchestrator, monkeypatch):
     # env OFF but per-request flag True -> detail events appear
     monkeypatch.delenv("AGENT_DEV", raising=False)
     names_on = {e["event"] for e in gr.stream_agent_query_events("q", agent_dev=True)}
-    assert "route_trace" in names_on and "tool_call" in names_on
+    assert "route_trace" in names_on and "decision" in names_on
 
     # env ON but per-request flag False -> detail suppressed
     monkeypatch.setenv("AGENT_DEV", "true")
     names_off = {e["event"] for e in gr.stream_agent_query_events("q", agent_dev=False)}
-    assert "route_trace" not in names_off and "tool_call" not in names_off
+    assert "route_trace" not in names_off and "decision" not in names_off
     assert "completed" in names_off  # status tier still present
 
 

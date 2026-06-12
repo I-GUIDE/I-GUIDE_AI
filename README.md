@@ -104,9 +104,10 @@ MCP_server/                      Model Context Protocol tool server
     search_tools.py              External resource search (DuckDuckGo)
     image_tools.py               Vision model image/map analysis
     notebook_workflow_tools.py   Jupyter notebook -> callable tool conversion
-    generated_notebook_tools.py  Dynamically registered notebook-derived tools
+    generated_notebook_tools.py  Shared executor body for generated workflow manifests
+    generic_executor_tools.py    run_notebook_workflow / run_code_element (one generic executor)
+    ingest_tools.py              ingest_github_repo (agent-callable ingestion)
   notebook_workflow_builder.py   Notebook AST parsing and artifact generation
-  smolagents_adapter.py          Smolagents-compatible tool wrapper
 
 embedding-server/                Dense embedding service
   dense_embedding_server.py      Flask server for all-MiniLM-L6-v2 embeddings (port 5000)

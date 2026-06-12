@@ -50,6 +50,8 @@ RAG_COMPONENT_TOOL_NAMES: set[str] = {
     "neo4j_explore_related_nodes",
     "spatial_search",
     "opengeodata_search",
+    "agent_kb_search",
+    "get_kb_block",
 }
 
 FILE_TOOL_NAMES: set[str] = {

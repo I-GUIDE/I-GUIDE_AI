@@ -40,6 +40,7 @@ _STATUS_TIER_EVENTS = frozenset(
         "node_started",
         "node_completed",
         "search_complete",
+        "grounding_audit",
         "final_answer",
         "completed",
         "error",
@@ -252,21 +253,11 @@ class StreamingTraceCallbackHandler(BaseCallbackHandler):
                 content = _message_content(message) if message is not None else str(getattr(generation, "text", "") or "")
                 raw_tool_calls = getattr(message, "tool_calls", None) if message is not None else None
                 if isinstance(raw_tool_calls, list) and raw_tool_calls:
-                    calls = [_normalize_tool_call(call) for call in raw_tool_calls]
-                    self._emit(
-                        "llm_interaction",
-                        {
-                            "kind": "llm_tool_decision",
-                            "label": "LLM tool decision",
-                            "content": content,
-                            "message": "; ".join(
-                                f"{call.get('name')}({json.dumps(call.get('args') or {}, ensure_ascii=True, default=str)})"
-                                for call in calls
-                            ),
-                            "tool_calls": calls,
-                        },
-                    )
-                elif content.strip():
+                    # Tool decisions are surfaced once, as `tool_call` events from
+                    # ``on_tool_start``. Emitting them here too made every decision
+                    # appear twice in the stream — skip the redundant copy.
+                    continue
+                if content.strip():
                     self._emit(
                         "llm_interaction",
                         {

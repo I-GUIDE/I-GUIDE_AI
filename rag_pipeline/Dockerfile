@@ -5,8 +5,20 @@ FROM python:3.11-slim
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
+    ca-certificates \
+    gnupg \
     gdal-bin \
     libgdal-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Docker CLI (client only) so sandboxed code execution can shell out to the HOST
+# Docker daemon (Docker-out-of-Docker). The host socket must be mounted at runtime;
+# no daemon/containerd is installed here.
+RUN install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list \
+    && apt-get update && apt-get install -y docker-ce-cli \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

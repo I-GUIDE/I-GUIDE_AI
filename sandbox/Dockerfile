@@ -16,6 +16,7 @@ RUN pip install --no-cache-dir \
     numpy \
     pandas \
     matplotlib \
+    seaborn \
     scipy \
     shapely
 

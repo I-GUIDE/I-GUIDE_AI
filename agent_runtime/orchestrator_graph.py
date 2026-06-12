@@ -82,6 +82,7 @@ class OrchestratorState(TypedDict, total=False):
     final_answer: str
     orchestration_result: Any
     available_agent_names: List[str]
+    audit: Dict[str, Any]  # grounding-audit verdict, lifted from the supervisor
     # Reserved for shared, deduplicated evidence across sub-agents (future work).
     evidence: List[Dict[str, Any]]
 
@@ -117,6 +118,7 @@ def build_orchestrator_graph(
     skill_roots: Optional[List[str]] = None,
     use_supervisor: Optional[bool] = None,
     code_exec: Optional[bool] = None,
+    input_file_ids: Optional[List[str]] = None,
 ) -> Any:
     """Compile the hybrid orchestrator graph for one request's configuration.
 
@@ -205,8 +207,12 @@ def build_orchestrator_graph(
                     mcp_modules=mcp_modules,
                     skill_roots=skill_roots,
                     code_exec=code_exec,
+                    input_file_ids=input_file_ids,
                 ),
-                code_fn=default_code_fn(llm=llm, skill_roots=skill_roots, code_exec=code_exec),
+                code_fn=default_code_fn(
+                    llm=llm, skill_roots=skill_roots, code_exec=code_exec,
+                    input_file_ids=input_file_ids,
+                ),
             )
             emit_trace_event(
                 "node_completed",
@@ -218,6 +224,7 @@ def build_orchestrator_graph(
                 "orchestration_result": sup_state,
                 "final_answer": sup_state.get("final_answer", ""),
                 "available_agent_names": ["search", "analyze", "code"],
+                "audit": sup_state.get("audit") or {},
             }
 
         tools = collect_orchestration_tools(

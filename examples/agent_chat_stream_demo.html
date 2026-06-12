@@ -501,7 +501,14 @@
         .replace(/__([^_]+)__/g, "<strong>$1</strong>")
         .replace(/(^|[^*])\*(?!\s)([^*]+?)\*/g, "$1<em>$2</em>")
         .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, t, u) => {
-          const safe = /^(https?:|mailto:|\/)/i.test(u) ? u : "#";
+          // Resolve API-relative / sandbox: links against the configured server so
+          // downloads work when pointed at a remote deployment (not the page origin).
+          const href = String(u).replace(/^sandbox:/i, "");
+          let safe;
+          if (/^(https?:|mailto:)/i.test(href)) safe = href;
+          else if (href.charAt(0) === "/") safe = absoluteUrl(href);
+          else safe = "#";
+          safe = safe.replace(/"/g, "%22");
           return `<a href="${safe}" target="_blank" rel="noopener noreferrer">${t}</a>`;
         });
       const lines = String(src || "").replace(/\r\n?/g, "\n").split("\n");
@@ -696,11 +703,28 @@
       }
     }
 
+    function apiBase() {
+      // Resolve download/file links against the CONFIGURED API server (which may be
+      // remote), not the page's own origin. Derive the origin from the endpoint
+      // fields; fall back to localhost (file://) or the page origin.
+      const candidates = [
+        document.getElementById("endpoint") && document.getElementById("endpoint").value,
+        document.getElementById("upload_endpoint") && document.getElementById("upload_endpoint").value,
+      ];
+      for (const raw of candidates) {
+        const v = String(raw || "").trim();
+        if (/^https?:\/\//i.test(v)) {
+          try { return new URL(v).origin; } catch (e) {}
+        }
+      }
+      return window.location.protocol === "file:" ? "http://127.0.0.1:3500" : window.location.origin;
+    }
+
     function absoluteUrl(path) {
       if (!path) return "#";
-      if (/^https?:\/\//i.test(path)) return path;
-      const base = window.location.protocol === "file:" ? "http://127.0.0.1:3500" : window.location.origin;
-      return new URL(path, base).toString();
+      let p = String(path).trim().replace(/^sandbox:/i, ""); // models sometimes emit sandbox:/agent/files/...
+      if (/^https?:\/\//i.test(p)) return p;
+      try { return new URL(p, apiBase()).toString(); } catch (e) { return "#"; }
     }
 
     function maybeCollectRefs(value) {

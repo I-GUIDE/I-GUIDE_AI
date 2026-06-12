@@ -84,7 +84,9 @@ def collect_tools(
     from agent_runtime.langchain_tool import make_langchain_rag_tool
     from agent_runtime.skills import make_skill_tools
 
-    strategy = (tool_strategy or "full_pipeline").strip().lower()
+    # Default to the granular tool set: full_pipeline (rag_tool) is the deprecated
+    # path and must never be the silent fallback for a missing/empty strategy.
+    strategy = (tool_strategy or "granular").strip().lower()
     if strategy == "granular":
         tools = make_langchain_granular_tools(
             enabled_search_methods=enabled_search_methods,

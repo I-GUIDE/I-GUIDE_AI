@@ -64,7 +64,7 @@ def _doc_field(doc: Any, *keys: str, default: str = "") -> str:
     return default
 
 
-def _format_documents(documents: List[Any], *, limit: int = 8, max_chars: int = 500) -> str:
+def _format_documents(documents: List[Any], *, limit: int = 8, max_chars: int = 2500) -> str:
     lines: List[str] = []
     for i, doc in enumerate(documents[:limit]):
         doc_id = _doc_field(doc, "doc_id", "id", "_id", default=f"doc-{i}")

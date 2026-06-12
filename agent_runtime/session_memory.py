@@ -16,6 +16,20 @@ so ``agent_chat_service._build_chat_history`` can consume either one transparent
 The store is bounded (per-thread turn cap + global LRU thread cap) to avoid
 unbounded growth in a long-lived process, and is thread-safe (the streaming and
 non-streaming entry points may run concurrently).
+
+Multi-worker contract
+----------------------
+This store (and the LangGraph ``BoundedInMemorySaver`` checkpointer in
+``executor_factory``) are **process-local**. Across multiple server workers,
+multi-turn continuity is only guaranteed when EITHER:
+
+* requests for a given conversation are routed to the same worker (sticky
+  sessions, keyed on ``thread_id`` / ``memory_id``), OR
+* persistent memory is enabled (``use_persistent_memory`` → OpenSearch), which is
+  shared across workers and survives restarts.
+
+Without one of those, a follow-up turn handled by a different worker will not see
+the prior conversation. Single-worker / sticky deployments need no extra config.
 """
 
 from __future__ import annotations

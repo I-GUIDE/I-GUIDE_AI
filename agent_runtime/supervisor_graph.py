@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from agent_runtime.evidence_quality import audit_answer_grounding, rerank_documents
+from agent_runtime.evidence_quality import _extract_json_object, audit_answer_grounding, rerank_documents
 from agent_runtime.evidence_subgraph import (
     _content_to_text,
     _doc_field,
@@ -39,6 +39,31 @@ from agent_runtime.streaming_trace import emit_trace_event
 
 ALLOWED_ACTIONS = ("search", "analyze", "code", "done")
 DEFAULT_MAX_STEPS = 8
+
+
+def _max_searches() -> int:
+    """Hard cap on how many times the search peer may run per request."""
+    try:
+        return max(1, int(os.getenv("AGENT_SUPERVISOR_MAX_SEARCHES", "2")))
+    except (TypeError, ValueError):
+        return 2
+
+
+def _max_peer_runs() -> int:
+    """Cap on how many times any single peer may run (bounds needs-driven re-run loops)."""
+    try:
+        return max(1, int(os.getenv("AGENT_SUPERVISOR_MAX_PEER_RUNS", "3")))
+    except (TypeError, ValueError):
+        return 3
+
+
+def _search_exhausted(state: "SupervisorState") -> bool:
+    """Whether further searching is pointless: it hit the attempt cap, or the most
+    recent search returned NO new evidence. Stops the supervisor (and peer 'needs')
+    from hammering the search agent when the knowledge base has nothing to return."""
+    if state.get("search_attempts", 0) >= _max_searches():
+        return True
+    return state.get("search_empty_streak", 0) >= 1
 
 # Injected callables
 DecideFn = Callable[["SupervisorState", Dict[str, Any]], str]    # (state, distilled) -> action
@@ -58,7 +83,9 @@ ANALYSIS_WORKFLOW_PROMPT = (
     "before you can run the analysis, call request_capability(capability=..., reason=...) "
     "instead of guessing — the supervisor will fulfill the request and re-run you.\n"
     "If an execute_code tool is available, you may use it to run computational steps and "
-    "verify results."
+    "verify results. To read an UPLOADED file inside execute_code, pass its file_id(s) in "
+    "the `input_files` argument; the file is then available in the working directory under "
+    "both its file_id and its original filename."
 )
 
 CODE_PEER_PROMPT = (
@@ -69,7 +96,18 @@ CODE_PEER_PROMPT = (
     "code, read stdout/stderr, fix any errors, and re-run until it works — then report the "
     "final working code and its output. If your code needs third-party packages, pass them "
     "via execute_code's `dependencies` argument (e.g. dependencies=[\"numpy\",\"pandas\"]); "
-    "they are installed before the code runs.\n"
+    "they are installed before the code runs. If your code reads an UPLOADED file, pass its "
+    "file_id(s) in execute_code's `input_files` argument (e.g. input_files=[\"file_1a2b3c\"]); "
+    "the file is then available in the working directory under both its file_id and its "
+    "original filename.\n"
+    "When you produce a plot/figure, SAVE it to a file with matplotlib "
+    "`plt.savefig('result.png', bbox_inches='tight')` — the headless sandbox cannot "
+    "display windows, so do NOT rely on `plt.show()`; the saved image is returned as a "
+    "downloadable artifact.\n"
+    "When the evidence references ingested knowledge-base blocks (by doc_id), call "
+    "get_kb_block(doc_id) to read the FULL source of a referenced function/notebook and "
+    "REUSE it verbatim — including real data-loading URLs/APIs — instead of stubbing "
+    "loaders or inventing local file paths. You may also agent_kb_search for more.\n"
     "If you need evidence from the knowledge base, prior analysis results, or another "
     "capability before you can write correct code, call request_capability(capability=..., "
     "reason=...) instead of guessing — the supervisor will fulfill it and re-run you. "
@@ -93,6 +131,8 @@ class SupervisorState(TypedDict, total=False):
     max_steps: int
     final_answer: str
     distilled: Dict[str, Any]
+    search_attempts: int           # how many times the search peer has run
+    search_empty_streak: int       # consecutive searches that added NO new evidence
 
 
 def is_supervisor_enabled() -> bool:
@@ -108,11 +148,30 @@ def is_supervisor_enabled() -> bool:
 # Shared-state helpers
 # ---------------------------------------------------------------------------
 
+def _doc_key(doc: Any) -> str:
+    """Stable dedup key for a document.
+
+    Uses an explicit id when present; otherwise falls back to a content hash
+    (title + contents) so ID-less documents from the multi-pass search the design
+    encourages still dedup against each other — the previous positional fallbacks
+    (``_{i}`` vs ``new-{j}``) lived in disjoint namespaces and could never collide.
+    """
+    ident = _doc_field(doc, "doc_id", "id", "_id", default="")
+    if ident:
+        return f"id:{ident}"
+    import hashlib
+
+    title = _doc_field(doc, "title", default="")
+    contents = _doc_field(doc, "contents", "content", "text", "summary", default="")
+    digest = hashlib.sha1(f"{title}\n{contents}".strip().encode("utf-8", "replace")).hexdigest()
+    return f"c:{digest}"
+
+
 def _merge_dedup(existing: List[Any], new: List[Any]) -> List[Any]:
     merged = list(existing or [])
-    seen = {_doc_field(d, "doc_id", "id", "_id", default=f"_{i}") for i, d in enumerate(merged)}
-    for j, d in enumerate(new or []):
-        key = _doc_field(d, "doc_id", "id", "_id", default=f"new-{j}")
+    seen = {_doc_key(d) for d in merged}
+    for d in new or []:
+        key = _doc_key(d)
         if key in seen:
             continue
         seen.add(key)
@@ -124,6 +183,7 @@ def _distill(state: SupervisorState) -> Dict[str, Any]:
     """Compact progress view for the supervisor (no heavy documents)."""
     docs = state.get("evidence") or []
     audit = state.get("audit") or {}
+    actions = list(state.get("actions") or [])
     return {
         "has_evidence": bool(docs),
         "document_count": len(docs),
@@ -132,7 +192,14 @@ def _distill(state: SupervisorState) -> Dict[str, Any]:
         "has_answer": bool((state.get("answer") or "").strip()),
         "audit_severity": audit.get("severity"),
         "pending_needs": [n.get("capability") for n in (state.get("needs") or []) if isinstance(n, dict)],
-        "actions_taken": list(state.get("actions") or []),
+        "actions_taken": actions,
+        # How many times each peer has already run — so the decider can see (and
+        # avoid) unproductive repetition.
+        "action_counts": {c: actions.count(c) for c in ("search", "analyze", "code") if actions.count(c)},
+        "search_attempts": state.get("search_attempts", 0),
+        # True once the knowledge base has nothing more to give (cap hit, or the last
+        # search returned no new evidence) — the decider must NOT search again.
+        "search_exhausted": _search_exhausted(state),
     }
 
 
@@ -211,6 +278,60 @@ def _heuristic_decision(distilled: Dict[str, Any]) -> str:
     return "done"
 
 
+def _is_unproductive_repeat(nxt: str, state: SupervisorState) -> bool:
+    """True if *nxt* re-runs the peer that JUST ran and already produced a result,
+    with no pending need driving it.
+
+    Applies to ``analyze`` / ``code``: each overwrites a single result slot and
+    iterates internally (the code peer runs+debugs its own code), so re-running it
+    back-to-back with the same inputs just reproduces the same result — the
+    signature of a decision loop. ``search`` is intentionally NOT guarded: it
+    *accumulates* (dedup-merges) into evidence, so a follow-up search can add new
+    documents. A genuine multi-hop refinement interleaves a *different* peer (or a
+    request_capability need), so only consecutive same-peer repeats are blocked.
+    """
+    actions = state.get("actions") or []
+    if not actions or actions[-1] != nxt:
+        return False  # not a back-to-back repeat
+    if nxt == "code":
+        return state.get("code_result") is not None
+    if nxt == "analyze":
+        return state.get("analysis_results") is not None
+    return False
+
+
+# Severities at/above which the grounding audit appends a user-visible caveat.
+_AUDIT_FLAG_SEVERITIES = {"medium", "high"}
+
+
+def _audit_flagged(audit: Optional[Dict[str, Any]]) -> bool:
+    """Whether the grounding audit found a problem worth warning the user about."""
+    if not audit:
+        return False
+    severity = str(audit.get("severity") or "").strip().lower()
+    return bool(audit.get("hallucination_detected")) or severity in _AUDIT_FLAG_SEVERITIES
+
+
+def _apply_grounding_caveat(answer: str, audit: Optional[Dict[str, Any]]) -> str:
+    """Append a clearly-marked grounding caveat to *answer* when the audit flags it.
+
+    This is what makes the grounding audit non-cosmetic: a flagged verdict changes
+    the text the user actually sees, rather than being computed and discarded.
+    """
+    if not _audit_flagged(audit):
+        return answer
+    severity = str((audit or {}).get("severity") or "").strip().lower()
+    summary = str((audit or {}).get("summary") or "").strip()
+    note = (
+        "⚠️ Grounding check: parts of this answer may not be fully supported by the "
+        "retrieved evidence"
+    )
+    if severity:
+        note += f" (severity: {severity})"
+    note += f". {summary}" if summary else "."
+    return f"{answer}\n\n---\n\n{note}" if (answer or "").strip() else note
+
+
 def _format_chat_history(chat_history: Optional[List[Any]], *, max_items: int = 8, max_chars: int = 4000) -> str:
     """Render recent chat history as compact 'role: content' lines for prompts."""
     if not chat_history:
@@ -246,6 +367,15 @@ def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
             "ALREADY produced earlier in the conversation (e.g. 'show me the code', 'explain "
             "that', 'what did you find'), do NOT search again — choose 'done' so the answer is "
             "composed from the conversation, unless genuinely new external information is needed.\n"
+            "Each peer ITERATES INTERNALLY (the code peer runs AND debugs its own code; search "
+            "issues multiple queries in one pass). So once a peer has produced its result "
+            "(see has_code / has_analysis / has_evidence and action_counts in Progress), do NOT "
+            "pick it again to 'retry' or 'improve' — that just repeats work. Choose 'done' once "
+            "the request is covered; the final answer is composed automatically. Only pick a peer "
+            "again if you genuinely need NEW work it has not done yet.\n"
+            "If 'search_exhausted' is true in Progress, the knowledge base returned nothing new — "
+            "do NOT choose 'search' again. Proceed with analyze/code (which can work on uploaded "
+            "files and prior results) or choose 'done'.\n"
             "Peers may also REQUEST a capability they need (e.g. code needs evidence); such "
             "requests are fulfilled automatically before you are consulted again.\n\n"
             "Respond ONLY with JSON: {\"next\": \"search|analyze|code|done\", \"reason\": \"...\"}\n\n"
@@ -261,13 +391,22 @@ def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
                 active = build_default_llm()
             raw = active.invoke(prompt) if hasattr(active, "invoke") else active(prompt)
             text = _content_to_text(raw)
-            start, end = text.find("{"), text.rfind("}")
-            parsed = json.loads(text[start : end + 1]) if start != -1 else {}
-            nxt = str(parsed.get("next") or "").strip().lower()
+            # Reuse the fenced-block-aware extractor (handles ```json fences and
+            # prose around the object) instead of naive first-{/last-} slicing.
+            parsed = _extract_json_object(text)
+            nxt = str((parsed or {}).get("next") or "").strip().lower() if isinstance(parsed, dict) else ""
             if nxt in ALLOWED_ACTIONS:
                 return nxt
         except Exception:
             pass
+        # The decider output was unusable; fall back to the deterministic heuristic.
+        # Emit a (detail-tier) marker so this degraded path is distinguishable from a
+        # genuine LLM "done" in the trace.
+        emit_trace_event(
+            "decider_fallback",
+            {"stage": "supervisor", "message": "decider output not parseable; used heuristic fallback"},
+            node="supervisor",
+        )
         return _heuristic_decision(distilled)
 
     return decide
@@ -276,6 +415,18 @@ def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
 # ---------------------------------------------------------------------------
 # Default worker adapters (best-effort; wire to existing agents — need live validation)
 # ---------------------------------------------------------------------------
+
+def _as_retrieval_request(query: str) -> str:
+    """Reframe the (possibly action-shaped) user query as a RETRIEVAL task for the
+    search peer, so it gathers evidence instead of trying to perform the task itself
+    (which makes capable models loop). The original query is still used for citation."""
+    return (
+        "Retrieve relevant evidence for the request below. Use the search tools to "
+        "gather documents/code, then STOP and return the evidence — do NOT perform "
+        "the task, write code, or produce the final answer yourself.\n\n"
+        f"Request: {query}"
+    )
+
 
 def default_search_fn(*, llm: Optional[Any] = None, tool_strategy: str = "granular",
                       include_mcp_tools: bool = False, mcp_modules: Optional[List[str]] = None,
@@ -292,10 +443,11 @@ def default_search_fn(*, llm: Optional[Any] = None, tool_strategy: str = "granul
 
         executor = build_search_agent_executor(
             llm=llm, tool_strategy=tool_strategy, include_mcp_tools=include_mcp_tools,
-            mcp_modules=mcp_modules, skill_roots=skill_roots,
+            mcp_modules=mcp_modules, enabled_search_methods=enabled_search_methods,
+            skill_roots=skill_roots,
         )
         resp = invoke_agent_with_payload_fallback(
-            executor, query=query, chat_history=None,
+            executor, query=_as_retrieval_request(query), chat_history=None,
             config=agent_config(child_thread_id(state.get("thread_id"), "sup_search")),
         )
         return extract_documents_from_search_evidence(build_search_evidence_payload(query, resp, None))
@@ -306,7 +458,8 @@ def default_search_fn(*, llm: Optional[Any] = None, tool_strategy: str = "granul
 def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = True,
                        mcp_modules: Optional[List[str]] = None,
                        skill_roots: Optional[List[str]] = None,
-                       code_exec: Optional[bool] = None) -> AnalyzeFn:
+                       code_exec: Optional[bool] = None,
+                       input_file_ids: Optional[List[str]] = None) -> AnalyzeFn:
     """Run the GIS/data analysis workflow (QGIS + spatial-analysis MCP tools)."""
 
     def fn(query: str, evidence: List[Any], state: SupervisorState) -> Any:
@@ -326,13 +479,27 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
             from agent_runtime.langchain_mcp_tools import make_langchain_mcp_tools
 
             tools.extend(make_langchain_mcp_tools(include_modules=mcp_modules or ["spatial_analysis_tools"]))
+        # Geospatial KB tools: run extracted spatial functions + chain GIS ops by file_id
+        # (the GIS runs as executed tool steps; GeoDataFrames pass as files, not in memory).
+        try:
+            from extractors.geo_handles import make_geo_analysis_tools
+            tools.extend(make_geo_analysis_tools())
+        except Exception:
+            pass
         tools.append(request_tool)
+        # When files are attached to the conversation, let the analysis peer inspect
+        # them directly (read_text_file / inspect_file_for_analysis) instead of only
+        # being able to touch them via execute_code.
+        if input_file_ids:
+            from agent_runtime.langchain_file_tools import make_langchain_file_tools
+
+            tools.extend(make_langchain_file_tools())
         from agent_runtime.code_execution import is_code_exec_enabled
 
         if code_exec if code_exec is not None else is_code_exec_enabled():
             from agent_runtime.langchain_exec_tools import make_code_execution_tools
 
-            tools.extend(make_code_execution_tools())
+            tools.extend(make_code_execution_tools(default_input_file_ids=input_file_ids))
         executor = build_agent_executor(
             llm=llm, preloaded_tools=tools, system_prompt_override=ANALYSIS_WORKFLOW_PROMPT,
             agent_name="analysis_agent", skill_roots=skill_roots,
@@ -340,8 +507,12 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
         q = query
         if evidence:
             q = f"{query}\n\nContext evidence:\n{_format_documents(evidence)}"
+        # Cross-turn continuity comes from this peer's own checkpointed child
+        # thread (and the supervisor's chat_history drives routing/synthesis), so
+        # we do NOT re-feed chat_history here — that would replay prior turns twice
+        # on re-runs. Mirrors the search peer.
         resp = invoke_agent_with_payload_fallback(
-            executor, query=q, chat_history=state.get("chat_history"),
+            executor, query=q, chat_history=None,
             config=agent_config(child_thread_id(thread_id, "analysis")),
         )
         artifacts = extract_search_artifacts(resp)
@@ -359,7 +530,8 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
 
 
 def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str]] = None,
-                    code_exec: Optional[bool] = None) -> CodeFn:
+                    code_exec: Optional[bool] = None,
+                    input_file_ids: Optional[List[str]] = None) -> CodeFn:
     """Code peer: writes code, and can request_capability(search/analyze) when it
     lacks the context to do so (model-driven — no nested search tool)."""
 
@@ -370,17 +542,26 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
             child_thread_id,
             invoke_agent_with_payload_fallback,
         )
-        from agent_runtime.runtime_utils import extract_final_answer
+        from agent_runtime.runtime_utils import extract_final_answer, extract_search_artifacts
         from agent_runtime.skills import make_skill_tools
 
         request_tool, requests = _make_request_tool()
         tools = [*make_skill_tools(skill_roots=skill_roots), request_tool]
+        # KB read tools so the code peer can pull the FULL source of referenced blocks
+        # (get_kb_block) and reuse it verbatim instead of stubbing loaders.
+        try:
+            from agent_runtime.langchain_granular_tools import make_langchain_granular_tools
+            tools.extend(t for t in make_langchain_granular_tools(
+                enabled_search_methods=["agent_kb_search", "get_kb_block"])
+                if getattr(t, "name", "") in {"agent_kb_search", "get_kb_block"})
+        except Exception:
+            pass
         from agent_runtime.code_execution import is_code_exec_enabled
 
         if code_exec if code_exec is not None else is_code_exec_enabled():
             from agent_runtime.langchain_exec_tools import make_code_execution_tools
 
-            tools.extend(make_code_execution_tools())
+            tools.extend(make_code_execution_tools(default_input_file_ids=input_file_ids))
         executor = build_agent_executor(
             llm=llm, preloaded_tools=tools, system_prompt_override=CODE_PEER_PROMPT,
             agent_name="code_agent", skill_roots=skill_roots,
@@ -392,11 +573,21 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
             parts.append(
                 f"Analysis results:\n{json.dumps(state['analysis_results'], ensure_ascii=True, default=str)[:1500]}"
             )
+        # See analyze peer: continuity is owned by this peer's checkpointed thread,
+        # so chat_history is not re-fed here (avoids double-replay on re-runs).
         resp = invoke_agent_with_payload_fallback(
-            executor, query="\n\n".join(parts), chat_history=state.get("chat_history"),
+            executor, query="\n\n".join(parts), chat_history=None,
             config=agent_config(child_thread_id(state.get("thread_id"), "code")),
         )
-        result: Dict[str, Any] = {"answer": extract_final_answer(resp) or "", "code_result": resp}
+        # Flat result: the human-readable answer + a compact artifacts extract.
+        # Do NOT nest the whole raw response object (it would crowd out / truncate
+        # the real code+output when synthesis serializes code_result).
+        artifacts = extract_search_artifacts(resp)
+        result: Dict[str, Any] = {
+            "answer": extract_final_answer(resp) or "",
+            "tool_calls": artifacts.get("tool_calls") or [],
+            "tool_results": artifacts.get("tool_results") or [],
+        }
         caps = list(dict.fromkeys(r["capability"] for r in requests))
         if caps:
             result["needs"] = caps  # model-driven request(s)
@@ -430,7 +621,13 @@ def default_synthesize_fn(llm: Optional[Any] = None) -> SynthesizeFn:
         if analysis_results:
             parts.append(f"Analysis results:\n{json.dumps(analysis_results, ensure_ascii=True, default=str)[:2000]}")
         if code_result:
-            parts.append(f"Code result:\n{json.dumps(code_result, ensure_ascii=True, default=str)[:2000]}")
+            # Prefer the code peer's human-readable answer; only fall back to a
+            # serialized dump if no answer text is present (keeps the real code /
+            # output from being truncated away by a large nested object).
+            if isinstance(code_result, dict) and str(code_result.get("answer") or "").strip():
+                parts.append(f"Code result:\n{str(code_result['answer'])[:2000]}")
+            else:
+                parts.append(f"Code result:\n{json.dumps(code_result, ensure_ascii=True, default=str)[:2000]}")
         prompt = "\n\n".join(parts)
         if hasattr(active, "invoke"):
             return _content_to_text(active.invoke(prompt))
@@ -466,7 +663,19 @@ def build_supervisor_graph(
 
     def supervisor_node(state: SupervisorState) -> Dict[str, Any]:
         step = state.get("step", 0)
+        actions = state.get("actions") or []
         needs = list(state.get("needs") or [])
+        # Drop peer requests that can no longer be productive, so a peer that keeps
+        # asking for the same dead capability can't loop us:
+        #  - 'search' once it is exhausted (cap hit / last search returned nothing)
+        #  - ANY capability already run the max number of times
+        def _dead(n):
+            cap = n.get("capability")
+            if cap == "search" and _search_exhausted(state):
+                return True
+            return actions.count(cap) >= _max_peer_runs()
+        needs = [n for n in needs if not _dead(n)]
+
         if step >= state.get("max_steps", DEFAULT_MAX_STEPS):
             nxt, remaining, why = "done", [], "max_steps"
         elif needs:
@@ -480,6 +689,14 @@ def build_supervisor_graph(
             if nxt not in ALLOWED_ACTIONS:
                 nxt = "done"
             remaining, why = needs, "decision"
+            # Backstop: a peer that just ran and already produced its result should
+            # not be re-run back-to-back (it self-iterates internally). Prevents the
+            # decider from looping on the same action until max_steps.
+            if nxt != "done" and _is_unproductive_repeat(nxt, state):
+                nxt, why = "done", f"no-progress repeat ({nxt})"
+            # Don't keep hitting the search agent once the KB has nothing left to give.
+            elif nxt == "search" and _search_exhausted(state):
+                nxt, why = "done", "search exhausted"
         emit_trace_event(
             "node_completed",
             {"stage": "supervisor", "route": nxt, "message": f"supervisor → {nxt} ({why})"},
@@ -503,11 +720,19 @@ def build_supervisor_graph(
             docs, needs = raw, []
         if do_rerank and len(docs) > 1:
             docs = rerank_documents(q, docs, top_k=top_k, llm=llm)  # operator bundled into search
+        before = len(state.get("evidence") or [])
         merged = _merge_dedup(state.get("evidence") or [], docs)
+        added = len(merged) - before
         emit_trace_event(
             "node_completed", {"stage": "search", "message": f"{len(merged)} docs in evidence"}, node="search"
         )
-        update: Dict[str, Any] = {"evidence": merged}
+        # Track productivity so the supervisor stops searching when it adds nothing.
+        prev_streak = state.get("search_empty_streak", 0)
+        update: Dict[str, Any] = {
+            "evidence": merged,
+            "search_attempts": state.get("search_attempts", 0) + 1,
+            "search_empty_streak": 0 if added > 0 else prev_streak + 1,
+        }
         enq = _enqueue_needs(state.get("needs"), needs, "search")
         if enq is not None:
             update["needs"] = enq
@@ -541,13 +766,30 @@ def build_supervisor_graph(
         emit_trace_event("node_started", {"stage": "synthesize", "message": "Composing answer"}, node="synthesize")
         answer = do_synthesize(q, evidence, state.get("analysis_results"), state.get("code_result"), state.get("chat_history"))
         audit = audit_answer_grounding(q, answer, evidence, llm=llm) if (do_audit and (answer or "").strip()) else {}
+        # Act on the verdict: a flagged audit appends a user-visible caveat to the
+        # answer (so an ungrounded answer never ships silently).
+        final = _apply_grounding_caveat(answer, audit)
+        # Surface the verdict as its own event so clients can show grounded/flagged.
+        if audit:
+            emit_trace_event(
+                "grounding_audit",
+                {
+                    "stage": "grounding_audit",
+                    "flagged": _audit_flagged(audit),
+                    "hallucination_detected": bool(audit.get("hallucination_detected")),
+                    "severity": audit.get("severity"),
+                    "issues": audit.get("issues") or [],
+                    "message": audit.get("summary") or "Grounding audit complete",
+                },
+                node="synthesize",
+            )
         emit_trace_event(
             "node_completed",
             {"stage": "synthesize", "message": audit.get("summary") or "Answer composed"},
             node="synthesize",
         )
-        merged = {**state, "answer": answer, "audit": audit}
-        return {"answer": answer, "final_answer": answer, "audit": audit, "distilled": {**_distill(merged), "answer": answer}}
+        merged = {**state, "answer": final, "audit": audit}
+        return {"answer": final, "final_answer": final, "audit": audit, "distilled": {**_distill(merged), "answer": final}}
 
     builder = StateGraph(SupervisorState)
     builder.add_node("supervisor", supervisor_node)

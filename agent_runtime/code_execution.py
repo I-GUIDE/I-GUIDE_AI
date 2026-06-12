@@ -35,6 +35,10 @@ DEFAULT_IMAGE = os.getenv("AGENT_CODE_EXEC_IMAGE", "python:3.11-slim")
 DEFAULT_TIMEOUT = int(os.getenv("AGENT_CODE_EXEC_TIMEOUT", "60"))
 DEFAULT_INSTALL_TIMEOUT = int(os.getenv("AGENT_CODE_EXEC_INSTALL_TIMEOUT", "300"))
 DEFAULT_MEMORY = os.getenv("AGENT_CODE_EXEC_MEMORY", "512m")
+# The deps-install phase needs more headroom than execution: building/installing
+# the scientific stack (numpy/pandas/scipy) under the 512m exec limit was getting
+# OOM-killed (exit 137). Give install its own, larger budget.
+DEFAULT_INSTALL_MEMORY = os.getenv("AGENT_CODE_EXEC_INSTALL_MEMORY", "1g")
 DEFAULT_CPUS = os.getenv("AGENT_CODE_EXEC_CPUS", "1.0")
 DEFAULT_PIDS = os.getenv("AGENT_CODE_EXEC_PIDS", "256")
 MAX_OUTPUT_CHARS = 20_000
@@ -46,6 +50,12 @@ DEPS_DIRNAME = ".deps"
 # rather than the small in-container tmpfs, so installing big wheels (numpy/matplotlib)
 # doesn't run out of space.
 PIPTMP_DIRNAME = ".piptmp"
+# When set, per-run sandbox work dirs are created under this path instead of the
+# system temp dir. This is REQUIRED for Docker-out-of-Docker (agent runs in a
+# container, shelling out to the host daemon): the path must exist at the SAME
+# absolute location on the host (a shared bind mount), so the `docker run -v <work>:/work`
+# the agent issues resolves to a real host directory the daemon can mount.
+WORK_ROOT_ENV = "AGENT_CODE_EXEC_WORK_ROOT"
 
 # A conservative pip requirement spec: name[extras]version-specifiers. No flags,
 # no whitespace, no shell/path characters — deps are passed as argv (never a shell).
@@ -162,6 +172,59 @@ def _persist_source(code: str, *, filename: str = "executed_code.py") -> List[Di
         return []
 
 
+def _stage_inputs(work: Path, input_files: Optional[List[Dict[str, str]]]) -> Tuple[List[str], List[Dict[str, str]]]:
+    """Copy requested input files into *work* so the sandboxed code can read them.
+
+    Each spec is ``{"source": <host_path>, "dest": <relative_name>}``.  ``dest`` must
+    be a plain filename (no path separators / traversal) that stays inside *work* —
+    *work* is the only writable mount, so files placed here appear at ``/work/<dest>``
+    inside the container (the run's working directory).
+
+    Returns ``(staged_dest_names, errors)``.
+    """
+    staged: List[str] = []
+    errors: List[Dict[str, str]] = []
+    work_resolved = work.resolve()
+    for spec in input_files or []:
+        source = str((spec or {}).get("source") or "").strip()
+        dest = str((spec or {}).get("dest") or "").strip()
+        if not source or not dest:
+            continue
+        if "/" in dest or "\\" in dest or dest in {".", ".."}:
+            errors.append({"dest": dest, "error": "invalid destination name"})
+            continue
+        target = (work / dest).resolve()
+        if target.parent != work_resolved:
+            errors.append({"dest": dest, "error": "destination escapes work dir"})
+            continue
+        src = Path(source).expanduser()
+        if not src.is_file():
+            errors.append({"source": source, "error": "source file not found"})
+            continue
+        try:
+            shutil.copyfile(src, target)
+            staged.append(dest)
+        except Exception as exc:  # pragma: no cover - defensive
+            errors.append({"source": source, "dest": dest, "error": f"{type(exc).__name__}: {exc}"})
+    return staged, errors
+
+
+def _work_root() -> Optional[str]:
+    """Directory under which per-run work dirs are created (None = system temp).
+
+    Set via ``AGENT_CODE_EXEC_WORK_ROOT`` for Docker-out-of-Docker so the work dir
+    sits on a host-shared path the host daemon can bind-mount.
+    """
+    root = (os.getenv(WORK_ROOT_ENV) or "").strip()
+    if not root:
+        return None
+    try:
+        os.makedirs(root, exist_ok=True)
+        return root
+    except OSError:
+        return None
+
+
 def _host_user() -> Optional[str]:
     getuid = getattr(os, "getuid", None)
     getgid = getattr(os, "getgid", None)
@@ -181,24 +244,30 @@ class CodeExecutor:
 
     def execute(self, code: str, *, language: str = "python", timeout: Optional[int] = None,
                 env: Optional[Dict[str, str]] = None,
-                dependencies: Optional[List[Any]] = None) -> ExecResult:
+                dependencies: Optional[List[Any]] = None,
+                input_files: Optional[List[Dict[str, str]]] = None) -> ExecResult:
         if (language or "python").lower() != "python":
             return ExecResult(exit_code=None, error=f"unsupported language: {language}",
                               backend=self.backend, code=(code or ""))
         timeout = int(timeout or DEFAULT_TIMEOUT)
         deps, rejected = _sanitize_deps(dependencies)
-        work = Path(tempfile.mkdtemp(prefix="agentexec_"))
+        work = Path(tempfile.mkdtemp(prefix="agentexec_", dir=_work_root()))
         try:
             (work / "script.py").write_text(code or "", encoding="utf-8")
+            # Stage uploaded/input files into the work dir so the code can read them.
+            staged, stage_errors = _stage_inputs(work, input_files)
             try:
                 os.chmod(work, 0o777)  # let a non-root container user write outputs
             except OSError:
                 pass
             exit_code, stdout, stderr, timed_out, error = self._run(work, timeout, deps)
             # Output files the run produced, plus the executed source itself (downloadable).
-            artifacts = [*_persist_source(code or ""), *_persist_artifacts(work, {"script.py"})]
+            # Staged input files are excluded so uploads aren't re-persisted as outputs.
+            artifacts = [*_persist_source(code or ""), *_persist_artifacts(work, {"script.py", *staged})]
             if rejected:
                 stderr = (str(stderr or "") + f"\n[ignored unsafe dependencies: {rejected}]").strip()
+            if stage_errors:
+                stderr = (str(stderr or "") + f"\n[input file staging errors: {stage_errors}]").strip()
             return ExecResult(exit_code, _clip(stdout), _clip(stderr), timed_out, error,
                               artifacts, self.backend, code=(code or ""), installed=deps)
         finally:
@@ -215,11 +284,13 @@ class DockerCodeExecutor(CodeExecutor):
     backend = "docker"
 
     def __init__(self, *, image: str = DEFAULT_IMAGE, memory: str = DEFAULT_MEMORY,
-                 cpus: str = DEFAULT_CPUS, pids: str = DEFAULT_PIDS) -> None:
+                 cpus: str = DEFAULT_CPUS, pids: str = DEFAULT_PIDS,
+                 install_memory: str = DEFAULT_INSTALL_MEMORY) -> None:
         self.image = image
         self.memory = memory
         self.cpus = cpus
         self.pids = pids
+        self.install_memory = install_memory
 
     def build_argv(self, work: Path, name: str) -> List[str]:
         """Execution phase: NO network, read-only rootfs, deps importable via PYTHONPATH."""
@@ -250,7 +321,7 @@ class DockerCodeExecutor(CodeExecutor):
             "docker", "run", "--rm", "--init", "--name", name,
             "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges",
-            "--memory", self.memory,
+            "--memory", self.install_memory,   # larger budget than exec (avoids OOM)
             "--cpus", self.cpus,
             "--pids-limit", self.pids,
             "--workdir", "/work",

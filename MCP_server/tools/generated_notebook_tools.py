@@ -127,6 +127,11 @@ def register_generated_tool_from_manifest(manifest_path, *, register_with_server
 
 
 def _load_all_generated_tools() -> List[str]:
+    """DEPRECATED. Per-manifest tool registration is superseded by the single
+    generic executor in ``tools/generic_executor_tools.py`` (run_notebook_workflow /
+    run_code_element), which keeps the agent tool list O(1) regardless of how many
+    workflows are ingested. Retained as a shim for backward compatibility / tests.
+    """
     loaded: List[str] = []
     for manifest_path in list_manifest_paths():
         try:
@@ -136,4 +141,7 @@ def _load_all_generated_tools() -> List[str]:
     return loaded
 
 
-LOADED_GENERATED_TOOL_NAMES = _load_all_generated_tools()
+# Auto-registration at import is DISABLED. `_run_generated_manifest` is imported by
+# `generic_executor_tools` as the shared executor body; manifests are resolved by id
+# at call time rather than registered as N separate tools.
+LOADED_GENERATED_TOOL_NAMES: List[str] = []

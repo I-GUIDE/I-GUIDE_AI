@@ -11,7 +11,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from collections import Counter
+from collections import Counter, OrderedDict
 from uuid import uuid4
 
 from dotenv import load_dotenv
@@ -62,7 +62,7 @@ CODE_AGENT_PROMPT = (
     "4. Include a short `Dependencies:` section listing required packages or system dependencies.\n"
     "5. If a relevant skill is available, call `load_skill` before applying that task-specific workflow.\n"
     "6. Call `load_skill` at most once for the same skill in a user request. After it returns `status: ok` or `status: already_loaded`, do not call `load_skill` for that skill again.\n"
-    "7. If an `execute_code` tool is available, RUN and DEBUG your code with it (execute, read stdout/stderr, fix errors, re-run) before finalizing.\n"
+    "7. If an `execute_code` tool is available, RUN and DEBUG your code with it (execute, read stdout/stderr, fix errors, re-run) before finalizing. To read an uploaded file inside `execute_code`, pass its file_id(s) in the `input_files` argument; the file is then available in the working directory under both its file_id and its original filename.\n"
     "8. If evidence is insufficient, say what is missing."
 )
 
@@ -94,7 +94,72 @@ ORCHESTRATOR_AGENT_PROMPT = (
     "11. Produce a final answer for the user after using the minimum sufficient set of tools."
 )
 
-DEFAULT_CHECKPOINTER = InMemorySaver()
+class BoundedInMemorySaver(InMemorySaver):
+    """``InMemorySaver`` with LRU eviction of whole threads.
+
+    The stock saver keeps every thread's checkpoints for the process lifetime — a
+    slow but unbounded memory leak in a long-lived server (each conversation, plus
+    its ``<thread>::orchestrator``/``::code``… child threads, lives forever).
+
+    This caps the number of distinct thread ids; the least-recently-written thread
+    is evicted past the cap (``AGENT_CHECKPOINT_MAX_THREADS``, default 500).
+    Eviction is best-effort and never breaks ``put`` — if LangGraph internals differ
+    in a future version, tracking simply no-ops rather than raising.
+
+    NOTE (multi-worker contract): this is **process-local**, like ``session_memory``.
+    Across multiple workers, multi-turn continuity requires sticky sessions (route a
+    conversation's ``thread_id`` to the same worker) or persistent memory
+    (``use_persistent_memory`` / OpenSearch). See ``session_memory`` for the
+    session-history analogue.
+    """
+
+    def __init__(self, *args: Any, max_threads: Optional[int] = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        if max_threads is None:
+            try:
+                max_threads = max(1, int(os.getenv("AGENT_CHECKPOINT_MAX_THREADS", "500")))
+            except (TypeError, ValueError):
+                max_threads = 500
+        self._max_threads = max_threads
+        self._thread_lru: "OrderedDict[str, bool]" = OrderedDict()
+
+    def put(self, *args: Any, **kwargs: Any) -> Any:
+        result = super().put(*args, **kwargs)
+        config = args[0] if args else kwargs.get("config")
+        try:
+            thread_id = ((config or {}).get("configurable") or {}).get("thread_id")
+        except Exception:
+            thread_id = None
+        if thread_id:
+            self._touch_thread(str(thread_id))
+        return result
+
+    def _touch_thread(self, thread_id: str) -> None:
+        lru = self._thread_lru
+        lru[thread_id] = True
+        lru.move_to_end(thread_id)
+        while len(lru) > self._max_threads:
+            old_thread, _ = lru.popitem(last=False)
+            self._evict_thread(old_thread)
+
+    def _evict_thread(self, thread_id: str) -> None:
+        # Best-effort removal across the known InMemorySaver internals; never raise.
+        try:
+            storage = getattr(self, "storage", None)
+            if isinstance(storage, dict):
+                storage.pop(thread_id, None)
+        except Exception:
+            pass
+        try:
+            writes = getattr(self, "writes", None)
+            if isinstance(writes, dict):
+                for key in [k for k in list(writes.keys()) if isinstance(k, tuple) and k and k[0] == thread_id]:
+                    writes.pop(key, None)
+        except Exception:
+            pass
+
+
+DEFAULT_CHECKPOINTER = BoundedInMemorySaver()
 
 
 class AgentInvocationError(RuntimeError):
@@ -450,6 +515,7 @@ def build_agent_executor(
     tool_strategy: str = "granular",
     include_mcp_tools: bool = False,
     mcp_modules: Optional[List[str]] = None,
+    enabled_search_methods: Optional[List[str]] = None,
     allowed_tool_names: Optional[List[str]] = None,
     preloaded_tools: Optional[List[Any]] = None,
     system_prompt_override: Optional[str] = None,
@@ -466,6 +532,7 @@ def build_agent_executor(
             tool_strategy=tool_strategy,
             include_mcp_tools=include_mcp_tools,
             mcp_modules=mcp_modules,
+            enabled_search_methods=enabled_search_methods,
             session_id=session_id,
             skill_roots=skill_roots,
         )
@@ -518,6 +585,7 @@ def build_search_agent_executor(
     tool_strategy: str = "granular",
     include_mcp_tools: bool = False,
     mcp_modules: Optional[List[str]] = None,
+    enabled_search_methods: Optional[List[str]] = None,
     allowed_tool_names: Optional[List[str]] = None,
     preloaded_tools: Optional[List[Any]] = None,
     checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
@@ -531,6 +599,7 @@ def build_search_agent_executor(
         tool_strategy=tool_strategy,
         include_mcp_tools=include_mcp_tools,
         mcp_modules=mcp_modules,
+        enabled_search_methods=enabled_search_methods,
         allowed_tool_names=allowed_tool_names,
         preloaded_tools=preloaded_tools,
         system_prompt_override=SEARCH_AGENT_PROMPT,

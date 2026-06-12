@@ -102,6 +102,16 @@ def test_docker_install_argv():
     assert argv[-2:] == ["numpy", "pandas==2.2"]
 
 
+def test_install_phase_gets_larger_memory_than_exec():
+    """P1-5: deps-install gets its own (larger) memory budget to avoid OOM (exit 137)."""
+    ex = DockerCodeExecutor(image="img:test", memory="256m", install_memory="2g")
+    install = " ".join(ex.build_install_argv(Path("/tmp/work"), ["numpy"], "n"))
+    execute = " ".join(ex.build_argv(Path("/tmp/work"), "n"))
+    assert "--memory 2g" in install     # install uses the larger budget
+    assert "--memory 256m" in execute   # exec keeps the tighter limit
+    assert "--memory 2g" not in execute
+
+
 def test_sanitize_deps_accepts_valid_and_rejects_unsafe(monkeypatch):
     monkeypatch.delenv("AGENT_CODE_EXEC_PIP_ALLOW", raising=False)
     from agent_runtime.code_execution import _sanitize_deps
@@ -156,8 +166,9 @@ def test_execute_code_tool_with_stub_executor():
     captured = {}
 
     class _Stub:
-        def execute(self, code, language="python", timeout=None, dependencies=None):
+        def execute(self, code, language="python", timeout=None, dependencies=None, input_files=None):
             captured["dependencies"] = dependencies
+            captured["input_files"] = input_files
             return ExecResult(exit_code=0, stdout="captured-out", stderr="", backend="stub")
 
     tools = make_code_execution_tools(executor=_Stub())
@@ -167,6 +178,167 @@ def test_execute_code_tool_with_stub_executor():
     assert out["stdout"] == "captured-out"
     assert out["exit_code"] == 0
     assert captured["dependencies"] == ["numpy"]  # dependencies threaded to the executor
+    assert captured["input_files"] == []  # no uploads requested -> empty staging list
+
+
+# --- uploaded-file staging into the sandbox --------------------------------
+
+def test_stage_inputs_copies_and_rejects_traversal(tmp_path):
+    from agent_runtime.code_execution import _stage_inputs
+
+    src = tmp_path / "src.txt"
+    src.write_text("payload")
+    work = tmp_path / "work"
+    work.mkdir()
+
+    staged, errors = _stage_inputs(work, [
+        {"source": str(src), "dest": "ok.txt"},
+        {"source": str(src), "dest": "../escape.txt"},          # traversal
+        {"source": str(src), "dest": "sub/nested.txt"},         # separator
+        {"source": str(tmp_path / "missing"), "dest": "m.txt"},  # missing source
+    ])
+    assert staged == ["ok.txt"]
+    assert (work / "ok.txt").read_text() == "payload"
+    assert not (work / "escape.txt").exists()
+    reasons = {e.get("error") for e in errors}
+    assert "invalid destination name" in reasons
+    assert "source file not found" in reasons
+
+
+def test_execute_code_tool_resolves_and_stages_file_specs(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_FILE_STORAGE_ROOT", str(tmp_path))
+    from agent_runtime.file_store import create_output_file
+    from agent_runtime.langchain_exec_tools import make_code_execution_tools
+
+    rec = create_output_file("data.csv", "a,b\n1,2\n")
+    fid = rec["file_id"]
+
+    captured = {}
+
+    class _Stub:
+        def execute(self, code, language="python", timeout=None, dependencies=None, input_files=None):
+            captured["input_files"] = input_files
+            return ExecResult(exit_code=0, stdout="", stderr="", backend="stub")
+
+    tools = make_code_execution_tools(executor=_Stub())
+    out = json.loads(tools[0].invoke({"code": "print(1)", "input_files": [fid]}))
+
+    # staged under BOTH the file_id and the original filename
+    dests = {s["dest"] for s in captured["input_files"]}
+    assert fid in dests and "data.csv" in dests
+    assert all(s["source"].endswith("data.csv") for s in captured["input_files"])
+    info = out["input_files"][0]
+    assert info["file_id"] == fid and "data.csv" in info["available_as"] and fid in info["available_as"]
+
+
+def test_execute_code_reads_uploaded_file_end_to_end(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_FILE_STORAGE_ROOT", str(tmp_path))
+    from agent_runtime.file_store import create_output_file
+    from agent_runtime.langchain_exec_tools import make_code_execution_tools
+
+    rec = create_output_file("data.csv", "a,b\n1,2\n3,4\n")
+    fid = rec["file_id"]
+    tools = make_code_execution_tools(executor=LocalSubprocessExecutor())
+
+    # read by original filename
+    out = json.loads(tools[0].invoke(
+        {"code": "print(open('data.csv').read())", "input_files": [fid]}))
+    assert out["ok"] is True and "a,b" in out["stdout"]
+
+    # read by file_id (the name the model used in the failing trace)
+    out2 = json.loads(tools[0].invoke(
+        {"code": f"print(open('{fid}').read())", "input_files": [fid]}))
+    assert out2["ok"] is True and "a,b" in out2["stdout"]
+
+
+def test_staged_input_not_re_persisted_but_new_outputs_are(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_FILE_STORAGE_ROOT", str(tmp_path))
+    from agent_runtime.file_store import create_output_file
+    from agent_runtime.langchain_exec_tools import make_code_execution_tools
+
+    rec = create_output_file("in.csv", "a\n1\n")
+    fid = rec["file_id"]
+    tools = make_code_execution_tools(executor=LocalSubprocessExecutor())
+
+    out = json.loads(tools[0].invoke(
+        {"code": "open('out.txt','w').write(open('in.csv').read())", "input_files": [fid]}))
+    arts = [a["filename"] for a in out["artifacts"]]
+    assert "out.txt" in arts          # genuine output is persisted
+    assert "executed_code.py" in arts  # source is persisted
+    assert "in.csv" not in arts        # staged input is NOT re-persisted as an output
+
+
+def test_execute_code_unknown_input_file_reports_error(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_FILE_STORAGE_ROOT", str(tmp_path))
+    from agent_runtime.langchain_exec_tools import make_code_execution_tools
+
+    tools = make_code_execution_tools(executor=LocalSubprocessExecutor())
+    out = json.loads(tools[0].invoke(
+        {"code": "print('ok')", "input_files": ["file_does_not_exist"]}))
+    assert out["input_file_errors"][0]["ref"] == "file_does_not_exist"
+    assert out["ok"] is True  # the run itself still succeeds
+
+
+# --- auto-staging conversation files (default_input_file_ids) --------------
+
+def test_default_input_file_ids_are_auto_staged(monkeypatch, tmp_path):
+    """Conversation-attached files are staged without the model naming them."""
+    monkeypatch.setenv("AGENT_FILE_STORAGE_ROOT", str(tmp_path))
+    from agent_runtime.file_store import create_output_file
+    from agent_runtime.langchain_exec_tools import make_code_execution_tools
+
+    rec = create_output_file("conv.csv", "a\n1\n")
+    fid = rec["file_id"]
+    tools = make_code_execution_tools(
+        executor=LocalSubprocessExecutor(), default_input_file_ids=[fid])
+
+    # model did NOT pass input_files — file is available anyway
+    out = json.loads(tools[0].invoke({"code": "print(open('conv.csv').read())"}))
+    assert out["ok"] is True and "a" in out["stdout"]
+    assert out["input_files"][0]["file_id"] == fid
+
+
+def test_default_and_explicit_union_deduped(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_FILE_STORAGE_ROOT", str(tmp_path))
+    from agent_runtime.file_store import create_output_file
+    from agent_runtime.langchain_exec_tools import make_code_execution_tools
+
+    a = create_output_file("a.csv", "x\n")["file_id"]
+    b = create_output_file("b.csv", "y\n")["file_id"]
+
+    captured = {}
+
+    class _Stub:
+        def execute(self, code, language="python", timeout=None, dependencies=None, input_files=None):
+            captured["input_files"] = input_files
+            return ExecResult(exit_code=0, stdout="", stderr="", backend="stub")
+
+    tools = make_code_execution_tools(executor=_Stub(), default_input_file_ids=[a])
+    out = json.loads(tools[0].invoke({"code": "print(1)", "input_files": [a, b]}))  # 'a' in both
+    # each unique file staged once (deduped by source), under id + filename
+    info_ids = [i["file_id"] for i in out["input_files"]]
+    assert info_ids == [a, b]  # 'a' not duplicated
+    dests = {s["dest"] for s in captured["input_files"]}
+    assert {a, "a.csv", b, "b.csv"} <= dests
+
+
+def test_input_file_count_cap_skips_extras(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_FILE_STORAGE_ROOT", str(tmp_path))
+    monkeypatch.setenv("AGENT_CODE_EXEC_MAX_INPUT_FILES", "1")
+    from agent_runtime.file_store import create_output_file
+    from agent_runtime.langchain_exec_tools import make_code_execution_tools
+
+    a = create_output_file("a.csv", "x\n")["file_id"]
+    b = create_output_file("b.csv", "y\n")["file_id"]
+
+    class _Stub:
+        def execute(self, code, language="python", timeout=None, dependencies=None, input_files=None):
+            return ExecResult(exit_code=0, stdout="", stderr="", backend="stub")
+
+    tools = make_code_execution_tools(executor=_Stub(), default_input_file_ids=[a, b])
+    out = json.loads(tools[0].invoke({"code": "print(1)"}))
+    assert len(out["input_files"]) == 1
+    assert out["input_files_skipped"][0]["reason"] == "max input files exceeded"
 
 
 # --- per-request code_exec flag wires the tool into the code peer ----------

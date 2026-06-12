@@ -18,7 +18,6 @@ langchain-openai>=1.0
 langgraph>=1.0
 langchain-mcp-adapters
 mcp[cli]>=1.2
-smolagents
 
 # Search backends
 opensearch-py

@@ -144,6 +144,9 @@ def _augment_user_input_with_file_ids(user_input: str, file_ids: Sequence[str]) 
         f"{user_input}\n\n"
         "Uploaded files are available to the agent via local file tools. "
         "Use the exact uploaded file ids, not the display filenames, when inspecting files. "
+        "To read an uploaded file inside `execute_code`, pass its file_id(s) in the "
+        "`input_files` argument; the file is then available in the working directory under "
+        "both its file_id and its original filename. "
         "Use `write_output_file` for downloadable outputs:\n"
         f"{attachment_lines}"
     )
@@ -243,6 +246,7 @@ def run_agent_chat(
         skill_roots=normalized_skill_roots,
         use_supervisor=use_supervisor,
         code_exec=code_exec,
+        input_file_ids=normalized_file_ids,
     )
 
     answer = _extract_agent_answer(result)
@@ -395,6 +399,7 @@ def stream_agent_chat_events(
         agent_dev=agent_dev,
         use_supervisor=use_supervisor,
         code_exec=code_exec,
+        input_file_ids=normalized_file_ids,
     ):
         if event.get("event") == "completed" and isinstance(event.get("data"), Mapping):
             completed_response = dict(event["data"])

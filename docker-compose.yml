@@ -79,19 +79,28 @@ services:
       - AGENT_SUPERVISOR=${AGENT_SUPERVISOR:-1}
       - AGENT_DEV=${AGENT_DEV:-0}
       - AGENT_RECURSION_LIMIT=${AGENT_RECURSION_LIMIT:-60}
-      # Sandboxed code execution — OFF by default (needs host Docker access to enable; see note)
-      - AGENT_CODE_EXEC=${AGENT_CODE_EXEC:-0}
+      # Sandboxed code execution (Docker-out-of-Docker). The agent shells out to the
+      # HOST docker daemon (socket mounted below) to launch a hardened container per run.
+      - AGENT_CODE_EXEC=${AGENT_CODE_EXEC:-1}
       - AGENT_CODE_EXEC_BACKEND=${AGENT_CODE_EXEC_BACKEND:-docker}
       - AGENT_CODE_EXEC_IMAGE=${AGENT_CODE_EXEC_IMAGE:-python:3.11-slim}
+      # Per-run work dirs live here; the SAME absolute path is bind-mounted from the
+      # host (below) so the host daemon can mount each run's dir into the sandbox.
+      - AGENT_CODE_EXEC_WORK_ROOT=${AGENT_CODE_EXEC_WORK_ROOT:-/tmp/iguide_codeexec}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     env_file:
       - .env
+    # Root is required to access the mounted Docker socket. Mounting the socket grants
+    # this container root-equivalent control of the host daemon — acceptable for local
+    # dev; do NOT use this socket mount on a shared/production host.
+    user: root
     volumes:
       - agent_chat_files:/app/agent_chat_files
-      # To use sandboxed code execution (AGENT_CODE_EXEC=1): the agent shells out to
-      # `docker run`, so add the docker CLI to rag_pipeline/Dockerfile and uncomment the
-      # mount below (the non-root appuser needs socket access, or run this service as root).
-      # - /var/run/docker.sock:/var/run/docker.sock
+      # Docker-out-of-Docker for code execution:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Share the per-run work dir at an IDENTICAL path on host and container so
+      # `docker run -v <work>:/work` (issued from inside this container) resolves on the host.
+      - /tmp/iguide_codeexec:/tmp/iguide_codeexec
     restart: unless-stopped
     depends_on:
       embedding-server:

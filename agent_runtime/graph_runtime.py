@@ -27,7 +27,6 @@ from agent_runtime.graph_nodes import (
     make_search_agent_evidence_tool,
 )
 from agent_runtime.runtime_utils import (
-    build_llm_interaction_trace,
     build_orchestration_trace,
     extract_final_answer,
     extract_search_artifacts,
@@ -62,6 +61,7 @@ def run_agent_query(
     skill_roots: Optional[List[str]] = None,
     use_supervisor: Optional[bool] = None,
     code_exec: Optional[bool] = None,
+    input_file_ids: Optional[List[str]] = None,
 ) -> dict:
     """Run one query through the hybrid orchestrator graph."""
     effective_thread_id = resolve_thread_id(thread_id, checkpointer)
@@ -80,6 +80,7 @@ def run_agent_query(
         skill_roots=skill_roots,
         use_supervisor=use_supervisor,
         code_exec=code_exec,
+        input_file_ids=input_file_ids,
     )
     final_state = graph.invoke(
         {
@@ -104,6 +105,9 @@ def run_agent_query(
     final_answer = final_state.get("final_answer") or extract_final_answer(orchestration_result)
     if final_answer:
         response["final_answer"] = final_answer
+    audit = final_state.get("audit")
+    if audit:
+        response["grounding_audit"] = audit
     if effective_thread_id:
         response["thread_id"] = effective_thread_id
     return response
@@ -132,6 +136,7 @@ def stream_agent_query_events(
     agent_dev: Optional[bool] = None,
     use_supervisor: Optional[bool] = None,
     code_exec: Optional[bool] = None,
+    input_file_ids: Optional[List[str]] = None,
 ) -> Generator[Dict[str, Any], None, None]:
     """Yield structured SSE events while running a query.
 
@@ -149,7 +154,12 @@ def stream_agent_query_events(
             "tool_strategy": tool_strategy,
         },
     }
-    available_agent_names = list(ORCHESTRATOR_AGENT_NAMES)
+    # Advertise the agents that will ACTUALLY run: the supervisor path executes
+    # search/analyze/code peers, not the legacy agents-as-tools names.
+    from agent_runtime.supervisor_graph import is_supervisor_enabled
+
+    supervisor_on = use_supervisor if use_supervisor is not None else is_supervisor_enabled()
+    available_agent_names = ["search", "analyze", "code"] if supervisor_on else list(ORCHESTRATOR_AGENT_NAMES)
     skill_registry = SkillRegistry.discover(skill_roots)
     yield {
         "event": "status",
@@ -187,6 +197,7 @@ def stream_agent_query_events(
                     skill_roots=skill_roots,
                     use_supervisor=use_supervisor,
                     code_exec=code_exec,
+                    input_file_ids=input_file_ids,
                 )
                 final_state = graph.invoke(
                     {
@@ -204,9 +215,12 @@ def stream_agent_query_events(
                     available_agent_names=available_agent_names_local,
                     orchestration_result=orchestration_result if isinstance(orchestration_result, dict) else {},
                 )
-                # Detail-tier replay events (routing decision, LLM interactions,
-                # tool I/O) are only streamed when dev mode is enabled. Status,
-                # search_complete, final_answer and completed are always emitted.
+                # Detail-tier post-run summary: emit ONLY the route trace + routing
+                # decision (which the live callbacks don't produce). The per-step
+                # llm_interaction / tool_call / tool_result events were already
+                # streamed live during the run by the callback handler — replaying
+                # them here duplicated every step (and is dead on the supervisor
+                # path, whose result carries no message-shaped artifacts).
                 if dev_enabled:
                     _enqueue({"event": "route_trace", "data": route_trace})
                     _enqueue(
@@ -225,18 +239,6 @@ def stream_agent_query_events(
                             },
                         }
                     )
-                    for interaction in build_llm_interaction_trace(
-                        orchestration_result if isinstance(orchestration_result, dict) else {},
-                        agent_name="orchestrator_agent",
-                    ):
-                        interaction.setdefault("replay", True)
-                        _enqueue({"event": "llm_interaction", "data": interaction})
-                    for tool_call in artifacts.get("tool_calls") or []:
-                        tool_call.setdefault("replay", True)
-                        _enqueue({"event": "tool_call", "data": tool_call})
-                    for tool_result in artifacts.get("tool_results") or []:
-                        tool_result.setdefault("replay", True)
-                        _enqueue({"event": "tool_result", "data": tool_result})
                 if "search_agent_evidence" in route_trace.get("called_tools", []):
                     _enqueue(
                         {
@@ -259,6 +261,9 @@ def stream_agent_query_events(
                 }
                 if final_answer:
                     response["final_answer"] = final_answer
+                audit = final_state.get("audit")
+                if audit:
+                    response["grounding_audit"] = audit
                 if effective_thread_id:
                     response["thread_id"] = effective_thread_id
                 _enqueue({"event": "completed", "data": response})
@@ -329,6 +334,7 @@ def run_code_agent_query(
     thread_id: Optional[str] = None,
     checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
     skill_roots: Optional[List[str]] = None,
+    input_file_ids: Optional[List[str]] = None,
 ) -> dict:
     """Run one query through CodeAgent, with SearchAgent available as a tool."""
     effective_thread_id = resolve_thread_id(thread_id, checkpointer)
@@ -356,7 +362,7 @@ def run_code_agent_query(
     if is_code_exec_enabled():
         from agent_runtime.langchain_exec_tools import make_code_execution_tools
 
-        code_tools.extend(make_code_execution_tools())
+        code_tools.extend(make_code_execution_tools(default_input_file_ids=input_file_ids))
     code_executor = build_code_agent_executor(
         llm=llm,
         verbose=verbose,

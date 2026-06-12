@@ -13,6 +13,8 @@ from rag_pipeline.search.agents import (
 )
 from rag_pipeline.search.semantic import semantic_search as run_semantic_search
 from rag_pipeline.search.spatial import get_spatial_search_results
+from rag_pipeline.search.agent_kb import agent_kb_search as run_agent_kb_search
+from rag_pipeline.search.agent_kb import get_kb_block as run_get_kb_block
 from rag_pipeline.qgis_headless_tools import (
     pyqgis_layer_summary_tool,
     pyqgis_render_map_tool,
@@ -93,6 +95,17 @@ def neo4j_explore_related_nodes_tool(element_id: str, depth: int = 2, limit: int
 def spatial_search_tool(query: str, limit: int = 8) -> str:
     hits = get_spatial_search_results(query, size=_safe_int(limit))
     return _build_payload(hits, source="spatial")
+
+
+def agent_kb_search_tool(query: str, limit: int = 8) -> str:
+    """Search the agent knowledge base (extracted blocks/method-specs from ingested submissions)."""
+    payload = run_agent_kb_search(query, size=_safe_int(limit))
+    return json.dumps(payload, ensure_ascii=True, default=str)
+
+
+def get_kb_block_tool(doc_id: str) -> str:
+    """Fetch the FULL agent-KB block by doc_id (complete code/method body for verbatim reuse)."""
+    return json.dumps(run_get_kb_block(doc_id), ensure_ascii=True, default=str)
 
 
 def opengeodata_search_tool(query: str, limit: int = 8, session_context_json: Optional[str] = None) -> str:
@@ -301,6 +314,28 @@ def make_langchain_granular_tools(
                 "Returns JSON with doc_ids and snippets."
             ),
             metadata={"category": "retrieval_external"},
+        ),
+        StructuredTool.from_function(
+            func=agent_kb_search_tool,
+            name="agent_kb_search",
+            description=(
+                "Search the agent knowledge base: fine-grained, runnable-aware evidence extracted from "
+                "ingested submissions (notebook code blocks, code-asset API surfaces, dataset metadata, "
+                "publication method-specs). Each hit is linked to its original knowledge element "
+                "(citation_ids = the source element ids) and may carry a runnable workflow tool. "
+                "Use for implementation-level grounding and to find runnable workflows."
+            ),
+            metadata={"category": "retrieval_internal"},
+        ),
+        StructuredTool.from_function(
+            func=get_kb_block_tool,
+            name="get_kb_block",
+            description=(
+                "Fetch the FULL agent-KB block by its doc_id (returned by agent_kb_search). "
+                "Use to read a block's complete code / method body for verbatim reuse, since "
+                "search results are truncated."
+            ),
+            metadata={"category": "retrieval_internal"},
         ),
     ]
     if enabled_search_methods is not None:

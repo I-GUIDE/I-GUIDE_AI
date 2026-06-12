@@ -219,6 +219,64 @@ def _selected_skill_names(artifacts: Dict[str, Any]) -> List[str]:
     return selected
 
 
+# Maps supervisor peer names to the legacy tool names the trace/SSE consumers expect
+# (e.g. the streaming layer keys ``search_complete`` off ``search_agent_evidence``).
+_PEER_TO_TOOL = {
+    "search": "search_agent_evidence",
+    "analyze": "analysis_agent_answer",
+    "code": "code_agent_answer",
+}
+
+
+def _is_supervisor_state(result: Any) -> bool:
+    """Whether *result* is a supervisor ``sup_state`` (vs an agents-as-tools result).
+
+    The supervisor returns a dict carrying ``actions``/``next_action`` and no
+    top-level ``messages``; the legacy path returns ``{"messages": [...]}``.
+    """
+    return isinstance(result, dict) and "messages" not in result and (
+        "actions" in result or "next_action" in result
+    )
+
+
+def build_supervisor_trace(
+    *,
+    query: str,
+    chat_history: Optional[List[Any]],
+    available_agent_names: Sequence[str],
+    sup_state: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Derive a route trace from the supervisor's ``actions`` (not message shape).
+
+    The supervisor records the peers it dispatched in ``sup_state['actions']``;
+    this maps them to the legacy tool vocabulary so existing trace/SSE consumers
+    keep working on the default supervisor path.
+    """
+    actions = [a for a in (sup_state.get("actions") or []) if a in _PEER_TO_TOOL]
+    distinct: List[str] = []
+    for a in actions:
+        if a not in distinct:
+            distinct.append(a)
+    called_tools = [_PEER_TO_TOOL[a] for a in actions]
+    route = ("supervisor:" + "→".join(distinct)) if distinct else "orchestrator_only"
+    audit = sup_state.get("audit") or {}
+    return {
+        "query": query,
+        "route": route,
+        "available_agents": list(available_agent_names),
+        "called_tools": called_tools,
+        "analysis_called_tools": [],
+        "selected_skills": [],
+        "chat_history_available": bool(chat_history),
+        # Supervisor-specific signal (the richer view that used to be discarded):
+        "supervisor_actions": list(sup_state.get("actions") or []),
+        "document_count": len(sup_state.get("evidence") or []),
+        "has_analysis": sup_state.get("analysis_results") is not None,
+        "has_code": sup_state.get("code_result") is not None,
+        "audit_severity": audit.get("severity"),
+    }
+
+
 def build_orchestration_trace(
     *,
     query: str,
@@ -227,6 +285,15 @@ def build_orchestration_trace(
     orchestration_result: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Analyse *orchestration_result* to determine the actual route taken."""
+    # Default supervisor path: derive the route from sup_state['actions'] rather
+    # than the agents-as-tools message shape (which a sup_state does not have).
+    if _is_supervisor_state(orchestration_result):
+        return build_supervisor_trace(
+            query=query,
+            chat_history=chat_history,
+            available_agent_names=available_agent_names,
+            sup_state=orchestration_result,
+        )
     artifacts = extract_search_artifacts(orchestration_result)
     tool_calls = artifacts.get("tool_calls") or []
     called_tools = [str(item.get("name") or "") for item in tool_calls]
