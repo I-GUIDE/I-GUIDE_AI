@@ -160,3 +160,41 @@ def test_geo_tools_wired_into_peers_only_with_files(monkeypatch):
     captured.clear()
     sg.default_code_fn(input_file_ids=["file_x"])("q", [], {"thread_id": None})
     assert "inspect_vector" in captured["tools"]
+
+
+# --- auto-discovery of extracted shapefile siblings ------------------------
+
+def _tools_with(attached):
+    from agent_runtime.langchain_geo_tools import make_langchain_geo_tools
+    return {t.name: t for t in make_langchain_geo_tools(default_input_file_ids=attached)}
+
+
+def test_inspect_auto_discovers_siblings_from_attached(shapefile):
+    """No sibling_file_ids passed: the .shx/.dbf are found among the attached files,
+    so the model only has to reference the .shp's file_id."""
+    tools = _tools_with([shapefile["shp_id"], *shapefile["siblings"]])
+    r = json.loads(tools["inspect_vector"].invoke({"file_id": shapefile["shp_id"]}))
+    assert r["ok"] is True and r["feature_count"] == 3
+    assert "val" in {c["name"] for c in r["columns"]}  # .dbf attributes resolved
+
+
+def test_reference_any_component_resolves_shapefile(shapefile):
+    """Pointing at a SIDECAR (not the .shp) still reconstructs the set by basename."""
+    attached = [shapefile["shp_id"], *shapefile["siblings"]]
+    tools = _tools_with(attached)
+    r = json.loads(tools["inspect_vector"].invoke({"file_id": shapefile["siblings"][0]}))
+    assert r["ok"] is True and r["feature_count"] == 3
+
+
+def test_plot_auto_discovers_siblings(shapefile):
+    from agent_runtime.file_store import resolve_file_id
+    tools = _tools_with([shapefile["shp_id"], *shapefile["siblings"]])
+    p = json.loads(tools["plot_vector"].invoke({"file_id": shapefile["shp_id"], "column": "val"}))
+    assert p["ok"] is True and resolve_file_id(p["file_id"]).stat().st_size > 0
+
+
+def test_lone_shp_without_sidecars_fails_clearly(shapefile):
+    """A .shp with no sidecars (none attached, none passed) fails soft with a useful hint."""
+    tools = _tools_with([shapefile["shp_id"]])  # only the .shp is "attached"
+    r = json.loads(tools["inspect_vector"].invoke({"file_id": shapefile["shp_id"]}))
+    assert r["ok"] is False and r.get("hint")

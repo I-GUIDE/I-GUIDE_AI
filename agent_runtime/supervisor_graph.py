@@ -90,8 +90,8 @@ ANALYSIS_WORKFLOW_PROMPT = (
     "tools: inspect_vector to read CRS/extent/columns/feature-count, plot_vector to "
     "visualize a map, reproject_vector / vector_spatial_join / vector_to_geojson to "
     "analyze and export. A TIGER .zip is read directly by file_id; an EXTRACTED shapefile "
-    "is several files — pass the .shp's file_id and the .shx/.dbf/.prj as sibling_file_ids "
-    "(or ask the user to upload the .zip)."
+    "is several files (.shp/.shx/.dbf/.prj) — just pass the .shp's file_id (or any one "
+    "component); the tool auto-finds the rest among the attached files."
 )
 
 CODE_PEER_PROMPT = (
@@ -113,9 +113,10 @@ CODE_PEER_PROMPT = (
     "For an UPLOADED vector dataset / shapefile (e.g. Census TIGER), call inspect_vector "
     "first to learn its CRS, columns, and geometry type before writing code, and use "
     "plot_vector / vector_to_geojson when a map or export is enough. For an EXTRACTED "
-    "shapefile pass the .shp file_id plus the .shx/.dbf/.prj as sibling_file_ids (or upload "
-    "the .zip). If you read it in execute_code instead, geopandas needs the whole shapefile "
-    "set — prefer a .zip via input_files, and include geopandas in `dependencies`.\n"
+    "shapefile (.shp/.shx/.dbf/.prj uploaded separately) just pass the .shp's file_id (or "
+    "any one component) — the tool auto-finds the rest among the attached files. If you read "
+    "it in execute_code instead, geopandas needs the whole shapefile set — prefer a .zip via "
+    "input_files, and include geopandas in `dependencies`.\n"
     "When the evidence references ingested knowledge-base blocks (by doc_id), call "
     "get_kb_block(doc_id) to read the FULL source of a referenced function/notebook and "
     "REUSE it verbatim — including real data-loading URLs/APIs — instead of stubbing "
@@ -510,7 +511,7 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
             # zip or extracted). Guarded so a missing geopandas never breaks the agent.
             try:
                 from agent_runtime.langchain_geo_tools import make_langchain_geo_tools
-                tools.extend(make_langchain_geo_tools())
+                tools.extend(make_langchain_geo_tools(default_input_file_ids=input_file_ids))
             except Exception:
                 pass
         from agent_runtime.code_execution import is_code_exec_enabled
@@ -581,7 +582,7 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         if input_file_ids:
             try:
                 from agent_runtime.langchain_geo_tools import make_langchain_geo_tools
-                tools.extend(make_langchain_geo_tools())
+                tools.extend(make_langchain_geo_tools(default_input_file_ids=input_file_ids))
             except Exception:
                 pass
         from agent_runtime.code_execution import is_code_exec_enabled

@@ -8,8 +8,10 @@ The hard part is the extracted case: the file store saves each upload as
 ``uploads/<file_id>__<filename>``, so the sidecars are NOT co-located with the
 ``.shp`` under a shared basename — GDAL/pyogrio can't find them. ``_stage_vector_source``
 reconstructs a readable shapefile by copying the ``.shp`` and its sibling uploads into
-one temp dir under a common basename. A ``.zip`` is read directly via GDAL's
-``/vsizip/`` virtual filesystem (no extraction needed).
+one temp dir under a common basename. The siblings are auto-discovered among the
+conversation's attached files by matching the basename stem, so the model only has to
+reference any ONE component (the ``.shp`` or a sidecar). A ``.zip`` is read directly via
+GDAL's ``/vsizip/`` virtual filesystem (no extraction needed).
 
 Backend: geopandas + pyogrio (already in the agent runtime image alongside system GDAL).
 Heavy imports are deferred into the tool bodies so importing this module never fails the
@@ -27,6 +29,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 _SELF_CONTAINED = {".geojson", ".json", ".gpkg", ".parquet", ".geoparquet", ".fgb", ".kml"}
+# Components of an (extracted) ESRI shapefile set — any one of these is enough to reference it.
+_SHAPE_PARTS = {".shp", ".shx", ".dbf", ".prj", ".cpg", ".qix", ".sbn", ".sbx", ".qpj", ".aih", ".ain"}
 
 
 def _resolve(ref: str) -> Tuple[Path, Optional[Dict[str, Any]]]:
@@ -53,12 +57,31 @@ def _true_name(path: Path, record: Optional[Dict[str, Any]]) -> str:
     return name.split("__", 1)[1] if "__" in name else name
 
 
-def _stage_vector_source(ref: str, sibling_file_ids: Optional[List[str]]) -> Tuple[str, Optional[str]]:
+def _index_attached(file_ids: Optional[List[str]]) -> List[Dict[str, Any]]:
+    """Resolve every conversation-attached file_id to ``{id, name, path}``.
+
+    Unresolvable ids are skipped. Used to auto-discover shapefile sidecars by basename.
+    """
+    idx: List[Dict[str, Any]] = []
+    for fid in file_ids or []:
+        try:
+            p, rec = _resolve(fid)
+        except Exception:
+            continue
+        idx.append({"id": str(fid), "name": _true_name(p, rec), "path": p})
+    return idx
+
+
+def _stage_vector_source(ref: str, sibling_file_ids: Optional[List[str]],
+                         attached: Optional[List[Dict[str, Any]]] = None) -> Tuple[str, Optional[str]]:
     """Return ``(gdal_readable_path, tempdir_to_cleanup_or_None)``.
 
     - ``.zip``  -> ``/vsizip/<abs>`` (GDAL reads the zipped shapefile in place).
-    - ``.shp``  -> stage the .shp + every sibling upload into a temp dir under a shared
-      basename so the sidecars (.shx/.dbf/.prj) are discoverable.
+    - a shapefile component (``.shp`` OR a sidecar like ``.dbf``) -> reconstruct a readable
+      shapefile by copying the ``.shp`` and every sibling into one temp dir under a shared
+      basename. Siblings come from (a) explicit ``sibling_file_ids`` and (b) auto-discovery
+      among the conversation's ``attached`` files sharing the same basename stem — so the
+      model only has to reference any ONE component.
     - self-contained (.geojson/.gpkg/.parquet/…) -> the path as-is.
     """
     path, record = _resolve(ref)
@@ -69,19 +92,31 @@ def _stage_vector_source(ref: str, sibling_file_ids: Optional[List[str]]) -> Tup
         return f"/vsizip/{path.resolve()}", None
     if ext in _SELF_CONTAINED:
         return str(path), None
-    if ext == ".shp":
-        tmp = tempfile.mkdtemp(prefix="vec_")
+    if ext in _SHAPE_PARTS:
         stem = Path(name).stem
-        shutil.copyfile(path, Path(tmp) / f"{stem}.shp")
-        for sib in sibling_file_ids or []:
+        # dest_filename -> source Path, starting with the referenced component itself.
+        members: Dict[str, Path] = {name: path}
+        for sib in sibling_file_ids or []:  # explicit siblings the caller passed
             try:
                 sp, srec = _resolve(sib)
             except Exception:
                 continue
-            sext = Path(_true_name(sp, srec)).suffix.lower()
-            if sext and sext != ".shp":
-                shutil.copyfile(sp, Path(tmp) / f"{stem}{sext}")
-        return str(Path(tmp) / f"{stem}.shp"), tmp
+            members.setdefault(_true_name(sp, srec), sp)
+        for entry in attached or []:  # auto-discover the rest of the set by basename
+            if Path(entry["name"]).stem == stem:
+                members.setdefault(entry["name"], entry["path"])
+        shp_name = next((n for n in members if Path(n).suffix.lower() == ".shp"), None)
+        if not shp_name:
+            raise ValueError(
+                f"no .shp found for '{name}'; attach the .shp together with its .shx/.dbf/.prj, "
+                "or upload the shapefile as a single .zip")
+        tmp = tempfile.mkdtemp(prefix="vec_")
+        shp_stem = Path(shp_name).stem
+        for n, sp in members.items():
+            sext = Path(n).suffix.lower()
+            if sext:
+                shutil.copyfile(sp, Path(tmp) / f"{shp_stem}{sext}")
+        return str(Path(tmp) / f"{shp_stem}.shp"), tmp
     # Unknown extension: let GDAL attempt to read it directly.
     return str(path), None
 
@@ -101,11 +136,23 @@ def _epsg(crs: Any) -> Optional[str]:
         return None
 
 
-def make_langchain_geo_tools() -> List[Any]:
-    """Build the vector/shapefile StructuredTools (geopandas-backed)."""
+def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None) -> List[Any]:
+    """Build the vector/shapefile StructuredTools (geopandas-backed).
+
+    ``default_input_file_ids`` is the conversation's attached file set. The tools use it to
+    auto-discover shapefile sidecars (.shx/.dbf/.prj) by basename, so the model only has to
+    reference the .shp (or any single component) — passing ``sibling_file_ids`` is optional.
+    """
     from langchain_core.tools import StructuredTool
 
-    _SIB = "For an EXTRACTED shapefile (separate uploads), pass the .shp's file_id here and the OTHER components (.shx/.dbf/.prj) as sibling_file_ids; or upload the shapefile as a single .zip."
+    _attached = _index_attached(default_input_file_ids)
+
+    def _stage(ref, sibling_file_ids=None):
+        return _stage_vector_source(ref, sibling_file_ids, _attached)
+
+    _SIB = ("For an uploaded shapefile, just pass the .shp's file_id (or any single component) — "
+            "the tool auto-finds the .shx/.dbf/.prj among the attached files. You may also pass "
+            "the other components as sibling_file_ids, or upload the shapefile as a single .zip.")
 
     def inspect_vector(file_id: str, sibling_file_ids: Optional[List[str]] = None,
                        layer: Optional[str] = None) -> str:
@@ -115,7 +162,7 @@ def make_langchain_geo_tools() -> List[Any]:
         tmp = None
         try:
             import pyogrio
-            read_path, tmp = _stage_vector_source(file_id, sibling_file_ids)
+            read_path, tmp = _stage(file_id, sibling_file_ids)
             try:
                 layers = [str(n) for n in (pyogrio.list_layers(read_path)[:, 0])]
             except Exception:
@@ -158,7 +205,7 @@ def make_langchain_geo_tools() -> List[Any]:
             import geopandas as gpd
             from agent_runtime.file_store import create_output_file_from_path
 
-            read_path, tmp = _stage_vector_source(file_id, sibling_file_ids)
+            read_path, tmp = _stage(file_id, sibling_file_ids)
             gdf = gpd.read_file(read_path, layer=layer) if layer else gpd.read_file(read_path)
             total = len(gdf)
             downsampled = total > max_features
@@ -200,7 +247,7 @@ def make_langchain_geo_tools() -> List[Any]:
             import geopandas as gpd
             from agent_runtime.file_store import create_output_file_from_path
 
-            read_path, tmp = _stage_vector_source(file_id, sibling_file_ids)
+            read_path, tmp = _stage(file_id, sibling_file_ids)
             gdf = gpd.read_file(read_path, layer=layer) if layer else gpd.read_file(read_path)
             if target_crs and getattr(gdf, "crs", None) is not None:
                 gdf = gdf.to_crs(target_crs)
@@ -229,7 +276,7 @@ def make_langchain_geo_tools() -> List[Any]:
             import geopandas as gpd
             from agent_runtime.file_store import create_output_file_from_path
 
-            read_path, tmp = _stage_vector_source(file_id, sibling_file_ids)
+            read_path, tmp = _stage(file_id, sibling_file_ids)
             gdf = gpd.read_file(read_path, layer=layer) if layer else gpd.read_file(read_path)
             if getattr(gdf, "crs", None) is None:
                 return json.dumps({"ok": False, "error": "source has no CRS (.prj missing); cannot reproject"})
@@ -262,8 +309,8 @@ def make_langchain_geo_tools() -> List[Any]:
             import geopandas as gpd
             from agent_runtime.file_store import create_output_file_from_path
 
-            lp, t1 = _stage_vector_source(left_file_id, left_siblings)
-            rp, t2 = _stage_vector_source(right_file_id, right_siblings)
+            lp, t1 = _stage(left_file_id, left_siblings)
+            rp, t2 = _stage(right_file_id, right_siblings)
             left = gpd.read_file(lp)
             right = gpd.read_file(rp)
             note = None
