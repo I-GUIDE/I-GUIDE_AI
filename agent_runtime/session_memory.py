@@ -42,9 +42,20 @@ from typing import Any, Dict, List, Optional
 _LOCK = threading.RLock()
 # Insertion-ordered so we can evict the least-recently-used thread first.
 _STORE: "OrderedDict[str, List[Dict[str, Any]]]" = OrderedDict()
+# Per-thread set of file_ids attached anywhere in the session, so an upload from one
+# turn stays accessible to the agent on later turns ("visualize it" / "execute it").
+_FILES: "OrderedDict[str, List[str]]" = OrderedDict()
 
 _DEFAULT_MAX_TURNS = 50
 _DEFAULT_MAX_THREADS = 500
+_DEFAULT_MAX_FILES = 50
+
+
+def _max_files() -> int:
+    try:
+        return max(1, int(os.getenv("AGENT_SESSION_MEMORY_MAX_FILES", str(_DEFAULT_MAX_FILES))))
+    except (TypeError, ValueError):
+        return _DEFAULT_MAX_FILES
 
 
 def _max_turns() -> int:
@@ -112,24 +123,66 @@ def append_session_turn(thread_id: Optional[str], user_query: str, answer: str) 
             _STORE.popitem(last=False)  # evict least-recently used
 
 
+def get_session_files(thread_id: Optional[str]) -> List[str]:
+    """Return file_ids attached anywhere in this session (oldest first)."""
+    if not thread_id:
+        return []
+    with _LOCK:
+        ids = _FILES.get(thread_id)
+        if not ids:
+            return []
+        _FILES.move_to_end(thread_id)
+        return list(ids)
+
+
+def append_session_files(thread_id: Optional[str], file_ids: Optional[List[str]]) -> None:
+    """Record file_ids attached this turn so later turns can still reach them.
+
+    Deduped (preserving order), bounded per-thread and globally (LRU). No-op when
+    *thread_id* is falsy or no file_ids are given.
+    """
+    ids = [str(f).strip() for f in (file_ids or []) if str(f).strip()]
+    if not thread_id or not ids:
+        return
+    with _LOCK:
+        cur = _FILES.get(thread_id)
+        if cur is None:
+            cur = []
+            _FILES[thread_id] = cur
+        for f in ids:
+            if f not in cur:
+                cur.append(f)
+        max_files = _max_files()
+        if len(cur) > max_files:
+            del cur[: len(cur) - max_files]
+        _FILES.move_to_end(thread_id)
+        max_threads = _max_threads()
+        while len(_FILES) > max_threads:
+            _FILES.popitem(last=False)
+
+
 def clear_session(thread_id: Optional[str]) -> None:
-    """Drop all recorded turns for *thread_id* (no-op if unknown)."""
+    """Drop all recorded turns and files for *thread_id* (no-op if unknown)."""
     if not thread_id:
         return
     with _LOCK:
         _STORE.pop(thread_id, None)
+        _FILES.pop(thread_id, None)
 
 
 def reset_all() -> None:
     """Clear the entire session store (primarily for tests)."""
     with _LOCK:
         _STORE.clear()
+        _FILES.clear()
 
 
 __all__ = [
     "append_session_turn",
+    "append_session_files",
     "build_session_memory_doc",
     "clear_session",
+    "get_session_files",
     "get_session_history",
     "reset_all",
 ]

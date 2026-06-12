@@ -200,3 +200,45 @@ def test_stream_session_memory_preserved_when_persistent_off(monkeypatch):
     # a session-scoped memory_saved event is emitted
     saved = [e for e in events2 if e.get("event") == "memory_saved"]
     assert saved and saved[0]["data"].get("scope") == "session"
+
+
+# --- session-level file tracking (uploads carry across turns) ----------------
+
+def test_session_files_round_trip_and_dedup():
+    sm.append_session_files("t1", ["a", "b", "a"])
+    sm.append_session_files("t1", ["b", "c"])
+    assert sm.get_session_files("t1") == ["a", "b", "c"]   # deduped, order preserved
+    assert sm.get_session_files("unknown") == []
+    sm.append_session_files(None, ["x"])
+    assert sm.get_session_files(None) == []                 # falsy thread no-op
+    sm.clear_session("t1")
+    assert sm.get_session_files("t1") == []
+
+
+def test_uploaded_files_carry_to_later_turns(monkeypatch):
+    """Files attached on one turn stay accessible on later turns of the SAME session,
+    even when the later turn attaches none (the prototype consumes attachments per turn)."""
+    rec = []
+
+    def fake(query, *, chat_history=None, thread_id=None, input_file_ids=None, **kw):
+        rec.append({"file_ids": list(input_file_ids or []), "thread_id": thread_id})
+        return {"final_answer": "ok", "thread_id": thread_id, "available_skills": [], "route_trace": {}}
+
+    monkeypatch.setattr(acs, "run_agent_query", fake)
+
+    # turn 1: attach the shapefile components
+    acs.run_agent_chat(user_input="use these", thread_id="s1",
+                       file_ids=["file_shp", "file_shx", "file_dbf"], use_persistent_memory=False)
+    assert set(rec[0]["file_ids"]) == {"file_shp", "file_shx", "file_dbf"}
+
+    # turn 2: "execute it" with NO new attachment -> session still has the files
+    acs.run_agent_chat(user_input="execute it", thread_id="s1", use_persistent_memory=False)
+    assert set(rec[1]["file_ids"]) == {"file_shp", "file_shx", "file_dbf"}
+
+    # turn 3: attaching a new file unions with the carried ones
+    acs.run_agent_chat(user_input="and this", thread_id="s1", file_ids=["file_new"], use_persistent_memory=False)
+    assert set(rec[2]["file_ids"]) == {"file_shp", "file_shx", "file_dbf", "file_new"}
+
+    # a DIFFERENT session does not see them
+    acs.run_agent_chat(user_input="hi", thread_id="s2", use_persistent_memory=False)
+    assert rec[3]["file_ids"] == []

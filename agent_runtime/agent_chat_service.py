@@ -7,7 +7,12 @@ from uuid import uuid4
 
 from .file_store import get_file_record
 from .graph_runtime import run_agent_query, stream_agent_query_events
-from .session_memory import append_session_turn, build_session_memory_doc
+from .session_memory import (
+    append_session_files,
+    append_session_turn,
+    build_session_memory_doc,
+    get_session_files,
+)
 from rag_pipeline.memory_module import create_memory, get_or_create_memory, update_memory
 
 logger = logging.getLogger(__name__)
@@ -227,9 +232,14 @@ def run_agent_chat(
         # preserved locally within the session (keyed by thread_id).
         memory_doc = build_session_memory_doc(effective_thread_id)
 
+    # Files attached on ANY earlier turn of this session stay accessible: union the
+    # session's tracked file_ids with this turn's, so "visualize it" / "execute it"
+    # still reach an upload from a previous turn.
+    effective_file_ids = list(dict.fromkeys([*get_session_files(effective_thread_id), *normalized_file_ids]))
+
     chat_history = _build_chat_history(memory_doc, recent_k=recent_k)
     effective_input = _augment_user_input_with_files(user_input, normalized_file_paths)
-    effective_input = _augment_user_input_with_file_ids(effective_input, normalized_file_ids)
+    effective_input = _augment_user_input_with_file_ids(effective_input, effective_file_ids)
 
     result = run_agent_query(
         effective_input,
@@ -246,12 +256,14 @@ def run_agent_chat(
         skill_roots=normalized_skill_roots,
         use_supervisor=use_supervisor,
         code_exec=code_exec,
-        input_file_ids=normalized_file_ids,
+        input_file_ids=effective_file_ids,
     )
 
     answer = _extract_agent_answer(result)
     message_id = str(uuid4())
     effective_thread_id = result.get("thread_id") or effective_thread_id
+    # Track this turn's uploads in the session so later turns can still use them.
+    append_session_files(effective_thread_id, normalized_file_ids)
     persisted_to_opensearch = False
     if use_persistent_memory and effective_memory_id:
         try:
@@ -379,9 +391,12 @@ def stream_agent_chat_events(
             },
         }
 
+    # Carry files attached on earlier turns of this session (see run_agent_chat).
+    effective_file_ids = list(dict.fromkeys([*get_session_files(effective_thread_id), *normalized_file_ids]))
+
     chat_history = _build_chat_history(memory_doc, recent_k=recent_k)
     effective_input = _augment_user_input_with_files(user_input, normalized_file_paths)
-    effective_input = _augment_user_input_with_file_ids(effective_input, normalized_file_ids)
+    effective_input = _augment_user_input_with_file_ids(effective_input, effective_file_ids)
     completed_response: Optional[Dict[str, Any]] = None
     for event in stream_agent_query_events(
         effective_input,
@@ -399,7 +414,7 @@ def stream_agent_chat_events(
         agent_dev=agent_dev,
         use_supervisor=use_supervisor,
         code_exec=code_exec,
-        input_file_ids=normalized_file_ids,
+        input_file_ids=effective_file_ids,
     ):
         if event.get("event") == "completed" and isinstance(event.get("data"), Mapping):
             completed_response = dict(event["data"])
@@ -408,6 +423,8 @@ def stream_agent_chat_events(
     answer = _extract_agent_answer(completed_response or {})
     message_id = str(uuid4())
     effective_thread_id = (completed_response or {}).get("thread_id") or effective_thread_id
+    # Track this turn's uploads in the session so later turns can still use them.
+    append_session_files(effective_thread_id, normalized_file_ids)
     persisted_to_opensearch = False
     if use_persistent_memory and effective_memory_id:
         try:
