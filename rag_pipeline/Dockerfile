@@ -21,6 +21,16 @@ RUN install -m 0755 -d /etc/apt/keyrings \
     && apt-get update && apt-get install -y docker-ce-cli \
     && rm -rf /var/lib/apt/lists/*
 
+# QGIS + PyQGIS bindings (Debian bookworm) so the analysis agent's QGIS tools work:
+# pyqgis_render_map / pyqgis_layer_summary (via the worker) and the qgis_process CLI.
+# The python3-qgis bindings install into the DISTRO python3 (/usr/bin/python3) — which is the
+# interpreter the PyQGIS worker runs as (QGIS_PYTHON_BIN below), separate from the app's
+# /usr/local/bin/python. --no-install-recommends drops GRASS/docs to keep the image smaller;
+# vector (OGR) rendering needs only qgis-core, which python3-qgis pulls in.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    qgis python3-qgis \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # Headless matplotlib + package root on PYTHONPATH so the agent can import the
@@ -29,7 +39,12 @@ WORKDIR /app
 ENV MPLBACKEND=Agg \
     PYTHONPATH=/app \
     CPLUS_INCLUDE_PATH=/usr/include/gdal \
-    C_INCLUDE_PATH=/usr/include/gdal
+    C_INCLUDE_PATH=/usr/include/gdal \
+    # PyQGIS worker runs in the distro python3 (where python3-qgis installed the bindings),
+    # not the app's /usr/local/bin/python. Offscreen QPA = headless rendering without an X server.
+    QGIS_PYTHON_BIN=/usr/bin/python3 \
+    QGIS_PREFIX_PATH=/usr \
+    QT_QPA_PLATFORM=offscreen
 
 # Copy requirements and install Python dependencies
 COPY requirements.txt .

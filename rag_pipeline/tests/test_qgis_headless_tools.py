@@ -293,12 +293,11 @@ def test_qgis_cli_probe_uses_path(monkeypatch):
 def test_qgis_tools_gated_out_when_unavailable(monkeypatch):
     """When neither backend is present, the QGIS tool set is empty so the agent falls
     back to the geopandas geo tools (plot_vector) instead of failing on QGIS."""
-    from agent_runtime.langchain_granular_tools import make_langchain_qgis_tools
-    monkeypatch.delenv("AGENT_QGIS_ENABLED", raising=False)
-    monkeypatch.setenv("QGIS_PROCESS_BIN", "qgis_process_definitely_absent_zzz")
-    import rag_pipeline.qgis_headless_tools as q
-    monkeypatch.setattr(q, "pyqgis_available", lambda: False)
-    assert make_langchain_qgis_tools() == []
+    import agent_runtime.langchain_granular_tools as g
+    # patch the probes as bound in the granular-tools module (where make_* reads them)
+    monkeypatch.setattr(g, "qgis_process_available", lambda: False)
+    monkeypatch.setattr(g, "pyqgis_available", lambda: False)
+    assert g.make_langchain_qgis_tools() == []
 
 
 def test_qgis_tools_split_by_backend(monkeypatch):
@@ -317,3 +316,71 @@ def test_qgis_tools_split_by_backend(monkeypatch):
     monkeypatch.setattr(g, "pyqgis_available", lambda: True)
     names = {t.name for t in g.make_langchain_qgis_tools()}
     assert names == {"pyqgis_layer_summary", "pyqgis_render_map"}
+
+
+# --- uploaded shapefile resolution (stage extracted siblings / vsizip) ------
+
+def _make_shapefile_uploads(tmp_path, monkeypatch):
+    """Build a real 3-feature shapefile, upload each component as a SEPARATE file, and
+    return {ext: file_id} plus a zip upload id. Skips if geopandas isn't installed."""
+    import glob
+    import zipfile
+    gpd = pytest.importorskip("geopandas")
+    from shapely.geometry import Point
+    from werkzeug.datastructures import FileStorage
+    from agent_runtime.file_store import save_uploaded_file
+
+    monkeypatch.setenv("AGENT_FILE_STORAGE_ROOT", str(tmp_path / "store"))
+    work = tmp_path / "shp"; work.mkdir()
+    gpd.GeoDataFrame({"name": ["a", "b", "c"], "v": [1, 2, 3]},
+                     geometry=[Point(-88.2, 40.1), Point(-88.1, 40.2), Point(-88.0, 40.0)],
+                     crs="EPSG:4326").to_file(work / "pts.shp")
+    comps = sorted(glob.glob(str(work / "pts.*")))
+
+    def up(p):
+        with open(p, "rb") as fh:
+            return save_uploaded_file(FileStorage(stream=fh, filename=Path(p).name))["file_id"]
+    ids = {Path(c).suffix: up(c) for c in comps}
+    zp = work / "pts.zip"
+    with zipfile.ZipFile(zp, "w") as z:
+        for c in comps:
+            z.write(c, Path(c).name)
+    with open(zp, "rb") as fh:
+        ids["__zip__"] = save_uploaded_file(FileStorage(stream=fh, filename="pts.zip"))["file_id"]
+    return ids
+
+
+def test_resolve_layer_ref_stages_extracted_shapefile(tmp_path, monkeypatch):
+    gpd = pytest.importorskip("geopandas")
+    ids = _make_shapefile_uploads(tmp_path, monkeypatch)
+    staged = qgis_headless_tools._resolve_layer_ref(ids[".shp"])
+    assert staged.endswith(".shp")
+    gdf = gpd.read_file(staged)               # opens only if .shx/.dbf are co-located
+    assert len(gdf) == 3 and "v" in gdf.columns
+
+
+def test_resolve_layer_ref_from_sidecar_reconstructs_shp(tmp_path, monkeypatch):
+    gpd = pytest.importorskip("geopandas")
+    ids = _make_shapefile_uploads(tmp_path, monkeypatch)
+    staged = qgis_headless_tools._resolve_layer_ref(ids[".dbf"])  # point at a sidecar
+    assert staged.endswith(".shp") and len(gpd.read_file(staged)) == 3
+
+
+def test_resolve_layer_ref_zip_uses_vsizip(tmp_path, monkeypatch):
+    ids = _make_shapefile_uploads(tmp_path, monkeypatch)
+    assert qgis_headless_tools._resolve_layer_ref(ids["__zip__"]).startswith("/vsizip/")
+
+
+def test_resolve_layer_ref_passthrough_for_raw_path():
+    assert qgis_headless_tools._resolve_layer_ref("/data/already/on/disk.shp") == "/data/already/on/disk.shp"
+
+
+def test_pyqgis_available_probes_worker_python(monkeypatch):
+    monkeypatch.delenv("AGENT_QGIS_ENABLED", raising=False)
+    qgis_headless_tools._PYQGIS_PROBE_CACHE.clear()
+    monkeypatch.setenv("QGIS_PYTHON_BIN", "/nonexistent/python_zzz")   # cannot import qgis
+    assert qgis_headless_tools.pyqgis_available() is False
+    monkeypatch.setenv("AGENT_QGIS_ENABLED", "1")                      # override wins
+    assert qgis_headless_tools.pyqgis_available() is True
+    monkeypatch.setenv("AGENT_QGIS_ENABLED", "0")
+    assert qgis_headless_tools.pyqgis_available() is False

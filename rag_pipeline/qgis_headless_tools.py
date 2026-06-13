@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 from uuid import uuid4
@@ -34,15 +35,37 @@ def qgis_process_available() -> bool:
     return shutil.which(os.getenv("QGIS_PROCESS_BIN", DEFAULT_QGIS_PROCESS_BIN)) is not None
 
 
+_PYQGIS_PROBE_CACHE: Dict[str, bool] = {}
+
+
 def pyqgis_available() -> bool:
-    """Whether the PyQGIS Python module (used by render_map / layer_summary) is importable."""
+    """Whether PyQGIS (render_map / layer_summary) is importable by the WORKER interpreter.
+
+    The PyQGIS bindings live in the interpreter that runs ``qgis_pyqgis_worker.py`` —
+    ``QGIS_PYTHON_BIN`` — which in the Docker image is the distro ``python3`` that
+    ``apt install python3-qgis`` targets, NOT the app's interpreter. So we probe THAT
+    interpreter for the ``qgis`` module (cached per interpreter), rather than the current one.
+    """
     forced = _qgis_force_override()
     if forced is not None:
         return forced
+    python_bin = os.getenv("QGIS_PYTHON_BIN", DEFAULT_QGIS_PYTHON_BIN)
+    if python_bin in _PYQGIS_PROBE_CACHE:
+        return _PYQGIS_PROBE_CACHE[python_bin]
+    ok = False
     try:
-        return importlib.util.find_spec("qgis") is not None
+        if python_bin == sys.executable:
+            ok = importlib.util.find_spec("qgis") is not None
+        else:
+            probe = subprocess.run(
+                [python_bin, "-c", "import importlib.util as u, sys; sys.exit(0 if u.find_spec('qgis') else 1)"],
+                capture_output=True, timeout=15,
+            )
+            ok = probe.returncode == 0
     except Exception:
-        return False
+        ok = False
+    _PYQGIS_PROBE_CACHE[python_bin] = ok
+    return ok
 
 
 def qgis_available() -> bool:
@@ -112,14 +135,67 @@ def _parse_json_array(raw: str, *, field_name: str) -> list[Any]:
     return list(parsed)
 
 
+# Components of an (extracted) ESRI shapefile set — any one of these can reference the layer.
+_SHAPE_PARTS = {".shp", ".shx", ".dbf", ".prj", ".cpg", ".qix", ".sbn", ".sbx", ".qpj", ".aih", ".ain"}
+
+
+def _orig_name(path: Path, record: Optional[Mapping[str, Any]]) -> str:
+    """The original filename (uploads are stored on disk as ``<file_id>__<filename>``)."""
+    if record and record.get("filename"):
+        return str(record["filename"])
+    name = path.name
+    return name.split("__", 1)[1] if "__" in name else name
+
+
+def _stage_shapefile_siblings(part_path: Path, record: Optional[Mapping[str, Any]]) -> str:
+    """Co-locate an uploaded shapefile's parts so OGR/QGIS can open it.
+
+    Uploads are stored as ``uploads/<file_id>__<filename>`` — so a ``.shp`` and its
+    ``.shx``/``.dbf``/``.prj`` siblings are NOT next to each other under a shared basename and
+    GDAL can't find them. Given ANY one component, gather every upload sharing the same basename
+    stem, copy them into one temp dir under a common name, and return the staged ``.shp`` path.
+    Falls back to the original path when no ``.shp`` is present (OGR then fails clearly).
+    """
+    name = _orig_name(part_path, record)
+    stem = Path(name).stem
+    members: Dict[str, Path] = {}
+    try:
+        for sibling in part_path.parent.iterdir():
+            if not sibling.is_file():
+                continue
+            on = sibling.name.split("__", 1)[1] if "__" in sibling.name else sibling.name
+            ext = Path(on).suffix.lower()
+            if Path(on).stem == stem and ext in _SHAPE_PARTS:
+                members.setdefault(ext, sibling)
+    except OSError:
+        pass
+    members.setdefault(Path(name).suffix.lower(), part_path)
+    if ".shp" not in members:
+        return str(part_path)
+    tmp = Path(tempfile.mkdtemp(prefix="qgis_shp_"))
+    for ext, src in members.items():
+        try:
+            shutil.copyfile(src, tmp / f"{stem}{ext}")
+        except OSError:
+            pass
+    return str(tmp / f"{stem}.shp")
+
+
 def _resolve_layer_ref(ref: Any) -> Any:
     if not isinstance(ref, str):
         return ref
     value = ref.strip()
     if not value:
         return value
-    if get_file_record(value):
-        return str(resolve_file_id(value))
+    record = get_file_record(value)
+    if record:
+        path = Path(resolve_file_id(value))
+        ext = Path(_orig_name(path, record)).suffix.lower()
+        if ext == ".zip":  # GDAL reads the zipped shapefile in place
+            return f"/vsizip/{path.resolve()}"
+        if ext in _SHAPE_PARTS:  # extracted shapefile: re-assemble the sibling parts
+            return _stage_shapefile_siblings(path, record)
+        return str(path)
     return value
 
 
