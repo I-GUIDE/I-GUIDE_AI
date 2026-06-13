@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -14,6 +16,43 @@ from .agent_file_store import create_output_file_from_path, get_file_record, res
 
 DEFAULT_QGIS_PROCESS_BIN = "qgis_process"
 DEFAULT_QGIS_PYTHON_BIN = sys.executable
+
+
+def _qgis_force_override() -> Optional[bool]:
+    """``AGENT_QGIS_ENABLED`` as a tri-state: True/False to force, None to auto-detect."""
+    raw = os.getenv("AGENT_QGIS_ENABLED")
+    if raw is None:
+        return None
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def qgis_process_available() -> bool:
+    """Whether the ``qgis_process`` CLI (used by the processing/buffer tools) is on PATH."""
+    forced = _qgis_force_override()
+    if forced is not None:
+        return forced
+    return shutil.which(os.getenv("QGIS_PROCESS_BIN", DEFAULT_QGIS_PROCESS_BIN)) is not None
+
+
+def pyqgis_available() -> bool:
+    """Whether the PyQGIS Python module (used by render_map / layer_summary) is importable."""
+    forced = _qgis_force_override()
+    if forced is not None:
+        return forced
+    try:
+        return importlib.util.find_spec("qgis") is not None
+    except Exception:
+        return False
+
+
+def qgis_available() -> bool:
+    """Whether ANY QGIS backend (CLI or PyQGIS) is usable.
+
+    The agent image ships GDAL (for the geopandas-backed geo tools) but NOT QGIS, so this is
+    typically False — callers then expose the geopandas tools (``plot_vector`` etc.) instead
+    of QGIS tools that would only fail at call time. Forceable via ``AGENT_QGIS_ENABLED``.
+    """
+    return qgis_process_available() or pyqgis_available()
 DEFAULT_PROCESSING_TIMEOUT_SEC = 300
 DEFAULT_PYQGIS_TIMEOUT_SEC = 180
 OUTPUT_PARAMETER_HINTS = {

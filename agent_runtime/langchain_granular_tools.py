@@ -16,9 +16,11 @@ from rag_pipeline.search.spatial import get_spatial_search_results
 from rag_pipeline.search.agent_kb import agent_kb_search as run_agent_kb_search
 from rag_pipeline.search.agent_kb import get_kb_block as run_get_kb_block
 from rag_pipeline.qgis_headless_tools import (
+    pyqgis_available,
     pyqgis_layer_summary_tool,
     pyqgis_render_map_tool,
     qgis_metric_buffer_tool,
+    qgis_process_available,
     qgis_processing_help_tool,
     qgis_processing_run_tool,
 )
@@ -122,6 +124,16 @@ def opengeodata_search_tool(query: str, limit: int = 8, session_context_json: Op
 
 
 def make_langchain_qgis_tools(*, session_id: Optional[str] = None) -> List[Any]:
+    # QGIS is not installed in the default agent image (only GDAL, for the geopandas-backed
+    # geo tools). Expose each QGIS tool only when its backend is actually present, so the agent
+    # falls back to the working `plot_vector`/`inspect_vector` geo tools instead of attempting
+    # QGIS calls that fail at runtime. The processing/buffer tools need the `qgis_process` CLI;
+    # render_map / layer_summary need the PyQGIS Python module — a deployment may have one and
+    # not the other. Forceable via AGENT_QGIS_ENABLED. See qgis_headless_tools.qgis_available().
+    have_cli = qgis_process_available()
+    have_pyqgis = pyqgis_available()
+    if not (have_cli or have_pyqgis):
+        return []
     try:
         from langchain_core.tools import StructuredTool
     except Exception as exc:  # pragma: no cover - optional dependency
@@ -199,61 +211,67 @@ def make_langchain_qgis_tools(*, session_id: Optional[str] = None) -> List[Any]:
             timeout_sec=timeout_sec,
         )
 
-    return [
-        StructuredTool.from_function(
-            func=qgis_processing_help_tool,
-            name="qgis_processing_help",
-            description=(
-                "Inspect a QGIS Processing algorithm's JSON help by id, such as native:buffer. "
-                "Use before qgis_processing_run when parameter names are uncertain."
+    tools: List[Any] = []
+    if have_cli:  # qgis_process CLI: processing + metric buffer
+        tools += [
+            StructuredTool.from_function(
+                func=qgis_processing_help_tool,
+                name="qgis_processing_help",
+                description=(
+                    "Inspect a QGIS Processing algorithm's JSON help by id, such as native:buffer. "
+                    "Use before qgis_processing_run when parameter names are uncertain."
+                ),
+                metadata={"category": "spatial_analysis"},
             ),
-            metadata={"category": "spatial_analysis"},
-        ),
-        StructuredTool.from_function(
-            func=qgis_processing_run,
-            name="qgis_processing_run",
-            description=(
-                "Run one QGIS Processing algorithm headlessly in an isolated per-session job directory. "
-                "parameters_json must be a JSON object using QGIS parameter names; relative output paths "
-                "on OUTPUT-style parameters are written under the job directory. Returns JSON with job_dir, "
-                "effective_parameters, stdout_json, stdout, and stderr. For meter-based buffers on GeoJSON "
-                "or EPSG:4326 layers, prefer qgis_metric_buffer instead of native:buffer."
+            StructuredTool.from_function(
+                func=qgis_processing_run,
+                name="qgis_processing_run",
+                description=(
+                    "Run one QGIS Processing algorithm headlessly in an isolated per-session job directory. "
+                    "parameters_json must be a JSON object using QGIS parameter names; relative output paths "
+                    "on OUTPUT-style parameters are written under the job directory. Returns JSON with job_dir, "
+                    "effective_parameters, stdout_json, stdout, and stderr. For meter-based buffers on GeoJSON "
+                    "or EPSG:4326 layers, prefer qgis_metric_buffer instead of native:buffer."
+                ),
+                metadata={"category": "spatial_analysis"},
             ),
-            metadata={"category": "spatial_analysis"},
-        ),
-        StructuredTool.from_function(
-            func=qgis_metric_buffer,
-            name="qgis_metric_buffer",
-            description=(
-                "Create a meter-based buffer safely with QGIS. This resolves uploaded file ids, reprojects "
-                "the input layer to a projected CRS, runs native:buffer using distance_meters, then reprojects "
-                "the output to target_crs. Use this for requests like 'buffer by 500 meters', especially when "
-                "the input is GeoJSON/EPSG:4326. Returns output_path and managed_output with file_id/download_url."
+            StructuredTool.from_function(
+                func=qgis_metric_buffer,
+                name="qgis_metric_buffer",
+                description=(
+                    "Create a meter-based buffer safely with QGIS. This resolves uploaded file ids, reprojects "
+                    "the input layer to a projected CRS, runs native:buffer using distance_meters, then reprojects "
+                    "the output to target_crs. Use this for requests like 'buffer by 500 meters', especially when "
+                    "the input is GeoJSON/EPSG:4326. Returns output_path and managed_output with file_id/download_url."
+                ),
+                metadata={"category": "spatial_analysis"},
             ),
-            metadata={"category": "spatial_analysis"},
-        ),
-        StructuredTool.from_function(
-            func=pyqgis_layer_summary,
-            name="pyqgis_layer_summary",
-            description=(
-                "Inspect one vector or raster layer with standalone headless PyQGIS. "
-                "Returns JSON with CRS, extent, fields, feature count, and sample features for vector layers."
+        ]
+    if have_pyqgis:  # standalone PyQGIS: layer summary + map rendering
+        tools += [
+            StructuredTool.from_function(
+                func=pyqgis_layer_summary,
+                name="pyqgis_layer_summary",
+                description=(
+                    "Inspect one vector or raster layer with standalone headless PyQGIS. "
+                    "Returns JSON with CRS, extent, fields, feature count, and sample features for vector layers."
+                ),
+                metadata={"category": "spatial_analysis"},
             ),
-            metadata={"category": "spatial_analysis"},
-        ),
-        StructuredTool.from_function(
-            func=pyqgis_render_map,
-            name="pyqgis_render_map",
-            description=(
-                "Render vector/raster layer paths to a PNG using standalone headless PyQGIS in an isolated "
-                "per-session job directory. layers_json may contain uploaded file_id strings or objects with "
-                "path/layer_path, optional name, and provider ('ogr' for vector or 'gdal' for raster). Set "
-                "basemap='osm' to draw an OpenStreetMap XYZ background under the data. Returns managed_output "
-                "with file_id and download_url when rendering succeeds."
+            StructuredTool.from_function(
+                func=pyqgis_render_map,
+                name="pyqgis_render_map",
+                description=(
+                    "Render vector/raster layer paths to a PNG using standalone headless PyQGIS in an isolated "
+                    "per-session job directory. layers_json may contain uploaded file_id strings or objects with "
+                    "path/layer_path, optional name, and provider ('ogr' for vector or 'gdal' for raster). Set "
+                    "basemap='osm' to draw an OpenStreetMap XYZ background under the data. Returns managed_output "
+                    "with file_id and download_url when rendering succeeds."
+                ),
+                metadata={"category": "spatial_analysis"},
             ),
-            metadata={"category": "spatial_analysis"},
-        ),
-    ]
+        ]
+    return tools
 
 
 def make_langchain_granular_tools(

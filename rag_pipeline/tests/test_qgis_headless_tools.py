@@ -267,3 +267,53 @@ def test_qgis_metric_buffer_reprojects_before_buffering(qgis_job_root, monkeypat
     assert f"INPUT={uploaded_path}" in calls[0]["command"]
     assert "DISTANCE=500.0" in calls[1]["command"]
     assert result["managed_output"]["filename"] == "sites_buffer.geojson"
+
+
+# --- availability probes + tool gating -------------------------------------
+
+def test_qgis_probes_force_override(monkeypatch):
+    from rag_pipeline.qgis_headless_tools import (
+        qgis_available, qgis_process_available, pyqgis_available,
+    )
+    monkeypatch.setenv("AGENT_QGIS_ENABLED", "0")
+    assert qgis_process_available() is False and pyqgis_available() is False
+    assert qgis_available() is False
+    monkeypatch.setenv("AGENT_QGIS_ENABLED", "1")
+    assert qgis_process_available() is True and pyqgis_available() is True
+    assert qgis_available() is True
+
+
+def test_qgis_cli_probe_uses_path(monkeypatch):
+    from rag_pipeline import qgis_headless_tools as q
+    monkeypatch.delenv("AGENT_QGIS_ENABLED", raising=False)
+    monkeypatch.setenv("QGIS_PROCESS_BIN", "qgis_process_definitely_absent_zzz")
+    assert q.qgis_process_available() is False
+
+
+def test_qgis_tools_gated_out_when_unavailable(monkeypatch):
+    """When neither backend is present, the QGIS tool set is empty so the agent falls
+    back to the geopandas geo tools (plot_vector) instead of failing on QGIS."""
+    from agent_runtime.langchain_granular_tools import make_langchain_qgis_tools
+    monkeypatch.delenv("AGENT_QGIS_ENABLED", raising=False)
+    monkeypatch.setenv("QGIS_PROCESS_BIN", "qgis_process_definitely_absent_zzz")
+    import rag_pipeline.qgis_headless_tools as q
+    monkeypatch.setattr(q, "pyqgis_available", lambda: False)
+    assert make_langchain_qgis_tools() == []
+
+
+def test_qgis_tools_split_by_backend(monkeypatch):
+    """CLI-only deployment exposes processing tools but NOT the PyQGIS render/summary tools
+    (the exact 'can't plot' case); PyQGIS-only exposes only render/summary."""
+    import agent_runtime.langchain_granular_tools as g
+    monkeypatch.delenv("AGENT_QGIS_ENABLED", raising=False)
+
+    monkeypatch.setattr(g, "qgis_process_available", lambda: True)
+    monkeypatch.setattr(g, "pyqgis_available", lambda: False)
+    names = {t.name for t in g.make_langchain_qgis_tools()}
+    assert names == {"qgis_processing_help", "qgis_processing_run", "qgis_metric_buffer"}
+    assert "pyqgis_render_map" not in names  # plotting needs PyQGIS, which is absent
+
+    monkeypatch.setattr(g, "qgis_process_available", lambda: False)
+    monkeypatch.setattr(g, "pyqgis_available", lambda: True)
+    names = {t.name for t in g.make_langchain_qgis_tools()}
+    assert names == {"pyqgis_layer_summary", "pyqgis_render_map"}
