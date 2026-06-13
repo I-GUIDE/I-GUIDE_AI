@@ -209,7 +209,11 @@ const CONFIG = {
   smart_tool_routing: true,
   tool_strategy: "granular",
   mcp_modules: ["search_tools", "data_tools", "spatial_analysis_tools"],
-  enabled_search_methods: [],     // empty = all
+  // Restrict the search agent to the four INTERNAL I-GUIDE KB methods (the neo4j companions
+  // ride along automatically). The external federated `opengeodata_search` is intentionally
+  // left out so it isn't picked over the KB. NOTE: send the method names, NOT `[]` — server-side
+  // a non-null empty list means "none match" and strips ALL search tools; `null`/omit means "all".
+  enabled_search_methods: ["keyword_search", "semantic_search", "neo4j_search", "spatial_search"],
   recent_k: 8,
 };
 function newSessionId(){
