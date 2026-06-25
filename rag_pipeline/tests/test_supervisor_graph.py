@@ -710,3 +710,28 @@ def test_append_image_embeds_appends_and_dedupes():
     assert "![r.jpg](/agent/files/f2/download)" in out3
     # no-op safety
     assert _append_image_embeds("x", []) == "x"
+
+
+# --- hyperlink citations in the synthesized answer (Rule 2) -----------------
+
+def test_element_url_builds_platform_and_external_links(monkeypatch):
+    monkeypatch.setenv("FRONTEND_DOMAIN", "https://platform.i-guide.io")
+    from agent_runtime.supervisor.evidence_subgraph import _element_url
+    # internal knowledge elements -> platform URL (plural; 'code' stays 'code')
+    assert _element_url({"element_type": "dataset", "doc_id": "abc"}) == "https://platform.i-guide.io/datasets/abc"
+    assert _element_url({"element_type": "code", "doc_id": "c1"}) == "https://platform.i-guide.io/code/c1"
+    assert _element_url({"resource-type": "publication", "doc_id": "p1"}).endswith("/publications/p1")
+    # OpenGeoData -> its own landing url
+    assert _element_url({"element_type": "opengeodata", "url": "https://ext/og"}) == "https://ext/og"
+    # no element_type and no url -> no link (synthesizer bolds the title instead)
+    assert _element_url({"doc_id": "x"}) == ""
+    # FRONTEND_DOMAIN override + trailing-slash handling
+    monkeypatch.setenv("FRONTEND_DOMAIN", "https://dev.example/")
+    assert _element_url({"element_type": "notebook", "doc_id": "n"}) == "https://dev.example/notebooks/n"
+
+
+def test_format_documents_emits_url_line(monkeypatch):
+    monkeypatch.setenv("FRONTEND_DOMAIN", "https://platform.i-guide.io")
+    from agent_runtime.supervisor.evidence_subgraph import _format_documents
+    out = _format_documents([{"doc_id": "abc", "title": "Flood DS", "element_type": "dataset", "contents": "d"}])
+    assert "url: https://platform.i-guide.io/datasets/abc" in out

@@ -34,6 +34,23 @@ def _safe_int(value: Any, default: int = 8, minimum: int = 1, maximum: int = 100
     return max(minimum, min(parsed, maximum))
 
 
+def _landing_url(src: Dict[str, Any]) -> str:
+    """External (e.g. OpenGeoData) hits carry their own landing URL; pull it from the
+    source's ``url``/``landing_url`` or the first usable entry in ``links``. Internal
+    knowledge elements have no url here — their link is built from element_type + doc_id."""
+    url = src.get("url") or src.get("landing_url")
+    if url:
+        return str(url)
+    links = src.get("links")
+    if isinstance(links, list):
+        for ln in links:
+            if isinstance(ln, dict) and (ln.get("url") or ln.get("href")):
+                return str(ln.get("url") or ln.get("href"))
+            if isinstance(ln, str) and ln:
+                return ln
+    return ""
+
+
 def _normalize_hits(hits: List[Dict[str, Any]], source: str) -> List[Dict[str, Any]]:
     normalized: List[Dict[str, Any]] = []
     for hit in hits:
@@ -49,6 +66,7 @@ def _normalize_hits(hits: List[Dict[str, Any]], source: str) -> List[Dict[str, A
                 "title": doc.get("title") or "Untitled",
                 "element_type": doc.get("element_type") or doc.get("resource-type") or "resource",
                 "contents": (doc.get("contents") or "")[:800],
+                "url": _landing_url(doc),  # external landing url (OpenGeoData); "" for internal
             }
         )
     return normalized

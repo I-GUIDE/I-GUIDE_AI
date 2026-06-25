@@ -21,6 +21,7 @@ the graph is fully unit-testable without a live LLM or search backends.
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Callable, Dict, List, Optional, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -64,13 +65,40 @@ def _doc_field(doc: Any, *keys: str, default: str = "") -> str:
     return default
 
 
+def _element_url(doc: Any) -> str:
+    """The link target for a document, so the synthesizer can render a clickable citation.
+
+    * Internal knowledge element -> ``{FRONTEND_DOMAIN}/{element_type-plural}/{doc_id}``
+      (plural, except ``code`` stays ``code``) — same scheme as the smart-search frontend.
+    * External (OpenGeoData) -> its own landing ``url`` surfaced in the search payload.
+    Returns "" when no link can be formed (the synthesizer then cites the title in bold).
+    """
+    src = doc.get("document") if isinstance(doc, dict) and isinstance(doc.get("document"), dict) else doc
+    if not isinstance(src, dict):
+        return ""
+    etype = str(src.get("element_type") or src.get("resource-type") or "").strip().lower()
+    if etype == "opengeodata":
+        return str(src.get("url") or "")
+    doc_id = str(src.get("doc_id") or src.get("id") or src.get("_id") or "")
+    if not doc_id:
+        return str(src.get("url") or "")
+    if not etype or etype == "resource":
+        # No usable element type -> only link if the payload already carries a url.
+        return str(src.get("url") or "")
+    plural = etype if etype == "code" else f"{etype}s"
+    base = os.getenv("FRONTEND_DOMAIN", "https://platform.i-guide.io").rstrip("/")
+    return f"{base}/{plural}/{doc_id}"
+
+
 def _format_documents(documents: List[Any], *, limit: int = 8, max_chars: int = 2500) -> str:
     lines: List[str] = []
     for i, doc in enumerate(documents[:limit]):
         doc_id = _doc_field(doc, "doc_id", "id", "_id", default=f"doc-{i}")
         title = _doc_field(doc, "title", "name", "element_type", default="Untitled")
         contents = _doc_field(doc, "contents", "snippet", "text", "abstract", "description")
-        lines.append(f"[{doc_id}] {title}\n{contents[:max_chars]}")
+        url = _element_url(doc)
+        head = f"[{doc_id}] {title}" + (f"\nurl: {url}" if url else "")
+        lines.append(f"{head}\n{contents[:max_chars]}")
     return "\n\n".join(lines) if lines else "(no evidence)"
 
 
