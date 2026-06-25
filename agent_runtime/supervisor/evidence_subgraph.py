@@ -91,15 +91,17 @@ def _element_url(doc: Any) -> str:
 
 
 def _format_documents(documents: List[Any], *, limit: int = 8, max_chars: int = 2500) -> str:
-    lines: List[str] = []
-    for i, doc in enumerate(documents[:limit]):
-        doc_id = _doc_field(doc, "doc_id", "id", "_id", default=f"doc-{i}")
+    # Present each item as title + url + contents. We deliberately do NOT lead with the raw
+    # [doc_id] anymore: showing it trained the synthesizer to cite "[<uuid>]" instead of the
+    # hyperlink Rule 2 asks for. Title + url are the only citation handles the model sees.
+    blocks: List[str] = []
+    for doc in documents[:limit]:
         title = _doc_field(doc, "title", "name", "element_type", default="Untitled")
         contents = _doc_field(doc, "contents", "snippet", "text", "abstract", "description")
         url = _element_url(doc)
-        head = f"[{doc_id}] {title}" + (f"\nurl: {url}" if url else "")
-        lines.append(f"{head}\n{contents[:max_chars]}")
-    return "\n\n".join(lines) if lines else "(no evidence)"
+        head = f"title: {title}" + (f"\nurl: {url}" if url else "")
+        blocks.append(f"{head}\n{contents[:max_chars]}")
+    return "\n\n".join(blocks) if blocks else "(no evidence)"
 
 
 def extract_documents_from_search_evidence(payload: Any) -> List[Dict[str, Any]]:

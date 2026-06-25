@@ -110,4 +110,5 @@ def test_default_compose_uses_llm_and_evidence():
     out = compose("what floods?", DOCS)
     assert out == "grounded answer [b]"
     assert "Evidence:" in captured["prompt"]
-    assert "[a]" in captured["prompt"] and "[b]" in captured["prompt"]
+    # Evidence carries the documents' content (the format cites by title/url, not raw doc_ids).
+    assert "alpha" in captured["prompt"] and "beta" in captured["prompt"]
