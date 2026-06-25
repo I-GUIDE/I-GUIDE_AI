@@ -60,10 +60,10 @@ def _canned_orchestration_result():
 def stub_orchestrator(monkeypatch):
     """Replace the orchestrate-node invocation seam with canned data.
 
-    The orchestrate node (in agent_runtime.orchestrator_graph) calls these
-    functions, so they are patched there.
+    The legacy arm now lives in agent_runtime.legacy.orchestration, which imports these
+    functions into its namespace, so they are patched there.
     """
-    import agent_runtime.orchestrator_graph as og
+    import agent_runtime.legacy.orchestration as lo
 
     # These tests characterize the agents-as-tools orchestrate path; the supervisor
     # path is now the default, so pin it off here.
@@ -81,9 +81,9 @@ def stub_orchestrator(monkeypatch):
     def fake_invoke(*args, **kwargs):
         return _canned_orchestration_result()
 
-    monkeypatch.setattr(og, "collect_orchestration_tools", fake_collect)
-    monkeypatch.setattr(og, "build_orchestrator_agent_executor", fake_build)
-    monkeypatch.setattr(og, "invoke_agent_with_payload_fallback", fake_invoke)
+    monkeypatch.setattr(lo, "collect_orchestration_tools", fake_collect)
+    monkeypatch.setattr(lo, "build_orchestrator_agent_executor", fake_build)
+    monkeypatch.setattr(lo, "invoke_agent_with_payload_fallback", fake_invoke)
     return None
 
 

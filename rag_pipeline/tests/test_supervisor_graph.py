@@ -655,7 +655,7 @@ def test_use_supervisor_false_forces_agents_as_tools(monkeypatch):
     """A per-request use_supervisor=False overrides the default and skips the supervisor."""
     from types import SimpleNamespace
 
-    import agent_runtime.orchestrator_graph as og
+    import agent_runtime.legacy.orchestration as lo
     import agent_runtime.supervisor_graph as sg
     import agent_runtime.graph_runtime as gr
 
@@ -663,10 +663,10 @@ def test_use_supervisor_false_forces_agents_as_tools(monkeypatch):
         raise AssertionError("run_supervisor should NOT be called when use_supervisor=False")
 
     monkeypatch.setattr(sg, "run_supervisor", boom)
-    monkeypatch.setattr(og, "collect_orchestration_tools", lambda **k: [])
-    monkeypatch.setattr(og, "build_orchestrator_agent_executor", lambda **k: object())
+    monkeypatch.setattr(lo, "collect_orchestration_tools", lambda **k: [])
+    monkeypatch.setattr(lo, "build_orchestrator_agent_executor", lambda **k: object())
     monkeypatch.setattr(
-        og, "invoke_agent_with_payload_fallback",
+        lo, "invoke_agent_with_payload_fallback",
         lambda *a, **k: {"messages": [SimpleNamespace(content="agents-as-tools answer", type="ai", tool_calls=[])]},
     )
 

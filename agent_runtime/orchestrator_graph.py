@@ -165,111 +165,21 @@ def build_orchestrator_graph(
         return {"final_answer": answer, "available_agent_names": []}
 
     def orchestrate_node(state: OrchestratorState) -> Dict[str, Any]:
-        query = state.get("query", "")
-        chat_history = state.get("chat_history") or None
-        emit_trace_event(
-            "node_started",
-            {"stage": "orchestrate", "message": "Orchestrator agent started"},
-            agent_role="orchestrator_agent",
-            node="orchestrate",
-        )
+        # Single fork between the two INDEPENDENT paths, resolved via the strategy registry.
+        # Each path owns its entrypoint (agent_runtime.{legacy,supervisor}.orchestration) and
+        # returns the same OrchestratorState key set, so the public contract is path-agnostic.
+        # Per-request override via use_supervisor; global default via AGENT_SUPERVISOR.
+        from agent_runtime.strategy import OrchestrationConfig, get_orchestration_strategy
 
-        # Shared-state supervisor-over-peers graph (search/analyze/code as peers
-        # sharing evidence state). Default on; per-request override via use_supervisor,
-        # global opt-out via AGENT_SUPERVISOR=0.
-        from agent_runtime.supervisor_graph import is_supervisor_enabled
-
-        supervisor_on = use_supervisor if use_supervisor is not None else is_supervisor_enabled()
-        if supervisor_on:
-            from agent_runtime.supervisor_graph import (
-                default_analyze_fn,
-                default_code_fn,
-                default_search_fn,
-                run_supervisor,
-            )
-
-            sup_state = run_supervisor(
-                query,
-                chat_history=chat_history,
-                llm=llm,
-                thread_id=thread_id,
-                search_fn=default_search_fn(
-                    llm=llm,
-                    tool_strategy=tool_strategy,
-                    include_mcp_tools=include_mcp_tools,
-                    mcp_modules=mcp_modules,
-                    enabled_search_methods=enabled_search_methods,
-                    skill_roots=skill_roots,
-                ),
-                analyze_fn=default_analyze_fn(
-                    llm=llm,
-                    include_mcp_tools=include_mcp_tools,
-                    mcp_modules=mcp_modules,
-                    skill_roots=skill_roots,
-                    code_exec=code_exec,
-                    input_file_ids=input_file_ids,
-                ),
-                code_fn=default_code_fn(
-                    llm=llm, skill_roots=skill_roots, code_exec=code_exec,
-                    input_file_ids=input_file_ids,
-                ),
-            )
-            emit_trace_event(
-                "node_completed",
-                {"stage": "orchestrate", "message": "Supervisor graph completed"},
-                agent_role="orchestrator_agent",
-                node="orchestrate",
-            )
-            return {
-                "orchestration_result": sup_state,
-                "final_answer": sup_state.get("final_answer", ""),
-                "available_agent_names": ["search", "analyze", "code"],
-                "audit": sup_state.get("audit") or {},
-            }
-
-        tools = collect_orchestration_tools(
-            query=query,
-            chat_history=chat_history,
-            llm=llm,
-            verbose=verbose,
-            return_intermediate_steps=return_intermediate_steps,
-            tool_strategy=tool_strategy,
-            include_mcp_tools=include_mcp_tools,
-            mcp_modules=mcp_modules,
-            enabled_search_methods=enabled_search_methods,
-            smart_tool_routing=smart_tool_routing,
-            forced_intent=forced_intent,
-            thread_id=thread_id,
-            checkpointer=checkpointer,
-            skill_roots=skill_roots,
+        cfg = OrchestrationConfig(
+            llm=llm, verbose=verbose, return_intermediate_steps=return_intermediate_steps,
+            tool_strategy=tool_strategy, include_mcp_tools=include_mcp_tools, mcp_modules=mcp_modules,
+            enabled_search_methods=enabled_search_methods, smart_tool_routing=smart_tool_routing,
+            forced_intent=forced_intent, thread_id=thread_id, checkpointer=checkpointer,
+            skill_roots=skill_roots, code_exec=code_exec, input_file_ids=input_file_ids,
         )
-        names = [getattr(t, "name", "") for t in tools if getattr(t, "name", "")]
-        orchestrator = build_orchestrator_agent_executor(
-            llm=llm,
-            verbose=verbose,
-            return_intermediate_steps=return_intermediate_steps,
-            tools=tools,
-            checkpointer=checkpointer,
-            skill_roots=skill_roots,
-        )
-        orchestration_result = invoke_agent_with_payload_fallback(
-            orchestrator,
-            query=query,
-            chat_history=chat_history,
-            config=agent_config(child_thread_id(thread_id, "orchestrator")),
-        )
-        final_answer = extract_final_answer(orchestration_result) or ""
-        emit_trace_event(
-            "node_completed",
-            {"stage": "orchestrate", "message": "Orchestrator agent completed"},
-            agent_role="orchestrator_agent",
-            node="orchestrate",
-        )
-        return {
-            "orchestration_result": orchestration_result,
-            "final_answer": final_answer,
-            "available_agent_names": names,
-        }
+        strategy = get_orchestration_strategy(use_supervisor)
+        return strategy(state.get("query", ""), state.get("chat_history") or None, cfg)
 
     builder = StateGraph(OrchestratorState)
     builder.add_node("triage", triage_node)

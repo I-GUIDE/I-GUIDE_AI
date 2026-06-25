@@ -1,0 +1,69 @@
+"""Supervisor-over-peers orchestration entrypoint (the supervisor arm of the fork).
+
+Exposed via the strategy registry (``agent_runtime.strategy``) and called by
+``orchestrator_graph.orchestrate_node`` when the supervisor strategy is selected. Returns
+the same ``OrchestratorState`` key set as the legacy arm so the public response contract is
+path-agnostic.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional
+
+from agent_runtime.streaming_trace import emit_trace_event
+
+
+def run_supervisor_orchestration(query: str, chat_history: Optional[List[Any]], cfg) -> Dict[str, Any]:
+    # Imported at call time so monkeypatched test doubles on agent_runtime.supervisor.graph
+    # (run_supervisor / default_*_fn) are honored, and to keep import-time deps light.
+    from agent_runtime.supervisor.graph import (
+        default_analyze_fn,
+        default_code_fn,
+        default_search_fn,
+        run_supervisor,
+    )
+
+    emit_trace_event(
+        "node_started",
+        {"stage": "orchestrate", "message": "Orchestrator agent started"},
+        agent_role="orchestrator_agent",
+        node="orchestrate",
+    )
+    sup_state = run_supervisor(
+        query,
+        chat_history=chat_history,
+        llm=cfg.llm,
+        thread_id=cfg.thread_id,
+        search_fn=default_search_fn(
+            llm=cfg.llm,
+            tool_strategy=cfg.tool_strategy,
+            include_mcp_tools=cfg.include_mcp_tools,
+            mcp_modules=cfg.mcp_modules,
+            enabled_search_methods=cfg.enabled_search_methods,
+            skill_roots=cfg.skill_roots,
+        ),
+        analyze_fn=default_analyze_fn(
+            llm=cfg.llm,
+            include_mcp_tools=cfg.include_mcp_tools,
+            mcp_modules=cfg.mcp_modules,
+            skill_roots=cfg.skill_roots,
+            code_exec=cfg.code_exec,
+            input_file_ids=cfg.input_file_ids,
+        ),
+        code_fn=default_code_fn(
+            llm=cfg.llm, skill_roots=cfg.skill_roots, code_exec=cfg.code_exec,
+            input_file_ids=cfg.input_file_ids,
+        ),
+    )
+    emit_trace_event(
+        "node_completed",
+        {"stage": "orchestrate", "message": "Supervisor graph completed"},
+        agent_role="orchestrator_agent",
+        node="orchestrate",
+    )
+    return {
+        "orchestration_result": sup_state,
+        "final_answer": sup_state.get("final_answer", ""),
+        "available_agent_names": ["search", "analyze", "code"],
+        "audit": sup_state.get("audit") or {},
+    }
