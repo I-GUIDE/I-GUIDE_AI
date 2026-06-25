@@ -69,6 +69,28 @@ def local_get(doc_id: str, indices: List[str]) -> Tuple[Optional[str], Optional[
     return None, None
 
 
+def local_blocks_for_parent(element_id: str, indices: List[str]) -> List[Tuple[str, Dict[str, Any]]]:
+    """All locally-stored blocks whose parent element is ``element_id`` (sorted by
+    block order). Lets a consumer fetch a whole element by its bare element_id."""
+    found: List[Tuple[str, Dict[str, Any]]] = []
+    for idx in indices:
+        for did, src in _load(idx).items():
+            if did == element_id:
+                continue
+            ex = src.get("extracted") or {}
+            parent = ex.get("parent_doc_id") or (did.split("::", 1)[0] if "::" in did else did)
+            if parent == element_id:
+                found.append((did, src))
+
+    def _order(item: Tuple[str, Dict[str, Any]]) -> int:
+        try:
+            return int(item[0].rsplit("::", 1)[-1])
+        except Exception:
+            return 9999
+
+    return sorted(found, key=_order)
+
+
 def local_all(indices: List[str]) -> List[Tuple[str, str, Dict[str, Any]]]:
     out: List[Tuple[str, str, Dict[str, Any]]] = []
     for idx in indices:

@@ -1,12 +1,10 @@
 ---
 name: chicago-crime-analysis
-description: Use for Chicago crime statistics, community-area aggregation, and crime map workflows.
+description: Use for Chicago crime maps, statistics, and community-area aggregation by reusing the contributed Chicago crime notebook from the knowledge base.
 allowed-tools:
-  - mcp_load_chicago_community_areas
-  - mcp_load_chicago_crime_data
-  - mcp_get_crime_statistics
-  - mcp_count_crimes_per_community
-  - mcp_generate_crime_map
+  - agent_kb_search
+  - get_kb_block
+  - execute_code
 tags:
   - chicago
   - crime
@@ -16,44 +14,20 @@ tags:
 
 # Chicago Crime Analysis
 
-Use this skill when the user asks about recent Chicago crime incidents, crime type summaries, arrest rates, crime counts by community area, or map outputs for crime patterns.
+Use this skill when the user asks about Chicago crime incidents, crime-type summaries, counts by community area, or crime maps. It reuses the contributed Chicago crime notebook's data-access and analysis code from the knowledge base. **Do NOT import any tool name as a Python module** (there is no `chicago_crime_analysis` package); reuse the real source via the knowledge-base tools below.
 
-## Tool Workflow
+## Workflow — reuse the contributed code via the knowledge base
 
-Load this skill at most once per user request. After the required tool outputs are available, stop calling tools and produce the final answer.
+1. Call `agent_kb_search("load chicago crime data community areas")` to find the contributed Chicago crime blocks; note the cited `element_id`.
+2. Call `get_kb_block(<element_id or block doc_id>)` to read the FULL source of the loader/analysis functions — typically `load_chicago_crime_data`, `load_chicago_community_areas`, `filter_dataframe_by_value`, `spatial_join_and_count`. These already contain the real data URLs/APIs (the City of Chicago Socrata API for incidents and the community-area boundary GeoJSON).
+3. In `execute_code`, paste the reused function source verbatim, call it to load the data, then:
+   - **crime-type filter:** keep rows whose category matches the requested type(s);
+   - **counts by community area:** spatially join incidents to community polygons and count;
+   - **map — match the user's words:** a "heat map" / "hotspot" / "density" request → a hexbin or KDE **point-density** map of the incident points (not a choropleth); a "choropleth" / "by community area" / "by region" request → **shaded polygons** of counts per area. Produce the type asked for — do not substitute one for the other — and SAVE it with `plt.savefig('result.png', bbox_inches='tight')` (the sandbox is headless — never rely on `plt.show()`).
+4. Report the result and cite the source `element_id`.
 
-For summary statistics:
+## Answer requirements
 
-1. Call `mcp_load_chicago_crime_data`.
-2. Call `mcp_get_crime_statistics`.
-3. If the user asks about one crime type, pass `crime_type` using the uppercase Chicago `primary_type` value, for example `THEFT`, `BATTERY`, `ROBBERY`, or `NARCOTICS`.
-
-For counts by community area:
-
-1. Call `mcp_load_chicago_community_areas`.
-2. Call `mcp_load_chicago_crime_data`.
-3. Call `mcp_count_crimes_per_community`.
-4. If the user asks about one crime type, pass the same `crime_type` to `mcp_count_crimes_per_community`.
-5. Report the top communities, total counted incidents, and whether a crime type filter was applied.
-
-For maps:
-
-1. If the user asks for an all-crime map, call `mcp_generate_crime_map` directly.
-2. If the user asks for a map filtered to one crime type, first run the filtered community count workflow with `mcp_count_crimes_per_community(crime_type=...)`, then call `mcp_generate_crime_map` with a title that states the filter.
-3. Return the generated `file_id` and `download_url` when available.
-
-## Answer Requirements
-
-- State the time window represented by the crime data if the loader returns a `date_range`.
-- Clarify that incidents are reported crime records from the loaded Chicago data, not all crimes that occurred.
-- Preserve exact community names from tool output.
-- Do not invent map files, file ids, download URLs, counts, or community rankings.
-- If a tool returns an error saying data is not loaded, call the required loader tool and retry the failed step once.
-- If the available tool output already contains the requested ranking, count, statistic, `file_id`, or `download_url`, answer directly instead of calling another agent or repeating tools.
-- Keep the final response concise unless the user asks for a full report.
-
-## Common Requests
-
-- "Which Chicago community has the most theft?" Use the filtered community count workflow with `crime_type="THEFT"`.
-- "Show a map of recent crime by community area." Use `mcp_generate_crime_map` directly.
-- "What is the arrest rate for battery?" Use `mcp_load_chicago_crime_data`, then `mcp_get_crime_statistics(crime_type="BATTERY")`.
+- State the time window the loaded data covers if the source exposes one, and clarify that incidents are reported records, not all crimes that occurred.
+- Reuse the contributed loader verbatim — do not invent data URLs, file ids, counts, or community rankings.
+- If the knowledge base has no Chicago crime source and the user did not upload a dataset, say so plainly instead of fabricating a result.

@@ -76,7 +76,11 @@ def _normalize_agent_chat_request(data: dict) -> dict:
     conversation_name = _coalesce(data.get("conversationName"), data.get("conversation_name"))
     recent_k = _coalesce(data.get("recentK"), data.get("recent_k"))
     tool_strategy = _coalesce(data.get("toolStrategy"), data.get("tool_strategy"), "granular")
-    include_mcp_tools = bool(_coalesce(data.get("includeMcpTools"), data.get("include_mcp_tools"), False))
+    # include_mcp_tools is tri-state: absent (None) falls back to the AGENT_INCLUDE_MCP_TOOLS
+    # env default (ON), so the analyze peer's MCP tools (spatial/data) are available by default.
+    from agent_runtime.langchain_mcp_tools import mcp_tools_enabled
+    _mcp_raw = _coalesce(data.get("includeMcpTools"), data.get("include_mcp_tools"))
+    include_mcp_tools = mcp_tools_enabled() if _mcp_raw is None else bool(_mcp_raw)
     mcp_modules = _coalesce(data.get("mcpModules"), data.get("mcp_modules"))
     enabled_search_methods = _coalesce(data.get("enabledSearchMethods"), data.get("enabled_search_methods"))
     use_persistent_memory = bool(_coalesce(data.get("usePersistentMemory"), data.get("use_persistent_memory"), True))

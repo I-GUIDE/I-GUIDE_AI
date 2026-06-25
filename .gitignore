@@ -59,6 +59,9 @@ MCP_server/generated_notebook_workflows/
 # Agent chat runtime artifacts (uploads, generated outputs, metadata, qgis jobs)
 agent_chat_files/
 
+# Agent eval / generated output artifacts
+outputs/
+
 # Temporary files
 *.tmp
 *.bak

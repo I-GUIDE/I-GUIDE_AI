@@ -49,6 +49,19 @@ def _save_plot_to_file_store(buf: io.BytesIO, filename: str) -> Dict[str, Any]:
 from tools.cache import _dataframe_cache
 
 
+# "violent"/"property" are CATEGORIES spanning several Chicago primary_type values; an
+# exact-match filter on them returns zero rows (the silent all-zero-map bug). Map them to
+# the right value sets so a category query produces a correct map.
+_CRIME_CATEGORIES = {
+    "VIOLENT": {"HOMICIDE", "BATTERY", "ASSAULT", "ROBBERY", "CRIMINAL SEXUAL ASSAULT",
+                "CRIM SEXUAL ASSAULT", "SEX OFFENSE", "HUMAN TRAFFICKING", "KIDNAPPING"},
+    "PROPERTY": {"THEFT", "BURGLARY", "MOTOR VEHICLE THEFT", "CRIMINAL DAMAGE",
+                 "CRIMINAL TRESPASS", "ARSON"},
+}
+_CRIME_CATEGORIES["VIOLENT CRIME"] = _CRIME_CATEGORIES["VIOLENT CRIMES"] = _CRIME_CATEGORIES["VIOLENT"]
+_CRIME_CATEGORIES["PROPERTY CRIME"] = _CRIME_CATEGORIES["PROPERTY CRIMES"] = _CRIME_CATEGORIES["PROPERTY"]
+
+
 @mcp_tool(category="computation")
 def count_crimes_per_community(crime_type: str = None) -> Dict[str, Any]:
     """
@@ -76,9 +89,23 @@ def count_crimes_per_community(crime_type: str = None) -> Dict[str, Any]:
     gdf_polygons = _dataframe_cache['chicago_community_areas']
     gdf_points = _dataframe_cache['chicago_crime_data']
     
-    # Filter by crime type if specified
+    # Filter by crime type if specified — accept a CATEGORY ("violent crime") or an exact
+    # primary_type. A zero-match filter returns an explicit error instead of silently
+    # producing an all-zero map.
     if crime_type and "primary_type" in gdf_points.columns:
-        gdf_points = gdf_points[gdf_points["primary_type"].str.upper() == crime_type.upper()]
+        types_upper = gdf_points["primary_type"].astype(str).str.upper()
+        key = str(crime_type).strip().upper()
+        category = _CRIME_CATEGORIES.get(key)
+        gdf_points = gdf_points[types_upper.isin(category)] if category is not None else gdf_points[types_upper == key]
+        if gdf_points.empty:
+            avail = sorted(set(_dataframe_cache['chicago_crime_data']["primary_type"].astype(str).str.upper()))
+            return {
+                "error": f"crime_type '{crime_type}' matched 0 incidents — not mapping an empty result.",
+                "hint": "Pass an exact primary_type, or a category (" + ", ".join(sorted(_CRIME_CATEGORIES)) + ").",
+                "available_primary_types": avail[:40],
+                "filtered_by": key,
+                "total_crimes": 0,
+            }
     
     # Perform spatial join
     gdf_points = gdf_points.to_crs(gdf_polygons.crs)
@@ -124,28 +151,34 @@ def count_crimes_per_community(crime_type: str = None) -> Dict[str, Any]:
 
 
 @mcp_tool(category="generation")
-def generate_crime_map(title: str = "Crime Counts by Community Area") -> str:
+def generate_crime_map(title: str = "Crime Counts by Community Area", crime_type: str = None) -> Dict[str, Any]:
     """
-    Use this tool to generate, create, or visualize a map of Chicago crime counts by community area.
-    This is the ONLY tool needed — it loads all data and runs the spatial analysis internally.
+    Render a CHOROPLETH of Chicago crime counts by COMMUNITY AREA (shaded polygons), loading
+    and joining the data internally. This is an AREAL choropleth, NOT a point-density "heat
+    map": if the user asked for a heat map / hotspot / kernel-density map of incident
+    locations, use a point-density tool (e.g. kb_point_heatmap on the crime points) instead.
     Do NOT call load_chicago_community_areas, load_chicago_crime_data, or count_crimes_per_community first.
 
     Args:
         title: Title for the map.
+        crime_type: Optional filter — an exact primary_type (e.g. "THEFT") or a category
+            ("violent crime", "property crime"). If it matches no incidents an error is
+            returned instead of an empty map.
 
     Returns:
-        str: Base64-encoded PNG image data URI (data:image/png;base64,...).
+        dict: status + file_id/download_url for the PNG (or an error if the filter matched nothing).
     """
-    from tools.data_tools import load_chicago_community_areas, load_chicago_crime_data
-
-    if 'chicago_community_areas' not in _dataframe_cache:
-        load_chicago_community_areas()
-    if 'chicago_crime_data' not in _dataframe_cache:
-        load_chicago_crime_data()
-    if 'crime_counts_by_community' not in _dataframe_cache:
-        count_crimes_per_community()
+    # Always (re)compute counts for the requested filter so the map matches crime_type and a
+    # zero-match filter surfaces an error rather than rendering a misleading empty map.
+    counts = count_crimes_per_community(crime_type)
+    if isinstance(counts, dict) and counts.get("error"):
+        return counts
 
     gdf = _dataframe_cache['crime_counts_by_community']
+    if "crime_count" not in gdf.columns or int(gdf["crime_count"].sum()) == 0:
+        return {"status": "error",
+                "error": "No crimes matched the request — not rendering an empty map.",
+                "filtered_by": (str(crime_type).upper() if crime_type else None)}
 
     fig, ax = plt.subplots(1, 1, figsize=(12, 12))
     gdf.plot(

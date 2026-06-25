@@ -399,3 +399,52 @@ def test_history_repair_middleware_sanitizes_request():
     result = mw.wrap_model_call(_Req(dangling), handler)
     assert result == "ok"
     assert captured["messages"] == [dangling[0]]  # repaired before model call
+
+
+# ---------------------------------------------------------------------------
+# Supervisor arm contract (the legacy tests pin AGENT_SUPERVISOR=0; this guards
+# the DEFAULT supervisor arm through build_orchestrator_graph end-to-end).
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def stub_supervisor(monkeypatch):
+    """Replace run_supervisor (and the peer-fn builders) with canned data so the
+    supervisor arm of orchestrate_node runs without an LLM/backends.
+
+    orchestrate_node does `from agent_runtime.supervisor_graph import run_supervisor,
+    default_*_fn` at call time, so these are patched on the supervisor_graph module.
+    """
+    import agent_runtime.supervisor_graph as sg
+
+    monkeypatch.setenv("AGENT_SUPERVISOR", "1")
+
+    def fake_run_supervisor(query, **kwargs):
+        return {"final_answer": FINAL_ANSWER, "audit": {}, "evidence": [], "actions": ["search", "done"]}
+
+    monkeypatch.setattr(sg, "run_supervisor", fake_run_supervisor)
+    monkeypatch.setattr(sg, "default_search_fn", lambda **k: (lambda *a, **kw: []))
+    monkeypatch.setattr(sg, "default_analyze_fn", lambda **k: (lambda *a, **kw: {}))
+    monkeypatch.setattr(sg, "default_code_fn", lambda **k: (lambda *a, **kw: {}))
+    return None
+
+
+def test_supervisor_arm_response_contract(stub_supervisor):
+    result = gr.run_agent_query("What datasets exist for floods?")
+    assert "orchestration_result" in result
+    assert "route_trace" in result
+    assert "available_skills" in result
+    assert result.get("final_answer") == FINAL_ANSWER
+    assert isinstance(result.get("thread_id"), str) and result["thread_id"]
+    # supervisor advertises the peer names
+    assert set(result.get("available_agents") or result.get("available_agent_names") or []) >= {"search", "analyze", "code"} \
+        or "search" in str(result.get("route_trace"))
+
+
+def test_supervisor_arm_stream_reaches_completed(stub_supervisor):
+    events = list(gr.stream_agent_query_events("What datasets exist for floods?"))
+    names = [e["event"] for e in events]
+    assert "completed" in names, f"no terminal completed; saw {names}"
+    completed = [e for e in events if e["event"] == "completed"][-1]["data"]
+    assert completed.get("final_answer") == FINAL_ANSWER
+    node_stages = {e["data"].get("stage") for e in events if e["event"] in {"node_started", "node_completed"}}
+    assert "orchestrate" in node_stages

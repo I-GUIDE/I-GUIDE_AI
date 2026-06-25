@@ -65,11 +65,31 @@ _DEP_RE = re.compile(
 )
 
 
+# Heavy frameworks that take minutes to install and are rarely needed for the
+# geospatial/data tasks this sandbox serves. Rejected unless an explicit
+# AGENT_CODE_EXEC_PIP_ALLOW opts them in — this stops an ungrounded request (e.g.
+# "forecast with an LSTM") from burning the whole install budget before the agent
+# can recover. Tune via AGENT_CODE_EXEC_PIP_DENY (comma-separated, replaces this set).
+_DEFAULT_PIP_DENY = {
+    "tensorflow", "tensorflow-gpu", "tensorflow-cpu", "torch", "torchvision",
+    "torchaudio", "jax", "jaxlib", "transformers", "keras", "mxnet", "paddlepaddle",
+}
+
+
+def _pip_denylist() -> set:
+    raw = os.getenv("AGENT_CODE_EXEC_PIP_DENY")
+    if raw is None:
+        return _DEFAULT_PIP_DENY
+    return {x.strip().lower() for x in raw.split(",") if x.strip()}
+
+
 def _sanitize_deps(dependencies: Optional[List[Any]]) -> Tuple[List[str], List[str]]:
-    """Return (allowed, rejected) pip specs. Rejects flags/odd specs; honors allowlist."""
+    """Return (allowed, rejected) pip specs. Rejects flags/odd specs; honors an explicit
+    allowlist (AGENT_CODE_EXEC_PIP_ALLOW), else a denylist of heavy frameworks."""
     if not dependencies:
         return [], []
     allow = {x.strip().lower() for x in (os.getenv("AGENT_CODE_EXEC_PIP_ALLOW") or "").split(",") if x.strip()}
+    deny = _pip_denylist()
     allowed: List[str] = []
     rejected: List[str] = []
     for raw in dependencies:
@@ -77,11 +97,14 @@ def _sanitize_deps(dependencies: Optional[List[Any]]) -> Tuple[List[str], List[s
         if not spec or spec.startswith("-") or any(c.isspace() for c in spec) or not _DEP_RE.match(spec):
             rejected.append(spec)
             continue
+        name = re.split(r"[<>=!~\[]", spec, maxsplit=1)[0].strip().lower()
         if allow:
-            name = re.split(r"[<>=!~\[]", spec, maxsplit=1)[0].strip().lower()
             if name not in allow:
                 rejected.append(spec)
                 continue
+        elif name in deny:
+            rejected.append(spec)
+            continue
         allowed.append(spec)
     return allowed[:MAX_DEPS], rejected
 

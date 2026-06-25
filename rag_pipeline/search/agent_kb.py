@@ -220,28 +220,69 @@ def agent_kb_search(query: str, *, size: int = 8, client=None, embed: bool = Tru
         return {**base, "note": f"agent_kb_search error: {type(exc).__name__}: {exc}"}
 
 
+def _element_block_bundle(element_id: str, blocks: List) -> Dict[str, Any]:
+    """Synthesize a single 'whole-element' doc from its blocks (code concatenated in
+    order), so a bare element_id resolves to the full notebook source for reuse."""
+    parts: List[str] = []
+    block_ids: List[str] = []
+    title = element_id
+    for did, src in blocks:
+        block_ids.append(did)
+        if src.get("title"):
+            title = src["title"]
+        code = ((src.get("extracted") or {}).get("block") or {}).get("code") or ""
+        if code:
+            parts.append(f"# --- {did} ---\n{code}")
+    return {
+        "doc_id": element_id, "found": True, "is_element": True, "block_ids": block_ids,
+        "source": {"doc_id": element_id, "title": title,
+                   "extracted": {"block": {"code": "\n\n".join(parts)}}},
+    }
+
+
 def get_kb_block(doc_id: str, *, client=None) -> Dict[str, Any]:
     """Fetch the FULL stored agent-KB doc by id (incl. extracted.block.code).
 
-    The search/evidence view truncates contents; this lets a consumer pull a block's
-    complete code/method body for verbatim reuse. Local by default; never raises."""
+    Accepts either a block doc_id (``{element_id}::block::{n}``) OR a bare
+    ``element_id`` — in the latter case the element's blocks are concatenated into one
+    whole-notebook source (the consumer often only knows the cited element_id). The
+    search/evidence view truncates contents; this returns the complete code/method body
+    for verbatim reuse. Local by default; never raises."""
     try:
         from extractors import kb_store
         from extractors.indices import all_agent_indices
+        indices = all_agent_indices()
         use_opensearch = client is not None or kb_store.kb_backend() == "opensearch"
         if not use_opensearch:
-            idx, src = kb_store.local_get(doc_id, all_agent_indices())
-            if src is None:
-                return {"doc_id": doc_id, "found": False}
-            return {"doc_id": doc_id, "found": True, "index": idx, "source": src}
+            idx, src = kb_store.local_get(doc_id, indices)
+            if src is not None:
+                return {"doc_id": doc_id, "found": True, "index": idx, "source": src}
+            # bare element_id -> bundle all its blocks
+            blocks = kb_store.local_blocks_for_parent(doc_id, indices)
+            if blocks:
+                return _element_block_bundle(doc_id, blocks)
+            return {"doc_id": doc_id, "found": False}
         client = client or _os_client()
-        for idx in all_agent_indices():
+        for idx in indices:
             try:
                 resp = client.get(index=idx, id=doc_id)
                 if resp.get("found"):
                     return {"doc_id": doc_id, "found": True, "index": idx, "source": resp.get("_source")}
             except Exception:
                 continue
+        # bare element_id -> search blocks whose parent is this element, then bundle
+        try:
+            resp = client.search(index=",".join(indices), body={"size": 300, "query": {"bool": {"should": [
+                {"prefix": {"doc_id": f"{doc_id}::block::"}},
+                {"term": {"extracted.parent_doc_id": doc_id}},
+            ]}}})
+            hits = resp.get("hits", {}).get("hits", []) or []
+            blocks = [(str((h.get("_source") or {}).get("doc_id") or h.get("_id")), h.get("_source") or {}) for h in hits]
+            blocks.sort(key=lambda b: int(b[0].rsplit("::", 1)[-1]) if b[0].rsplit("::", 1)[-1].isdigit() else 9999)
+            if blocks:
+                return _element_block_bundle(doc_id, blocks)
+        except Exception:
+            pass
         return {"doc_id": doc_id, "found": False}
     except Exception as exc:
         return {"doc_id": doc_id, "found": False, "note": f"{type(exc).__name__}: {exc}"}

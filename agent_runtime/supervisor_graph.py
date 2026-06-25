@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any, Callable, Dict, List, Optional, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -79,6 +80,12 @@ ANALYSIS_WORKFLOW_PROMPT = (
     "Actually CALL the tools to compute results — do not merely describe them. Use the "
     "provided evidence for context. Report the concrete results/artifacts you produced; "
     "a separate step composes the final user-facing answer.\n"
+    "MATCH THE VISUALIZATION TO WHAT THE USER ASKED FOR. A 'heat map' / 'hotspot' / "
+    "'density' map means a POINT-DENSITY surface of the incident locations (hexbin or "
+    "kernel density — e.g. kb_point_heatmap on the points), NOT a choropleth. A "
+    "'choropleth' / 'by community area' / 'by region' / 'rate' map means SHADED POLYGONS. "
+    "Produce the exact type the user named; if you can only make the other type, say so "
+    "explicitly rather than passing it off as what was requested.\n"
     "If you need evidence from the knowledge base, prior results, or another capability "
     "before you can run the analysis, call request_capability(capability=..., reason=...) "
     "instead of guessing — the supervisor will fulfill the request and re-run you.\n"
@@ -98,7 +105,9 @@ CODE_PEER_PROMPT = (
     "You are CodeAgent. Produce practical, runnable code with a short `Dependencies:` "
     "section. Ground domain facts only on the provided evidence; do not invent APIs or "
     "sources.\n"
-    "If an execute_code tool is available, RUN and DEBUG your code with it: execute the "
+    "If an execute_code tool is available, you MUST RUN your code with it — never return "
+    "code as text without executing it. An answer that only describes or pastes code without "
+    "running it (and producing the requested result/artifact) is a FAILURE. Execute the "
     "code, read stdout/stderr, fix any errors, and re-run until it works — then report the "
     "final working code and its output. If your code needs third-party packages, pass them "
     "via execute_code's `dependencies` argument (e.g. dependencies=[\"numpy\",\"pandas\"]); "
@@ -109,7 +118,10 @@ CODE_PEER_PROMPT = (
     "When you produce a plot/figure, SAVE it to a file with matplotlib "
     "`plt.savefig('result.png', bbox_inches='tight')` — the headless sandbox cannot "
     "display windows, so do NOT rely on `plt.show()`; the saved image is returned as a "
-    "downloadable artifact.\n"
+    "downloadable artifact. MATCH THE MAP TYPE TO THE REQUEST: a 'heat map'/'hotspot'/"
+    "'density' map is a point-density surface (hexbin/`hexbin`/KDE of the incident points), "
+    "while a 'choropleth'/'by area or region'/'rate' map is shaded polygons; produce the "
+    "type the user named and title it accordingly.\n"
     "For an UPLOADED vector dataset / shapefile (e.g. Census TIGER), call inspect_vector "
     "first to learn its CRS, columns, and geometry type before writing code, and use "
     "plot_vector / vector_to_geojson when a map or export is enough. For an EXTRACTED "
@@ -120,7 +132,11 @@ CODE_PEER_PROMPT = (
     "When the evidence references ingested knowledge-base blocks (by doc_id), call "
     "get_kb_block(doc_id) to read the FULL source of a referenced function/notebook and "
     "REUSE it verbatim — including real data-loading URLs/APIs — instead of stubbing "
-    "loaders or inventing local file paths. You may also agent_kb_search for more.\n"
+    "loaders or inventing local file paths. You may also agent_kb_search for more. "
+    "NEVER write an `import` for a tool or skill name (there is no importable module for "
+    "a tool/skill, e.g. no `chicago_crime_analysis` package): a referenced capability is "
+    "either an available tool you call directly, or source you reconstruct via "
+    "get_kb_block + execute_code.\n"
     "If you need evidence from the knowledge base, prior analysis results, or another "
     "capability before you can write correct code, call request_capability(capability=..., "
     "reason=...) instead of guessing — the supervisor will fulfill it and re-run you. "
@@ -345,6 +361,85 @@ def _apply_grounding_caveat(answer: str, audit: Optional[Dict[str, Any]]) -> str
     return f"{answer}\n\n---\n\n{note}" if (answer or "").strip() else note
 
 
+_ARTIFACT_CLAIM_MARKERS = (
+    "generat", "creat", "produc", "render", "successfully", "download",
+    "available", "you can view", "here is the", "has been",
+)
+# When the auditor's OWN reason concedes the claim is fine, the issue is a self-contradicting
+# false positive — drop it, unless the reason also carries a genuine contradiction marker.
+_GROUNDED_REASON_MARKERS = (
+    "is grounded", "are grounded", "claim is grounded", "is fully grounded", "fully grounded",
+    "is supported", "are supported", "execution record supports", "record supports",
+    "is correct", "is accurate", "is consistent", "rather than a full hallucination",
+    "matches the execution", "matches the record", "this claim is grounded",
+)
+_CONTRADICTION_MARKERS = (
+    "not supported", "not grounded", "unsupported", "no evidence", "no basis", "no support",
+    "fabricat", "invent", "made up", "hallucinat", "unverified", "incorrect", "is wrong",
+    "does not match", "doesn't match", "cannot be", "can't be",
+)
+
+
+def _claim_numbers(text: str) -> List[str]:
+    """Significant (3+ digit) numbers in a claim, comma-normalized for record matching."""
+    return [m.replace(",", "") for m in re.findall(r"\d[\d,]{2,}", text or "")]
+
+
+def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
+                                    artifacts: List[Dict[str, str]],
+                                    execution_context: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """Deterministic override of LLM-auditor false positives. Drops an audit issue when it:
+    (1) merely disputes artifact generation/availability and an artifact WAS produced,
+    (2) disputes a numeric value that actually appears in the execution record, or
+    (3) carries a reason that itself concedes the claim is grounded/correct (and no genuine
+    contradiction marker). The verdict is cleared if no substantive issues remain. Genuine
+    unsupported claims (a wrong statistic, an invented finding) are preserved."""
+    if not _audit_flagged(audit):
+        return audit
+    issues = (audit or {}).get("issues") or []
+    blob = ""
+    if execution_context is not None:
+        try:
+            blob = json.dumps(execution_context, default=str)
+        except Exception:
+            blob = str(execution_context)
+        blob = blob.replace(",", "")
+    kept = []
+    for it in issues:
+        claim = str((it or {}).get("claim") or "").lower()
+        reason = str((it or {}).get("reason") or "").lower()
+        if artifacts and any(m in claim for m in _ARTIFACT_CLAIM_MARKERS):
+            continue  # (1) artifact dispute, but an artifact was produced
+        if any(g in reason for g in _GROUNDED_REASON_MARKERS) and not any(c in reason for c in _CONTRADICTION_MARKERS):
+            continue  # (3) the auditor's own reason concedes grounding
+        nums = _claim_numbers(claim)
+        if nums and blob and all(n in blob for n in nums):
+            continue  # (2) every disputed number is present in the execution record
+        kept.append(it)
+    if not kept:
+        return {"hallucination_detected": False, "severity": "none", "issues": [],
+                "summary": "Grounded: flagged claims are supported by the produced artifact(s) and the execution record."}
+    return {**(audit or {}), "issues": kept}
+
+
+def _has_grounding(evidence: Any, analysis_results: Any, code_result: Any,
+                   artifacts: List[Dict[str, str]]) -> bool:
+    """True if the run has ANY real basis for an answer: retrieved evidence, a produced
+    artifact, or a peer that returned actual content. Used to refuse fabricating an answer
+    when nothing was retrieved or produced (e.g. the search backend is down / empty KB)."""
+    if evidence or artifacts:
+        return True
+    for r in (analysis_results, code_result):
+        if isinstance(r, dict):
+            if str(r.get("answer") or r.get("summary") or "").strip():
+                return True
+            if r.get("tool_results") or r.get("file_id") or r.get("artifacts"):
+                return True
+        elif r:
+            return True
+    return False
+
+
 _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".avif")
 
 
@@ -467,6 +562,16 @@ def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
             parsed = _extract_json_object(text)
             nxt = str((parsed or {}).get("next") or "").strip().lower() if isinstance(parsed, dict) else ""
             if nxt in ALLOWED_ACTIONS:
+                # Surface the model's stated rationale as a (detail-tier) trace event.
+                # The decider contract returns only the action string, so without this
+                # the 'reason' the LLM produced would be discarded.
+                reason = str((parsed or {}).get("reason") or "").strip() if isinstance(parsed, dict) else ""
+                emit_trace_event(
+                    "supervisor_decision",
+                    {"stage": "supervisor", "next": nxt, "reason": reason,
+                     "message": nxt + (f" — {reason}" if reason else "")},
+                    node="supervisor",
+                )
                 return nxt
         except Exception:
             pass
@@ -762,7 +867,13 @@ def build_supervisor_graph(
         #  - ANY capability already run the max number of times
         def _dead(n):
             cap = n.get("capability")
-            if cap == "search" and _search_exhausted(state):
+            # Unknown capability → drop just this request; never let it terminate the
+            # whole run (routing an unknown cap to "done" would discard the queue).
+            if cap not in _CAPABILITIES:
+                return True
+            # Peer-requested re-search dies only at the hard attempt cap — a single empty
+            # result must NOT permanently close search (allows a narrowed re-try).
+            if cap == "search" and state.get("search_attempts", 0) >= _max_searches():
                 return True
             return actions.count(cap) >= _max_peer_runs()
         needs = [n for n in needs if not _dead(n)]
@@ -854,16 +965,40 @@ def build_supervisor_graph(
     def synthesize_node(state: SupervisorState) -> Dict[str, Any]:
         q = state.get("query", "")
         evidence = state.get("evidence") or []
+        ar, cr = state.get("analysis_results"), state.get("code_result")
+        artifacts = _collect_image_artifacts(ar, cr)
         emit_trace_event("node_started", {"stage": "synthesize", "message": "Composing answer"}, node="synthesize")
-        answer = do_synthesize(q, evidence, state.get("analysis_results"), state.get("code_result"), state.get("chat_history"))
-        audit = audit_answer_grounding(q, answer, evidence, llm=llm) if (do_audit and (answer or "").strip()) else {}
-        # Act on the verdict: a flagged audit appends a user-visible caveat to the
-        # answer (so an ungrounded answer never ships silently).
-        final = _apply_grounding_caveat(answer, audit)
-        # Embed any produced image artifacts (maps/plots) inline so they render in the
-        # final answer markdown, even when detail (tool_result) events are gated off.
-        final = _append_image_embeds(final, _collect_image_artifacts(
-            state.get("analysis_results"), state.get("code_result")))
+        if not _has_grounding(evidence, ar, cr, artifacts):
+            # Nothing was retrieved or produced (e.g. the search backend is down or the KB
+            # has no match). Return a deterministic honest message rather than letting the
+            # synthesis LLM fabricate an answer from prior knowledge.
+            final = ("I couldn't find any supporting evidence for this request — the search "
+                     "service may be unavailable or the knowledge base has no matching content, "
+                     "and no analysis or code step produced a result. I won't guess; please "
+                     "rephrase or narrow the request, or try again shortly.")
+            audit = {}
+        else:
+            answer = do_synthesize(q, evidence, ar, cr, state.get("chat_history"))
+            # Artifacts + tool outputs are first-class grounding: pass the execution record
+            # so a genuinely-produced map/file/count is not flagged as hallucination.
+            audit = audit_answer_grounding(
+                q, answer, evidence, llm=llm,
+                execution_context={"analysis_results": ar, "code_result": cr, "artifacts": artifacts},
+            ) if (do_audit and (answer or "").strip()) else {}
+            # Deterministic reconciliation: produced artifacts + the execution record are
+            # ground truth, so the LLM auditor can't false-flag a genuinely-generated
+            # map/file or a number/method it actually computed.
+            audit = _reconcile_audit_with_artifacts(
+                audit, artifacts,
+                execution_context={"analysis_results": ar, "code_result": cr, "artifacts": artifacts})
+            # Act on the verdict: a flagged audit appends a user-visible caveat to the answer.
+            final = _apply_grounding_caveat(answer, audit)
+            # Embed produced image artifacts (maps/plots) inline so they render in markdown.
+            final = _append_image_embeds(final, artifacts)
+            if not (final or "").strip():
+                # Never ship an empty answer with a success status.
+                final = ("I wasn't able to produce an answer for this request. Please try "
+                         "rephrasing it or adding more detail.")
         # Surface the verdict as its own event so clients can show grounded/flagged.
         if audit:
             emit_trace_event(

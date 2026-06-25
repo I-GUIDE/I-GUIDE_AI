@@ -76,15 +76,25 @@ _TRACE_STATE: ContextVar[Optional[_TraceState]] = ContextVar("agent_stream_trace
 _TRACE_AGENT: ContextVar[str] = ContextVar("agent_stream_trace_agent", default="agent")
 
 
-def _short_text(value: Any, *, limit: int = 1200) -> str:
+# Detail-tier text/JSON truncation. Defaults preserve production behavior; a full-trace
+# capture run can raise them via AGENT_TRACE_TEXT_LIMIT / AGENT_TRACE_JSON_LIMIT (read at
+# import, so set the env before importing this module).
+_TEXT_LIMIT = int(os.environ.get("AGENT_TRACE_TEXT_LIMIT") or 1200)
+_JSON_LIMIT = int(os.environ.get("AGENT_TRACE_JSON_LIMIT") or 3000)
+
+
+def _short_text(value: Any, *, limit: Optional[int] = None) -> str:
     if value is None:
         return ""
+    limit = _TEXT_LIMIT if limit is None else limit
     text = value if isinstance(value, str) else str(value)
     text = " ".join(text.split())
     return text if len(text) <= limit else f"{text[:limit]}..."
 
 
-def _json_safe(value: Any, *, limit: int = 3000) -> Any:
+def _json_safe(value: Any, *, limit: Optional[int] = None) -> Any:
+    if limit is None:
+        limit = _JSON_LIMIT
     try:
         text = json.dumps(value, ensure_ascii=True, default=str)
     except Exception:

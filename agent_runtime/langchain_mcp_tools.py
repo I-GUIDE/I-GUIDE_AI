@@ -195,6 +195,44 @@ def _remote_mcp_url() -> str:
     return f"{url.rstrip('/')}/" if url.rstrip("/").endswith("/mcp") else url
 
 
+def mcp_tools_enabled() -> bool:
+    """Default for include_mcp_tools when a request does not specify it. ON by default;
+    set AGENT_INCLUDE_MCP_TOOLS=0/false to disable (e.g. a deployment with no MCP tools)."""
+    return str(os.getenv("AGENT_INCLUDE_MCP_TOOLS", "1")).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _allowed_remote_tool_names(include_modules: Optional[List[str]]) -> Optional[set]:
+    """The set of ``mcp_<name>`` tool names belonging to ``include_modules``, computed by
+    importing those tool modules locally. Used to SCOPE the remote tool list (the live
+    MCP server returns every tool; ``include_modules`` otherwise only filtered the local
+    fallback). Returns None when no scoping is requested or the modules can't be resolved
+    (so the caller keeps the full list rather than dropping everything)."""
+    if not include_modules:
+        return None
+    try:
+        _ensure_mcp_import_path()
+        _ensure_server_stub()
+    except Exception:
+        return None
+    names: set = set()
+    for module_name in include_modules:
+        try:
+            if module_name == "image_tools":
+                _ensure_fastapi_stub()
+                module = importlib.import_module(f"tools.{module_name}")
+                for t in _make_image_tools(module):
+                    if getattr(t, "name", ""):
+                        names.add(t.name)
+            else:
+                module = importlib.import_module(f"tools.{module_name}")
+                for func in _iter_mcp_functions(module):
+                    if getattr(func, "__name__", ""):
+                        names.add(f"mcp_{func.__name__}")
+        except Exception as exc:
+            logger.warning("MCP scoping: could not enumerate module %s: %s", module_name, exc)
+    return names or None
+
+
 def _json_schema_type(schema: Dict[str, Any]) -> Type[Any]:
     schema_type = schema.get("type")
     if isinstance(schema_type, list):
@@ -337,9 +375,12 @@ def _make_remote_mcp_tools(url: str) -> List[Any]:
         ) from exc
 
     try:
-        remote_tools = asyncio.run(_remote_mcp_list_tools_async(url))
+        timeout_s = float(os.getenv("MCP_CONNECT_TIMEOUT", "8"))
+        remote_tools = asyncio.run(asyncio.wait_for(_remote_mcp_list_tools_async(url), timeout=timeout_s))
     except Exception as exc:
-        logger.warning("Remote MCP unavailable at %s: %s", url, exc)
+        # Unreachable OR stalled (TCP-accepted but unresponsive) server → degrade to no
+        # remote tools instead of blocking the peer build. Local-import fallback follows.
+        logger.warning("Remote MCP unavailable/timed out at %s: %s", url, exc)
         return []
 
     tools: List[Any] = []
@@ -501,6 +542,14 @@ def make_langchain_mcp_tools(
 
     remote_tools = _make_remote_mcp_tools(remote_url)
     if remote_tools:
+        # Scope to the requested modules — the live MCP server returns ALL tools, so without
+        # this the analyze peer's include_modules=["spatial_analysis_tools"] would be ignored
+        # and it would receive the entire remote tool surface (latency + mis-selection).
+        allowed = _allowed_remote_tool_names(include_modules)
+        if allowed:
+            scoped = [t for t in remote_tools if getattr(t, "name", "") in allowed]
+            if scoped:
+                remote_tools = scoped
         if ttl > 0:
             with _mcp_cache_lock:
                 _mcp_tool_cache[cache_key] = (time.monotonic(), list(remote_tools))

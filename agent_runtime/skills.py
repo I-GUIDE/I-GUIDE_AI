@@ -336,8 +336,13 @@ class SkillRegistry:
             "instructions": body,
             "resources": self.list_resources(skill),
             "usage": (
-                "Use these instructions as task-specific workflow guidance. "
-                "To inspect a listed resource, call load_skill again with resource_path."
+                "Use these instructions as task-specific workflow guidance, adapted to the tools "
+                "YOU actually have. Only call tools from the skill's allowed_tools that appear in "
+                "your own tool list. If the skill references a tool you do NOT have, do not import "
+                "its name as a Python module and do not claim you cannot proceed — instead "
+                "reconstruct that step from the knowledge base: call agent_kb_search / get_kb_block "
+                "to read the relevant function or notebook source and reuse it verbatim inside "
+                "execute_code. To inspect a listed resource, call load_skill again with resource_path."
             ),
         }
 
@@ -495,8 +500,11 @@ def make_skill_tools(*, skill_roots: Optional[Sequence[str | Path]] = None) -> L
             func=load_skill,
             name="load_skill",
             description=(
-                "Load instructions for a relevant local agent skill by skill_name, "
-                "or load a listed skill resource by also passing resource_path. "
+                "Load instructions for a relevant local agent skill by skill_name — ONLY when a "
+                "listed skill's description clearly matches THIS request. Do NOT load an unrelated "
+                "or place/topic-specific skill that doesn't fit the task (e.g. a Chicago-crime "
+                "skill for a non-crime or non-Chicago request); if none fit, don't call this. "
+                "You may also load a listed skill resource by passing resource_path. "
                 "Call this at most once per skill per user request; after it returns status ok "
                 "or already_loaded, use the loaded instructions and do not call load_skill for "
                 "the same skill again. "
