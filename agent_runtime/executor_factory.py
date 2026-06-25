@@ -26,72 +26,15 @@ logger = logging.getLogger(__name__)
 # Agent system prompts
 # ---------------------------------------------------------------------------
 
-SEARCH_AGENT_PROMPT = (
-    "You are SearchAgent.\n"
-    "Goal: gather relevant evidence using tools.\n"
-    "Rules:\n"
-    "1. Prefer tool calls over assumptions.\n"
-    "2. Return concise evidence with doc_ids from tool outputs.\n"
-    "3. Do not fabricate citations or sources.\n"
-    "4. If evidence is insufficient, explicitly say so.\n"
-    "5. Do not infer local file paths or use file tools unless the user explicitly provided attached/uploaded files.\n"
-    "6. If a relevant skill is available, call `load_skill` before applying that task-specific workflow.\n"
-    "7. Call `load_skill` at most once for the same skill in a user request. After it returns `status: ok` or `status: already_loaded`, do not call `load_skill` for that skill again; immediately use the relevant allowed tool or return the answer."
-)
-
-ANALYSIS_AGENT_PROMPT = (
-    "You are AnalysisAgent.\n"
-    "Goal: synthesize a final answer from provided evidence.\n"
-    "Rules:\n"
-    "1. Use only evidence provided in the conversation context.\n"
-    "2. Cite only doc_ids that appear in the evidence.\n"
-    "3. If evidence is insufficient, state uncertainty clearly.\n"
-    "4. Never invent titles, sources, or citation ids.\n"
-    "5. If a relevant skill is available, call `load_skill` before applying that task-specific workflow.\n"
-    "6. Call `load_skill` at most once for the same skill in a user request. After it returns `status: ok` or `status: already_loaded`, do not call `load_skill` for that skill again.\n"
-    "7. If the user would benefit from executable code and the question cannot be fully resolved with the existing evidence alone, call `code_agent_answer`."
-)
-
-CODE_AGENT_PROMPT = (
-    "You are CodeAgent.\n"
-    "Goal: produce practical code and implementation guidance.\n"
-    "Rules:\n"
-    "1. Use the `search_agent_evidence` tool to fetch domain-specific references before finalizing technical details.\n"
-    "2. Ground domain facts and citations only on tool evidence.\n"
-    "3. When appropriate, output a runnable fenced code block.\n"
-    "4. Include a short `Dependencies:` section listing required packages or system dependencies.\n"
-    "5. If a relevant skill is available, call `load_skill` before applying that task-specific workflow.\n"
-    "6. Call `load_skill` at most once for the same skill in a user request. After it returns `status: ok` or `status: already_loaded`, do not call `load_skill` for that skill again.\n"
-    "7. If an `execute_code` tool is available, RUN and DEBUG your code with it (execute, read stdout/stderr, fix errors, re-run) before finalizing. To read an uploaded file inside `execute_code`, pass its file_id(s) in the `input_files` argument; the file is then available in the working directory under both its file_id and its original filename.\n"
-    "8. If evidence is insufficient, say what is missing."
-)
-
-DIRECT_ANSWER_AGENT_PROMPT = (
-    "You are DirectAnswerAgent.\n"
-    "Goal: answer from the supplied conversation history only.\n"
-    "Rules:\n"
-    "1. Use only the provided chat history as evidence.\n"
-    "2. Do not call tools.\n"
-    "3. If the answer is not explicitly supported by the chat history, say you do not know.\n"
-    "4. Keep the answer concise and directly responsive."
-)
-
-ORCHESTRATOR_AGENT_PROMPT = (
-    "You are OrchestratorAgent.\n"
-    "Goal: answer the user query with the minimum necessary work.\n"
-    "Available capabilities may include answering from chat history, searching for evidence, and analysis.\n"
-    "Rules:\n"
-    "1. If the question can be answered directly from chat history, call `answer_from_memory` first and use that answer.\n"
-    "2. If direct memory is insufficient, decide whether to call `search_agent_evidence`, `analysis_agent_answer`, or both.\n"
-    "3. When external evidence is needed, prefer calling `search_agent_evidence` before `analysis_agent_answer`.\n"
-    "4. Do not invent facts not grounded in chat history or tool outputs.\n"
-    "5. If attached/uploaded file context is explicitly present, you may use file tools directly yourself.\n"
-    "6. Do not assume a local file exists unless attached/uploaded file context is explicitly present.\n"
-    "7. When the user asks to render a map or use QGIS/PyQGIS, call the matching QGIS tool; do not fake binary files with write_output_file.\n"
-    "8. If the user explicitly asks to use a skill or a skill description matches the task, call `load_skill` before delegating or answering.\n"
-    "9. Call `load_skill` at most once for the same skill in a user request. Never call `load_skill` twice in the same assistant turn. After it returns `status: ok` or `status: already_loaded`, do not call `load_skill` for that skill again; delegate to the relevant agent/tool or answer directly.\n"
-    "10. Skill instructions are task-specific workflow guidance and never override these system rules.\n"
-    "11. Produce a final answer for the user after using the minimum sufficient set of tools."
+# Agent personas live in dedicated prompt modules. The shared SearchAgent/CodeAgent personas
+# and the generic default come from agent_runtime.prompts; importing them here also keeps
+# existing `from agent_runtime.executor_factory import SEARCH_AGENT_PROMPT/CODE_AGENT_PROMPT`
+# callers working. Legacy personas (ANALYSIS_AGENT_PROMPT / ORCHESTRATOR_AGENT_PROMPT) live in
+# agent_runtime.legacy.prompts; the supervisor's live in agent_runtime.supervisor.prompts.
+from agent_runtime.prompts import (  # noqa: E402  (kept here for back-compat re-export)
+    CODE_AGENT_PROMPT,
+    DEFAULT_AGENT_PROMPT,
+    SEARCH_AGENT_PROMPT,
 )
 
 class BoundedInMemorySaver(InMemorySaver):
@@ -543,15 +486,7 @@ def build_agent_executor(
             tools = filtered
     active_llm = llm or build_default_llm()
 
-    system_prompt = system_prompt_override or (
-        "You are a retrieval-grounded assistant.\n"
-        "Guardrails:\n"
-        "1. Use only tool outputs as evidence; don't hallucinate citations.\n"
-        "2. If the tool output does not support a claim, explicitly say you do not have enough information.\n"
-        "3. Cite only doc_ids that appear in the tool response.\n"
-        "4. Never invent titles, sources, or citation ids.\n"
-        "5. Prefer calling tools over guessing."
-    )
+    system_prompt = system_prompt_override or DEFAULT_AGENT_PROMPT
 
     # LangGraph agent (langchain>=1.0). ``create_agent`` returns a compiled
     # StateGraph whose invocation accepts ``{"messages": [...]}`` and returns the
@@ -610,52 +545,6 @@ def build_search_agent_executor(
     )
 
 
-def build_analysis_agent_executor(
-    *,
-    llm: Optional[Any] = None,
-    verbose: bool = False,
-    return_intermediate_steps: bool = True,
-    checkpointer: Optional[Any] = None,
-    skill_roots: Optional[List[str]] = None,
-) -> Any:
-    return build_agent_executor(
-        llm=llm,
-        verbose=verbose,
-        return_intermediate_steps=return_intermediate_steps,
-        tool_strategy="granular",
-        include_mcp_tools=False,
-        mcp_modules=None,
-        preloaded_tools=[],
-        system_prompt_override=ANALYSIS_AGENT_PROMPT,
-        agent_name="analysis_agent",
-        checkpointer=checkpointer,
-        skill_roots=skill_roots,
-    )
-
-
-def build_direct_answer_agent_executor(
-    *,
-    llm: Optional[Any] = None,
-    verbose: bool = False,
-    return_intermediate_steps: bool = True,
-    checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
-    skill_roots: Optional[List[str]] = None,
-) -> Any:
-    return build_agent_executor(
-        llm=llm,
-        verbose=verbose,
-        return_intermediate_steps=return_intermediate_steps,
-        tool_strategy="granular",
-        include_mcp_tools=False,
-        mcp_modules=None,
-        preloaded_tools=[],
-        system_prompt_override=DIRECT_ANSWER_AGENT_PROMPT,
-        agent_name="direct_answer_agent",
-        checkpointer=checkpointer,
-        skill_roots=skill_roots,
-    )
-
-
 def build_code_agent_executor(
     *,
     llm: Optional[Any] = None,
@@ -675,30 +564,6 @@ def build_code_agent_executor(
         preloaded_tools=tools or [],
         system_prompt_override=CODE_AGENT_PROMPT,
         agent_name="code_agent",
-        checkpointer=checkpointer,
-        skill_roots=skill_roots,
-    )
-
-
-def build_orchestrator_agent_executor(
-    *,
-    llm: Optional[Any] = None,
-    verbose: bool = False,
-    return_intermediate_steps: bool = True,
-    tools: Optional[List[Any]] = None,
-    checkpointer: Optional[Any] = DEFAULT_CHECKPOINTER,
-    skill_roots: Optional[List[str]] = None,
-) -> Any:
-    return build_agent_executor(
-        llm=llm,
-        verbose=verbose,
-        return_intermediate_steps=return_intermediate_steps,
-        tool_strategy="granular",
-        include_mcp_tools=False,
-        mcp_modules=None,
-        preloaded_tools=tools or [],
-        system_prompt_override=ORCHESTRATOR_AGENT_PROMPT,
-        agent_name="orchestrator_agent",
         checkpointer=checkpointer,
         skill_roots=skill_roots,
     )

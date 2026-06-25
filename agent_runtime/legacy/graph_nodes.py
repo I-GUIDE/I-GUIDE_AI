@@ -10,18 +10,17 @@ import json
 from typing import Any, Dict, List, Optional, Sequence
 
 from agent_runtime.executor_factory import (
-    ANALYSIS_AGENT_PROMPT,
     DEFAULT_CHECKPOINTER,
     agent_config,
     build_agent_executor,
     build_code_agent_executor,
     build_default_llm,
-    build_orchestrator_agent_executor,
     build_search_agent_executor,
     child_thread_id,
     invoke_agent_with_payload_fallback,
     resolve_thread_id,
 )
+from agent_runtime.legacy.prompts import ANALYSIS_AGENT_PROMPT
 from agent_runtime.intent_classifier import (
     classify_intent,
     chat_history_preview,

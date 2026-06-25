@@ -110,14 +110,14 @@ def test_triage_fast_paths_trivial_queries():
 
 
 def test_fast_path_answers_without_orchestrator(monkeypatch):
-    import agent_runtime.orchestrator_graph as og
+    import agent_runtime.strategy as strat
 
-    # If the orchestrate path were taken, this would blow up — proving the
-    # trivial query was fast-pathed.
-    def explode(**kwargs):
+    # orchestrate_node resolves the path via the strategy registry; if it ran, this
+    # blows up — proving the trivial query was fast-pathed and never orchestrated.
+    def explode(*args, **kwargs):
         raise AssertionError("orchestrate path must not run for a greeting")
 
-    monkeypatch.setattr(og, "collect_orchestration_tools", explode)
+    monkeypatch.setattr(strat, "get_orchestration_strategy", explode)
 
     result = gr.run_agent_query("hi", llm=_FakeLLM("Hello! I'm the I-GUIDE assistant."))
     assert result["final_answer"].startswith("Hello!")
