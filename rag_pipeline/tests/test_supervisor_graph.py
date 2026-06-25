@@ -23,7 +23,7 @@ DOCS = [
 
 def _fake_llm(prompt: str) -> str:
     low = prompt.lower()
-    if "auditing a retrieval-augmented answer" in low:
+    if "you are auditing" in low:
         return json.dumps({"hallucination_detected": False, "severity": "none", "issues": [], "summary": "grounded"})
     if "relevance judge" in low:
         return json.dumps({"ranking": [
@@ -145,7 +145,9 @@ def test_search_not_repeated_when_it_returns_nothing():
     )
     assert calls["search"] == 1            # ran once, then stopped (not looped)
     assert state["actions"][-1] == "done"
-    assert state["final_answer"] == "ans"
+    # nothing retrieved -> the no-grounding guard returns an honest refusal (the injected
+    # synthesize_fn is intentionally bypassed) rather than fabricating an answer.
+    assert "couldn't find" in state["final_answer"].lower()
 
 
 def test_exhausted_search_requests_are_dropped_and_loop_terminates():
@@ -169,7 +171,7 @@ def test_exhausted_search_requests_are_dropped_and_loop_terminates():
         search_fn=search_fn, analyze_fn=analyze_fn, synthesize_fn=lambda *a: "final",
         do_rerank=False, do_audit=False,
     )
-    assert calls["search"] == 1                 # search not hammered
+    assert calls["search"] <= 2                 # bounded by AGENT_SUPERVISOR_MAX_SEARCHES (not hammered)
     assert calls["analyze"] <= 3                # per-peer run cap honored
     assert len(state["actions"]) < state["max_steps"] + 1  # terminated before the hard cap
     assert state["final_answer"] == "final"
@@ -458,10 +460,11 @@ def test_orchestrate_uses_supervisor_by_default(monkeypatch):
 
 def _audit_llm(*, flagged: bool):
     def llm(prompt: str) -> str:
-        if "auditing a retrieval-augmented answer" in prompt.lower():
+        if "you are auditing" in prompt.lower():
             if flagged:
                 return json.dumps({"hallucination_detected": True, "severity": "high",
-                                   "issues": ["claim X unsupported"], "summary": "claim X unsupported"})
+                                   "issues": [{"claim": "claim X", "reason": "unsupported by the evidence"}],
+                                   "summary": "claim X unsupported"})
             return json.dumps({"hallucination_detected": False, "severity": "none", "issues": [], "summary": "grounded"})
         return "x"
     return llm
@@ -735,3 +738,27 @@ def test_format_documents_emits_url_line(monkeypatch):
     from agent_runtime.supervisor.evidence_subgraph import _format_documents
     out = _format_documents([{"doc_id": "abc", "title": "Flood DS", "element_type": "dataset", "contents": "d"}])
     assert "url: https://platform.i-guide.io/datasets/abc" in out
+
+
+# --- audit precision: only HIGH severity warns; reconcile is crash-proof ------
+
+def test_medium_severity_does_not_warn_user():
+    """Reasonable-elaboration false positives (rated medium by a strict judge) no longer
+    surface a caveat — only HIGH, confident factual hallucinations do."""
+    from agent_runtime.supervisor.graph import _audit_flagged, _apply_grounding_caveat
+    medium = {"hallucination_detected": True, "severity": "medium", "summary": "interpretive over-reach"}
+    assert _audit_flagged(medium) is False
+    assert _apply_grounding_caveat("the answer", medium) == "the answer"  # unchanged
+    high = {"hallucination_detected": True, "severity": "high", "summary": "fabricated statistic"}
+    assert _audit_flagged(high) is True
+    assert "Grounding check" in _apply_grounding_caveat("the answer", high)
+
+
+def test_reconcile_audit_tolerates_malformed_issue_strings():
+    """A small judge may emit issues as bare strings instead of {claim,reason} dicts;
+    reconciliation must degrade gracefully, never crash synthesize."""
+    from agent_runtime.supervisor.graph import _reconcile_audit_with_artifacts
+    audit = {"hallucination_detected": True, "severity": "high",
+             "issues": ["claim X unsupported"], "summary": "x"}
+    out = _reconcile_audit_with_artifacts(audit, artifacts=[], execution_context={})
+    assert isinstance(out, dict)  # did not raise

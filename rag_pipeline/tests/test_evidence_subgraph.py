@@ -33,7 +33,7 @@ def _stub_compose(query, documents, chat_history=None):
 
 def _fake_llm(prompt: str) -> str:
     low = prompt.lower()
-    if "auditing a retrieval-augmented answer" in low:
+    if "you are auditing" in low:
         return json.dumps(
             {"hallucination_detected": False, "severity": "none", "issues": [], "summary": "grounded"}
         )

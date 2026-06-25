@@ -262,16 +262,24 @@ def _is_unproductive_repeat(nxt: str, state: SupervisorState) -> bool:
     return False
 
 
-# Severities at/above which the grounding audit appends a user-visible caveat.
-_AUDIT_FLAG_SEVERITIES = {"medium", "high"}
+# Severities at which the grounding audit appends a user-visible caveat. Only HIGH —
+# confident factual fabrications/contradictions. Reasonable interpretive elaboration is rated
+# none/low (and occasionally medium by a strict small judge); warning on those is a false
+# positive that erodes trust, so it does not surface a caveat.
+_AUDIT_FLAG_SEVERITIES = {"high"}
 
 
 def _audit_flagged(audit: Optional[Dict[str, Any]]) -> bool:
-    """Whether the grounding audit found a problem worth warning the user about."""
+    """Whether the grounding audit found a problem worth warning the user about.
+
+    Gated on SEVERITY (not the raw ``hallucination_detected`` flag): the auditor sets that flag
+    true even for soft medium-severity over-reach, so keying off it would re-introduce the
+    false positives this gate exists to suppress.
+    """
     if not audit:
         return False
     severity = str(audit.get("severity") or "").strip().lower()
-    return bool(audit.get("hallucination_detected")) or severity in _AUDIT_FLAG_SEVERITIES
+    return severity in _AUDIT_FLAG_SEVERITIES
 
 
 def _apply_grounding_caveat(answer: str, audit: Optional[Dict[str, Any]]) -> str:
@@ -339,8 +347,13 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
         blob = blob.replace(",", "")
     kept = []
     for it in issues:
-        claim = str((it or {}).get("claim") or "").lower()
-        reason = str((it or {}).get("reason") or "").lower()
+        if isinstance(it, dict):
+            claim = str(it.get("claim") or "").lower()
+            reason = str(it.get("reason") or "").lower()
+        else:
+            # Tolerate a malformed issue (e.g. a bare string) from a strict small judge that
+            # ignored the {claim, reason} schema — never crash synthesize over audit shape.
+            claim, reason = str(it or "").lower(), ""
         if artifacts and any(m in claim for m in _ARTIFACT_CLAIM_MARKERS):
             continue  # (1) artifact dispute, but an artifact was produced
         if any(g in reason for g in _GROUNDED_REASON_MARKERS) and not any(c in reason for c in _CONTRADICTION_MARKERS):
