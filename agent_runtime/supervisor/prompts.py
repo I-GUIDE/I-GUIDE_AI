@@ -101,4 +101,40 @@ CODE_PEER_PROMPT = (
     "If evidence is insufficient, say what is missing."
 )
 
-__all__ = ["SYNTHESIS_PROMPT", "ANALYSIS_WORKFLOW_PROMPT", "CODE_PEER_PROMPT"]
+# Composed by the synthesizer ONLY in the genuinely-cold case — nothing was retrieved or
+# produced AND there is no conversation to draw on. The model has no grounding, so it must NOT
+# answer the question or invent facts; it only acknowledges the gap and helps the user re-ask.
+# (When chat_history exists, the normal SYNTHESIS_PROMPT path handles the request instead.)
+INSUFFICIENT_EVIDENCE_PROMPT = (
+    "You are the I-GUIDE assistant. For the user's request below, NO supporting evidence was "
+    "found in the knowledge base and no analysis or code step produced any result — there is "
+    "nothing to ground an answer on.\n"
+    "Write a brief, honest reply (2-3 sentences, plain prose, no headings or lists) that:\n"
+    "1. acknowledges, in your own words, what the user asked for;\n"
+    "2. states plainly that you could not find supporting material for it right now;\n"
+    "3. suggests one concrete next step — rephrase or narrow the request, name a specific "
+    "dataset / place / topic, or try again shortly in case the search service is briefly "
+    "unavailable.\n"
+    "HARD CONSTRAINTS — you have NO grounding, so: do NOT answer the question; do NOT state, "
+    "guess, or imply any fact about the subject; do NOT invent datasets, numbers, sources, or "
+    "capabilities. Only explain that you lack supporting material and help the user re-ask in a "
+    "way that can be answered.\n\n"
+    "User request:\n{question}\n"
+)
+
+# Deterministic fallback used when the LLM-composed insufficiency reply is unavailable or empty
+# (e.g. the model errored). Env-overridable so operators can customize the wording.
+NO_GROUNDING_FALLBACK = (
+    "I couldn't find any supporting evidence for this request — the knowledge base has no "
+    "matching content, and no analysis or code step produced a result. I won't guess; please "
+    "rephrase or narrow the request (for example, name a specific dataset, place, or topic), or "
+    "try again shortly if the search service is temporarily unavailable."
+)
+
+__all__ = [
+    "SYNTHESIS_PROMPT",
+    "ANALYSIS_WORKFLOW_PROMPT",
+    "CODE_PEER_PROMPT",
+    "INSUFFICIENT_EVIDENCE_PROMPT",
+    "NO_GROUNDING_FALLBACK",
+]

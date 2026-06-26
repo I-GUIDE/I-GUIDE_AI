@@ -74,7 +74,7 @@ CodeFn = Callable[[str, List[Any], "SupervisorState"], Any]       # (query, evid
 # (query, evidence, analysis_results, code_result, chat_history) -> answer
 SynthesizeFn = Callable[[str, List[Any], Any, Any, Optional[List[Any]]], str]
 
-from agent_runtime.supervisor.prompts import ANALYSIS_WORKFLOW_PROMPT, CODE_PEER_PROMPT
+from agent_runtime.supervisor.prompts import ANALYSIS_WORKFLOW_PROMPT, CODE_PEER_PROMPT, NO_GROUNDING_FALLBACK
 
 
 class SupervisorState(TypedDict, total=False):
@@ -734,6 +734,37 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
     return fn
 
 
+def _compose_insufficiency_reply(llm: Optional[Any], query: str) -> str:
+    """LLM-compose a contextual, grounding-SAFE "no supporting evidence" reply.
+
+    Reached only in the genuinely-cold case (nothing retrieved AND no conversation to draw on).
+    ``INSUFFICIENT_EVIDENCE_PROMPT`` forbids answering the question or inventing facts — the
+    model only acknowledges the gap and helps the user re-ask. Returns "" on any failure or an
+    empty result so the caller can fall back to the deterministic ``NO_GROUNDING_FALLBACK``
+    constant. Never raises — it must not break synthesize.
+    """
+    if not (query or "").strip():
+        return ""
+    from agent_runtime.supervisor.prompts import INSUFFICIENT_EVIDENCE_PROMPT
+
+    try:
+        active = llm
+        if active is None:
+            from agent_runtime.executor_factory import build_default_llm
+
+            active = build_default_llm()
+        prompt = INSUFFICIENT_EVIDENCE_PROMPT.format(question=query)
+        if hasattr(active, "invoke"):
+            text = _content_to_text(active.invoke(prompt))
+        elif callable(active):
+            text = str(active(prompt))
+        else:
+            return ""
+        return (text or "").strip()
+    except Exception:
+        return ""
+
+
 def default_synthesize_fn(llm: Optional[Any] = None) -> SynthesizeFn:
     """Compose the final grounded answer in the original AnalysisAgent format."""
 
@@ -910,13 +941,14 @@ def build_supervisor_graph(
         has_history = bool(state.get("chat_history") or [])
         if not has_grounding and not has_history:
             # Nothing was retrieved or produced AND there's no conversation to draw on (e.g. a
-            # cold first-turn query whose search backend is down or the KB has no match). Return
-            # a deterministic honest message rather than letting the synthesis LLM fabricate an
-            # answer from prior knowledge.
-            final = ("I couldn't find any supporting evidence for this request — the search "
-                     "service may be unavailable or the knowledge base has no matching content, "
-                     "and no analysis or code step produced a result. I won't guess; please "
-                     "rephrase or narrow the request, or try again shortly.")
+            # cold first-turn query whose search backend is down or the KB has no match). Compose
+            # an honest, query-specific "no supporting evidence" reply with the LLM — the prompt
+            # forbids answering the question or inventing facts, so this acknowledges the gap
+            # without fabricating. Fall back to a deterministic (env-overridable) constant if the
+            # model is unavailable or returns nothing, so we never ship an empty answer.
+            final = (_compose_insufficiency_reply(llm, q)
+                     or os.getenv("AGENT_NO_GROUNDING_MESSAGE")
+                     or NO_GROUNDING_FALLBACK)
             audit = {}
         else:
             # We have retrieval/execution grounding OR a conversation to work from. The latter

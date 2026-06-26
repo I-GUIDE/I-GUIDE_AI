@@ -29,6 +29,8 @@ def _fake_llm(prompt: str) -> str:
         return json.dumps({"ranking": [
             {"doc_id": "b", "score": 0.9}, {"doc_id": "a", "score": 0.5}, {"doc_id": "c", "score": 0.1},
         ]})
+    if "no supporting evidence was found" in low:   # the insufficiency composer prompt
+        return ""   # simulate an unhelpful model -> caller uses the safe fallback constant
     return "x"
 
 
@@ -782,9 +784,11 @@ def test_conversational_request_answered_from_history_not_refused():
     assert "couldn't find" not in state["final_answer"].lower()        # NOT the refusal
 
 
-def test_cold_query_with_no_evidence_and_no_history_still_refuses():
-    """The honest refusal still fires for a true retrieval failure: nothing retrieved AND no
-    conversation to fall back on."""
+def test_cold_query_with_no_evidence_and_no_history_falls_back_to_constant():
+    """The honest no-grounding reply still fires for a true retrieval failure (nothing retrieved
+    AND no conversation). Here the model returns nothing for the insufficiency prompt, so the
+    deterministic NO_GROUNDING_FALLBACK constant is used — and the injected synthesize_fn is
+    never reached (no fabrication)."""
     state = run_supervisor(
         "what is the population of atlantis", llm=_fake_llm,
         decide_fn=lambda s, d: "done",
@@ -794,3 +798,24 @@ def test_cold_query_with_no_evidence_and_no_history_still_refuses():
         do_rerank=False, do_audit=False,
     )
     assert "couldn't find" in state["final_answer"].lower()
+    assert "should not be used" not in state["final_answer"]
+
+
+def test_no_grounding_uses_llm_composed_contextual_reply_when_available():
+    """When the LLM is available, the cold no-grounding case is answered with a contextual,
+    grounding-safe reply composed by the model — not the canned fallback."""
+    def llm(prompt: str) -> str:
+        if "no supporting evidence was found" in prompt.lower():
+            return "I don't have material on the population of Atlantis. Could you name a real place or dataset?"
+        return "x"
+
+    state = run_supervisor(
+        "population of atlantis", llm=llm,
+        decide_fn=lambda s, d: "done",
+        search_fn=lambda q, s: [],
+        synthesize_fn=lambda *a: "unused",
+        chat_history=[],
+        do_rerank=False, do_audit=False,
+    )
+    assert "atlantis" in state["final_answer"].lower()           # contextual, LLM-composed
+    assert "couldn't find" not in state["final_answer"].lower()  # not the canned fallback
