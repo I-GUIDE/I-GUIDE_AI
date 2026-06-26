@@ -80,5 +80,9 @@ EXPOSE 5002
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD python -c "import requests; requests.get('http://localhost:5002/health', timeout=5)" || exit 1
 
-# Run with gunicorn (more workers for LLM processing)
-CMD ["gunicorn", "--bind", "0.0.0.0:5002", "--workers", "2", "--threads", "4", "--timeout", "600", "--access-logfile", "-", "--error-logfile", "-", "api.server:app"]
+# Run with gunicorn. Worker COUNT is intentionally NOT pinned here: gunicorn reads it from the
+# WEB_CONCURRENCY env var (or defaults to 1). Keep it at 1 unless persistent memory (OpenSearch)
+# is enabled — session memory + the LangGraph checkpointer are process-local, so >1 worker
+# without shared/persistent memory breaks multi-turn continuity. Threads are I/O concurrency
+# within each worker (they share process memory, so they don't affect that contract).
+CMD ["gunicorn", "--bind", "0.0.0.0:5002", "--threads", "4", "--timeout", "600", "--access-logfile", "-", "--error-logfile", "-", "api.server:app"]

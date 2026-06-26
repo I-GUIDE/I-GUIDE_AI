@@ -75,6 +75,10 @@ services:
       - SPATIAL_BACKEND_ENABLED=${SPATIAL_BACKEND_ENABLED:-1}
       - SEMANTIC_BACKEND_ENABLED=${SEMANTIC_BACKEND_ENABLED:-1}
       - USE_LLM_ROUTER=${USE_LLM_ROUTER:-1}
+      # gunicorn worker (process) count. Default 1: session memory + the checkpointer are
+      # process-local, so multi-turn continuity needs ONE worker unless persistent memory
+      # (OpenSearch) is on. Raise WEB_CONCURRENCY in .env only after enabling persistent memory.
+      - WEB_CONCURRENCY=${WEB_CONCURRENCY:-1}
       # Agent runtime flags
       - AGENT_SUPERVISOR=${AGENT_SUPERVISOR:-1}
       - AGENT_DEV=${AGENT_DEV:-0}
