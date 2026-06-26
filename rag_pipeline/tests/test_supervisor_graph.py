@@ -762,3 +762,35 @@ def test_reconcile_audit_tolerates_malformed_issue_strings():
              "issues": ["claim X unsupported"], "summary": "x"}
     out = _reconcile_audit_with_artifacts(audit, artifacts=[], execution_context={})
     assert isinstance(out, dict)  # did not raise
+
+
+# --- conversational / meta requests are answered from history, not refused ----
+
+def test_conversational_request_answered_from_history_not_refused():
+    """A meta request ('summarize our discussion') has no retrievable evidence, but the
+    conversation IS its grounding — it must be composed from chat_history, not hard-refused
+    with the retrieval-failure message."""
+    state = run_supervisor(
+        "summarize our discussion", llm=_fake_llm,
+        decide_fn=lambda s, d: "done",            # straight to synthesize, nothing retrieved
+        search_fn=lambda q, s: [],
+        synthesize_fn=lambda q, ev, ar, cr, ch: "Here is a summary of our chat.",
+        chat_history=[{"role": "user", "content": "what's the risk of aging dams?"}],
+        do_rerank=False, do_audit=False,
+    )
+    assert state["final_answer"] == "Here is a summary of our chat."   # composed from history
+    assert "couldn't find" not in state["final_answer"].lower()        # NOT the refusal
+
+
+def test_cold_query_with_no_evidence_and_no_history_still_refuses():
+    """The honest refusal still fires for a true retrieval failure: nothing retrieved AND no
+    conversation to fall back on."""
+    state = run_supervisor(
+        "what is the population of atlantis", llm=_fake_llm,
+        decide_fn=lambda s, d: "done",
+        search_fn=lambda q, s: [],
+        synthesize_fn=lambda *a: "should not be used",
+        chat_history=[],                          # cold first turn
+        do_rerank=False, do_audit=False,
+    )
+    assert "couldn't find" in state["final_answer"].lower()

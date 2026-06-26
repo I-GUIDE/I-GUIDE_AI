@@ -906,23 +906,35 @@ def build_supervisor_graph(
         ar, cr = state.get("analysis_results"), state.get("code_result")
         artifacts = _collect_image_artifacts(ar, cr)
         emit_trace_event("node_started", {"stage": "synthesize", "message": "Composing answer"}, node="synthesize")
-        if not _has_grounding(evidence, ar, cr, artifacts):
-            # Nothing was retrieved or produced (e.g. the search backend is down or the KB
-            # has no match). Return a deterministic honest message rather than letting the
-            # synthesis LLM fabricate an answer from prior knowledge.
+        has_grounding = _has_grounding(evidence, ar, cr, artifacts)
+        has_history = bool(state.get("chat_history") or [])
+        if not has_grounding and not has_history:
+            # Nothing was retrieved or produced AND there's no conversation to draw on (e.g. a
+            # cold first-turn query whose search backend is down or the KB has no match). Return
+            # a deterministic honest message rather than letting the synthesis LLM fabricate an
+            # answer from prior knowledge.
             final = ("I couldn't find any supporting evidence for this request — the search "
                      "service may be unavailable or the knowledge base has no matching content, "
                      "and no analysis or code step produced a result. I won't guess; please "
                      "rephrase or narrow the request, or try again shortly.")
             audit = {}
         else:
+            # We have retrieval/execution grounding OR a conversation to work from. The latter
+            # covers conversational/meta requests — "summarize our discussion", a recap, a
+            # follow-up that refers back to earlier turns — which are answerable from
+            # chat_history alone; the synthesizer (SYNTHESIS_PROMPT) still states insufficiency
+            # rather than guessing if it lacks the facts for a substantive question.
             answer = do_synthesize(q, evidence, ar, cr, state.get("chat_history"))
-            # Artifacts + tool outputs are first-class grounding: pass the execution record
-            # so a genuinely-produced map/file/count is not flagged as hallucination.
+            # Audit only when there's actual retrieval/execution grounding to check against.
+            # A purely conversational answer (composed from chat_history with no evidence or
+            # artifacts) has nothing for the grounding auditor to compare to and would be
+            # false-flagged against empty evidence — skip the audit for it.
+            # Artifacts + tool outputs are first-class grounding: pass the execution record so
+            # a genuinely-produced map/file/count is not flagged as hallucination.
             audit = audit_answer_grounding(
                 q, answer, evidence, llm=llm,
                 execution_context={"analysis_results": ar, "code_result": cr, "artifacts": artifacts},
-            ) if (do_audit and (answer or "").strip()) else {}
+            ) if (do_audit and (answer or "").strip() and has_grounding) else {}
             # Deterministic reconciliation: produced artifacts + the execution record are
             # ground truth, so the LLM auditor can't false-flag a genuinely-generated
             # map/file or a number/method it actually computed.
