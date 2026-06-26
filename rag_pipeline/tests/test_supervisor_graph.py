@@ -819,3 +819,55 @@ def test_no_grounding_uses_llm_composed_contextual_reply_when_available():
     )
     assert "atlantis" in state["final_answer"].lower()           # contextual, LLM-composed
     assert "couldn't find" not in state["final_answer"].lower()  # not the canned fallback
+
+
+# --- related-knowledge-element: deterministic two-bucket lookup ----------------
+
+def test_detect_related_elements_request():
+    from agent_runtime.supervisor.graph import _detect_related_elements_request
+    uuid = "86df1948-9726-4d64-901c-66fcfdbca433"
+    assert _detect_related_elements_request(f"related knowledge elements of {uuid}") == uuid
+    assert _detect_related_elements_request(f"what is connected to {uuid}?") == uuid
+    assert _detect_related_elements_request("datasets related to floods") is None     # no UUID
+    assert _detect_related_elements_request(f"describe element {uuid}") is None        # no related intent
+
+
+def test_related_elements_evidence_splits_curated_and_content(monkeypatch):
+    import rag_pipeline.search.agents as agents
+    import rag_pipeline.search.semantic as semantic
+    from agent_runtime.supervisor.graph import _related_elements_evidence
+    SEED = "86df1948-9726-4d64-901c-66fcfdbca433"
+    monkeypatch.setattr(agents, "explore_neo4j_related_nodes", lambda eid, depth=2, limit=50: {
+        "seed": {"doc_id": SEED, "title": "National Inventory of Dams"},
+        "documents": [{"doc_id": "rel1", "title": "Dam Failure Study",
+                       "element_type": "publication", "contents": "..."}],
+    })
+
+    def hit(i, did):
+        return {"_id": did, "_score": 0.5, "_source": {"title": f"Sim {i}",
+                "element_type": "dataset", "contents": "..."}}
+    # semantic returns the seed (must be excluded) + two genuinely-similar elements
+    monkeypatch.setattr(semantic, "semantic_search",
+                        lambda q, size=12: [hit(0, SEED), hit(1, "sim1"), hit(2, "sim2")])
+
+    docs = _related_elements_evidence(SEED, content_k=5)
+    curated = [d["doc_id"] for d in docs if d["provenance"] == "curated"]
+    content = [d["doc_id"] for d in docs if d["provenance"] == "content"]
+    assert curated == ["rel1"]
+    assert content == ["sim1", "sim2"]          # seed excluded, curated not duplicated
+    assert SEED not in content
+
+
+def test_related_provenance_docs_not_reranked_or_truncated():
+    """Two-bucket related-element evidence must survive search_node intact — no rerank
+    interleaving and no top_k truncation that would drop a bucket."""
+    docs = [{"doc_id": f"d{i}", "title": f"T{i}",
+             "provenance": "curated" if i < 4 else "content"} for i in range(7)]
+    state = run_supervisor(
+        "related elements of 86df1948-9726-4d64-901c-66fcfdbca433", llm=_fake_llm,
+        decide_fn=_scripted(["search", "done"]),
+        search_fn=lambda q, s: list(docs),
+        synthesize_fn=lambda *a: "ok", do_rerank=True, do_audit=False,
+    )
+    assert len(state["evidence"]) == 7   # not truncated to top_k=5; both buckets intact
+    assert all(d.get("provenance") in ("curated", "content") for d in state["evidence"])

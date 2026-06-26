@@ -90,17 +90,41 @@ def _element_url(doc: Any) -> str:
     return f"{base}/{plural}/{doc_id}"
 
 
+def _doc_block(doc: Any, *, max_chars: int = 2500) -> str:
+    # One evidence item as title + url + contents. We deliberately do NOT lead with the raw
+    # [doc_id]: showing it trained the synthesizer to cite "[<uuid>]" instead of the hyperlink
+    # Rule 2 asks for. Title + url are the only citation handles the model sees.
+    title = _doc_field(doc, "title", "name", "element_type", default="Untitled")
+    contents = _doc_field(doc, "contents", "snippet", "text", "abstract", "description")
+    url = _element_url(doc)
+    head = f"title: {title}" + (f"\nurl: {url}" if url else "")
+    return f"{head}\n{contents[:max_chars]}"
+
+
+def _format_related_two_buckets(documents: List[Any], *, max_chars: int = 2500) -> str:
+    """Render a related-element result as two clearly-separated buckets so the synthesizer
+    presents contributor-specified links apart from similarity hits (and the grounding auditor
+    can tell them apart). Triggered whenever any doc carries a ``provenance`` tag."""
+    curated = [d for d in documents if isinstance(d, dict) and d.get("provenance") == "curated"]
+    content = [d for d in documents if isinstance(d, dict) and d.get("provenance") == "content"]
+    return "\n".join([
+        "[CURATED related elements — specified by the contributor via the knowledge graph "
+        "(:RELATED). Authoritative: present THESE as the element's related elements.]",
+        "\n\n".join(_doc_block(d, max_chars=max_chars) for d in curated) if curated
+        else "(none — the contributor has not specified any related elements for this element)",
+        "\n[CONTENT-RELATED elements — found by similarity search. These are NOT contributor-"
+        "specified relationships; present them in a SEPARATE section as topically similar, not "
+        "as curated links.]",
+        "\n\n".join(_doc_block(d, max_chars=max_chars) for d in content) if content
+        else "(no content-similar elements found)",
+    ])
+
+
 def _format_documents(documents: List[Any], *, limit: int = 8, max_chars: int = 2500) -> str:
-    # Present each item as title + url + contents. We deliberately do NOT lead with the raw
-    # [doc_id] anymore: showing it trained the synthesizer to cite "[<uuid>]" instead of the
-    # hyperlink Rule 2 asks for. Title + url are the only citation handles the model sees.
-    blocks: List[str] = []
-    for doc in documents[:limit]:
-        title = _doc_field(doc, "title", "name", "element_type", default="Untitled")
-        contents = _doc_field(doc, "contents", "snippet", "text", "abstract", "description")
-        url = _element_url(doc)
-        head = f"title: {title}" + (f"\nurl: {url}" if url else "")
-        blocks.append(f"{head}\n{contents[:max_chars]}")
+    # A related-element result carries provenance tags -> render two labeled buckets.
+    if any(isinstance(d, dict) and d.get("provenance") in ("curated", "content") for d in documents):
+        return _format_related_two_buckets(documents, max_chars=max_chars)
+    blocks = [_doc_block(doc, max_chars=max_chars) for doc in documents[:limit]]
     return "\n\n".join(blocks) if blocks else "(no evidence)"
 
 

@@ -29,7 +29,16 @@ SYNTHESIS_PROMPT = (
     "4. Never invent titles, sources, or citation ids.\n"
     "5. If the materials include an image artifact (a PNG/JPG map, plot, or figure with a "
     "download_url, e.g. from plot_vector or execute_code), embed it inline using markdown image "
-    "syntax `![short caption](download_url)` with the EXACT download_url provided. Do not invent URLs."
+    "syntax `![short caption](download_url)` with the EXACT download_url provided. Do not invent URLs.\n"
+    "6. RELATED-ELEMENT requests: when the evidence is split into a CURATED bucket (related "
+    "elements the contributor specified via the knowledge graph) and a CONTENT-RELATED bucket "
+    "(found by similarity), present them as TWO separate, clearly-labeled sections. Lead with "
+    "'Related elements (specified by the contributor)' as a numbered list of **[TITLE](url)** "
+    "links; if that bucket is empty, state plainly that the contributor has not specified any "
+    "related elements (do NOT fill it with the similarity results). Then, under a separate "
+    "heading such as 'You may also find these relevant (by similarity)', list the content-related "
+    "items, also as **[TITLE](url)** links. NEVER present the similarity items as curated or "
+    "official relationships, and never merge the two lists."
 )
 
 ANALYSIS_WORKFLOW_PROMPT = (

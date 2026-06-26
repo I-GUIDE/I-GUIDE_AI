@@ -550,6 +550,106 @@ def _as_retrieval_request(query: str) -> str:
     )
 
 
+# --- related-knowledge-element lookup (deterministic two-bucket) --------------
+# A "related elements of <UUID>" request is NOT a generic retrieval — it has a precise,
+# deterministic answer. We split it into two clearly-separated buckets so the agent never
+# again presents a similarity search as if it were a curated relationship (the bug that
+# triggered a HIGH grounding flag):
+#   * CURATED  — contributor-specified :RELATED neighbors from the Neo4j graph (authoritative).
+#   * CONTENT  — semantically similar elements (explicitly NOT curated links).
+# Each doc is tagged ``provenance`` so the formatter renders two labeled sections and the
+# grounding auditor distinguishes a curated link from a topical match.
+_UUID_RE = re.compile(
+    r"\b([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b"
+)
+_RELATED_INTENT_RE = re.compile(r"\b(related|connected|linked|associated|relationship)s?\b", re.I)
+
+
+def _detect_related_elements_request(query: str) -> Optional[str]:
+    """Return the element UUID iff *query* asks for the related elements of a specific element.
+
+    Deterministic gate: requires BOTH an element UUID and a related/connected intent word, so
+    a generic "datasets related to floods" (no UUID) is left to normal search.
+    """
+    if not query or not _RELATED_INTENT_RE.search(query):
+        return None
+    m = _UUID_RE.search(query)
+    return m.group(1) if m else None
+
+
+def _related_elements_evidence(element_id: str, *, depth: int = 2,
+                               curated_cap: int = 25, content_k: int = 6) -> List[Dict[str, Any]]:
+    """Deterministic two-bucket evidence for a related-elements request.
+
+    Bucket 1 (CURATED): contributor-specified :RELATED neighbors via Neo4j graph traversal —
+    the single source of truth. Bucket 2 (CONTENT): semantically similar elements, found with
+    the seed's topic, explicitly framed as similarity (never curated). Both seed and curated
+    ids are excluded from the content bucket. Every doc is tagged ``provenance`` ('curated' |
+    'content'); curated docs come first. Never raises — degrades to whatever it could gather.
+    """
+    docs: List[Dict[str, Any]] = []
+    seen_ids = {str(element_id)}
+    seed_title = ""
+
+    # bucket 1 — curated graph relationships (authoritative)
+    try:
+        from rag_pipeline.search.agents import explore_neo4j_related_nodes
+
+        payload = explore_neo4j_related_nodes(element_id, depth=depth, limit=50) or {}
+    except Exception:
+        payload = {}
+    seed_title = str((payload.get("seed") or {}).get("title") or "").strip()
+    for d in (payload.get("documents") or [])[:curated_cap]:
+        if not isinstance(d, dict):
+            continue
+        did = str(d.get("doc_id") or d.get("id") or "")
+        if did and did in seen_ids:
+            continue
+        if did:
+            seen_ids.add(did)
+        tagged = dict(d)
+        tagged["provenance"] = "curated"
+        tagged.setdefault("source", "graph")
+        docs.append(tagged)
+
+    # The content bucket needs the seed's topic. Prefer the graph seed's title; fall back to the
+    # platform metadata title so it still works when the element has no node/edges in this graph.
+    if not seed_title:
+        try:
+            from agent_runtime.element_resolver import resolve_element
+
+            seed_title = str((resolve_element(element_id) or {}).get("title") or "").strip()
+        except Exception:
+            seed_title = ""
+
+    # bucket 2 — content-similar elements (similarity, explicitly NOT curated)
+    if seed_title:
+        try:
+            from rag_pipeline.search.agents import _hit_to_document
+            from rag_pipeline.search.semantic import semantic_search
+
+            hits = semantic_search(seed_title, size=content_k + 4) or []
+        except Exception:
+            hits = []
+        added = 0
+        for hit in hits:
+            try:
+                doc = _hit_to_document(hit, source_name="semantic")
+            except Exception:
+                continue
+            did = str(doc.get("doc_id") or "")
+            if did and did in seen_ids:   # exclude the seed AND anything already curated
+                continue
+            if did:
+                seen_ids.add(did)
+            doc["provenance"] = "content"
+            docs.append(doc)
+            added += 1
+            if added >= content_k:
+                break
+    return docs
+
+
 def default_search_fn(*, llm: Optional[Any] = None, tool_strategy: str = "granular",
                       include_mcp_tools: bool = False, mcp_modules: Optional[List[str]] = None,
                       enabled_search_methods: Optional[List[str]] = None,
@@ -562,6 +662,18 @@ def default_search_fn(*, llm: Optional[Any] = None, tool_strategy: str = "granul
             invoke_agent_with_payload_fallback,
         )
         from agent_runtime.runtime_utils import build_search_evidence_payload
+
+        # Deterministic short-circuit: "related elements of <UUID>" is answered by graph
+        # traversal + similarity, NOT by letting the LLM pick a tool (the original failure was
+        # that nothing steered it to neo4j_explore_related_nodes, so it ran a generic search).
+        related_id = _detect_related_elements_request(query)
+        if related_id:
+            emit_trace_event(
+                "node_started",
+                {"stage": "search", "message": f"Related-element lookup for {related_id}"},
+                node="search",
+            )
+            return _related_elements_evidence(related_id)
 
         executor = build_search_agent_executor(
             llm=llm, tool_strategy=tool_strategy, include_mcp_tools=include_mcp_tools,
@@ -889,7 +1001,10 @@ def build_supervisor_graph(
             _, needs = _extract_needs(raw)
         else:
             docs, needs = raw, []
-        if do_rerank and len(docs) > 1:
+        # Skip rerank/top_k for a two-bucket related-element result: reranking would interleave
+        # and truncate the curated vs content buckets. Their order/grouping is handled downstream.
+        has_provenance = any(isinstance(d, dict) and d.get("provenance") in ("curated", "content") for d in docs)
+        if do_rerank and len(docs) > 1 and not has_provenance:
             docs = rerank_documents(q, docs, top_k=top_k, llm=llm)  # operator bundled into search
         before = len(state.get("evidence") or [])
         merged = _merge_dedup(state.get("evidence") or [], docs)

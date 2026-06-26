@@ -231,7 +231,7 @@ _PATTERNS: List[Tuple[str, re.Pattern, List[str]]] = [
     (
         "explore_related_by_id",
         re.compile(
-            r"\b(?:neighbors?|related(?:\s+(?:nodes?|elements?|resources?))?|"
+            r"\b(?:neighbors?|related(?:\s+knowledge)?(?:\s+(?:nodes?|elements?|resources?))?|"
             r"explore(?:\s+(?:related|neighbors?|graph))?|graph(?:\s+around)?|"
             r"connections?)\s+(?:for|of|from|around|to)?\s*"
             r"(?:knowledge\s+element|element|resource)?\s*"
@@ -416,9 +416,11 @@ def _looks_like_element_id(value: str) -> bool:
     value = (value or "").strip()
     if len(value) < 2:
         return False
-    if re.search(r"[\d_:/.-]", value):
-        return True
-    return len(value) >= 8
+    # Element ids on this platform are UUID-shaped (and otherwise always carry a digit or id
+    # punctuation). A purely alphabetic token — e.g. "knowledge", "elements", "resources" — is
+    # an English word swept up by a noun phrase, NOT an id; treating it as a seed produced a
+    # bogus empty traversal. Require a digit or id punctuation so plain words are rejected.
+    return bool(re.search(r"[\d_:/.-]", value))
 
 
 def _normalize_element_id(element_id: str) -> str:
