@@ -926,3 +926,96 @@ def test_default_search_fn_short_circuits_id_lookup(monkeypatch):
 
     docs = default_search_fn()(f"Explain {UUID}", {"thread_id": "t"})
     assert len(docs) == 1 and docs[0]["title"] == "NID"   # served deterministically, no LLM
+
+
+# --- id recall from conversation memory (follow-up without an explicit id) ----
+
+def test_recall_recent_element_id_from_history():
+    from agent_runtime.supervisor.graph import _recall_recent_element_id
+    uuid = "86df1948-9726-4d64-901c-66fcfdbca433"
+    other = "11111111-2222-3333-4444-555555555555"
+    hist = [  # {userQuery, answer} session-memory shape; newest last
+        {"userQuery": f"Explain {other}", "answer": "older element"},
+        {"userQuery": f"Explain {uuid}", "answer": "The National Inventory of Dams ..."},
+    ]
+    assert _recall_recent_element_id(hist) == uuid                       # most-recent wins
+    assert _recall_recent_element_id([{"role": "user", "content": f"explain {uuid}"}]) == uuid
+    assert _recall_recent_element_id([("user", f"explain {uuid}")]) == uuid
+    assert _recall_recent_element_id([]) is None
+    assert _recall_recent_element_id([{"userQuery": "no id here", "answer": "none"}]) is None
+
+
+def test_followup_regexes_match_subjectless_not_topical():
+    from agent_runtime.supervisor.graph import _RELATED_FOLLOWUP_RE, _EXPLAIN_FOLLOWUP_RE
+    assert _RELATED_FOLLOWUP_RE.match("What are the related elements")
+    assert _RELATED_FOLLOWUP_RE.match("related elements")
+    assert _RELATED_FOLLOWUP_RE.match("show me related")
+    assert _RELATED_FOLLOWUP_RE.match("related to it")
+    assert not _RELATED_FOLLOWUP_RE.match("datasets related to floods")   # carries its own subject
+    assert _EXPLAIN_FOLLOWUP_RE.match("explain it")
+    assert _EXPLAIN_FOLLOWUP_RE.match("describe this")
+    assert _EXPLAIN_FOLLOWUP_RE.match("tell me more about it")
+    assert not _EXPLAIN_FOLLOWUP_RE.match("explain dam failures")         # topic, not the element
+
+
+def test_default_search_fn_recalls_id_for_subjectless_followup(monkeypatch):
+    """'What are the related elements' (no id) must recall the element under discussion from
+    chat_history and run the deterministic related lookup — not the LLM SearchAgent."""
+    import rag_pipeline.search.agents as agents
+    import rag_pipeline.search.semantic as semantic
+    import agent_runtime.executor_factory as ef
+    from agent_runtime.supervisor.graph import default_search_fn
+    UUID = "86df1948-9726-4d64-901c-66fcfdbca433"
+    seen = {}
+
+    def explore(eid, depth=2, limit=50):
+        seen["eid"] = eid
+        return {"seed": {"doc_id": eid, "title": "National Inventory of Dams"},
+                "documents": [{"doc_id": "rel1", "title": "X", "element_type": "publication", "contents": "y"}]}
+    monkeypatch.setattr(agents, "explore_neo4j_related_nodes", explore)
+    monkeypatch.setattr(semantic, "semantic_search", lambda q, size=12: [])
+
+    def boom(*a, **k):
+        raise AssertionError("must NOT build the LLM SearchAgent when the id is recallable")
+    monkeypatch.setattr(ef, "build_search_agent_executor", boom)
+
+    state = {"thread_id": "t", "chat_history": [{"userQuery": f"Explain {UUID}", "answer": "NID ..."}]}
+    docs = default_search_fn()("What are the related elements", state)
+    assert seen.get("eid") == UUID                                   # recalled the id from memory
+    assert any(d.get("provenance") == "curated" for d in docs)
+
+
+# --- review fixes: role-aware recall + extended follow-up coverage ------------
+
+def test_recall_prefers_user_subject_over_assistant_citation():
+    """Regression (adversarial review): after a 'related elements of X' answer whose links cite
+    OTHER elements' UUIDs, a follow-up must recall the USER's element X — not a cited one."""
+    from agent_runtime.supervisor.graph import _recall_recent_element_id
+    X = "33333333-3333-3333-3333-333333333333"
+    Y = "44444444-4444-4444-4444-444444444444"
+    hist = [
+        {"role": "user", "content": f"related elements of {X}"},
+        {"role": "assistant",
+         "content": f"You may also find [Flood Data](https://platform.i-guide.io/datasets/{Y}) relevant."},
+    ]
+    assert _recall_recent_element_id(hist) == X          # user's subject, NOT the cited Y
+    # {userQuery, answer} turn shape: only the query side counts as user text
+    hist2 = [{"userQuery": f"explain {X}", "answer": f"see https://platform.i-guide.io/datasets/{Y}"}]
+    assert _recall_recent_element_id(hist2) == X
+    # fallback: when the user never typed a UUID, use the assistant's mention
+    hist3 = [{"role": "user", "content": "find dam datasets"},
+             {"role": "assistant", "content": f"https://platform.i-guide.io/datasets/{Y}"}]
+    assert _recall_recent_element_id(hist3) == Y
+
+
+def test_followup_regexes_extended_coverage():
+    from agent_runtime.supervisor.graph import _RELATED_FOLLOWUP_RE, _EXPLAIN_FOLLOWUP_RE
+    assert _RELATED_FOLLOWUP_RE.match("What is it related to?")     # finding: copula + pronoun
+    assert _RELATED_FOLLOWUP_RE.match("what's this related to")
+    assert _EXPLAIN_FOLLOWUP_RE.match("describe this element")      # finding: determiner + noun
+    assert _EXPLAIN_FOLLOWUP_RE.match("information about this")     # finding: bare 'information'
+    assert _EXPLAIN_FOLLOWUP_RE.match("info on it")
+    # negatives still hold (topical queries carry their own subject -> normal search)
+    assert not _RELATED_FOLLOWUP_RE.match("datasets related to floods")
+    assert not _EXPLAIN_FOLLOWUP_RE.match("explain dam failures")
+    assert not _EXPLAIN_FOLLOWUP_RE.match("information about floods")

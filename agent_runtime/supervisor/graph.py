@@ -710,6 +710,75 @@ def _element_lookup_evidence(element_id: str) -> List[Dict[str, Any]]:
     return []
 
 
+# Follow-up phrasings that refer to the element already under discussion WITHOUT repeating its
+# id. Anchored + subject-less so "datasets related to floods" / "explain dam failures" do NOT
+# match (those carry their own subject -> normal search), while "what are the related elements"
+# / "explain it" DO -> we then recall the element id from the conversation.
+_RELATED_FOLLOWUP_RE = re.compile(
+    r"^\s*(?:(?:please\s+)?(?:show|list|give|find|get|display|tell)\s+(?:me\s+)?)?"
+    r"(?:what(?:'?s| are| is)(?:\s+(?:it|this|that))?\s+)?(?:the\s+|its\s+|their\s+)?"
+    r"related(?:\s+knowledge)?(?:\s+(?:elements?|nodes?|resources?|ones?|items?))?"
+    r"\s*(?:to|for|of)?\s*(?:it|this|that)?\s*\??\s*$",
+    re.I,
+)
+_EXPLAIN_FOLLOWUP_RE = re.compile(
+    r"^\s*(?:please\s+)?(?:explain|describe|summari[sz]e|tell\s+me(?:\s+more)?(?:\s+about)?|"
+    r"what(?:'?s| is)|more\s+(?:details?|info(?:rmation)?)|info(?:rmation)?|details?)\s+"
+    r"(?:about\s+|on\s+|of\s+|for\s+)?"
+    r"(?:it|this|that|(?:the|this|that)\s+(?:element|dataset|resource|item|one|notebook|publication))"
+    r"\s*\??\s*$",
+    re.I,
+)
+
+
+def _chat_item_text(item: Any) -> str:
+    """Flatten any chat-history item shape ({role,content} | {userQuery,answer} | (role,content)
+    | raw) into one searchable string."""
+    if isinstance(item, dict):
+        return " ".join(str(item.get(k) or "") for k in ("content", "userQuery", "answer", "text", "query"))
+    if isinstance(item, (list, tuple)):
+        return " ".join(str(x) for x in item)
+    return str(item or "")
+
+
+def _chat_item_user_text(item: Any) -> str:
+    """USER-authored text only, so id-recall keys off the subject the user actually stated — not a
+    UUID the assistant merely cited in a prior answer (citation URLs embed a related element's
+    UUID, which would otherwise hijack a follow-up to the wrong element). Returns "" for
+    assistant/system/tool turns; for the {userQuery, answer} turn shape, only the query side.
+    """
+    if isinstance(item, dict):
+        role = str(item.get("role") or item.get("type") or "").strip().lower()
+        if role == "user":
+            return str(item.get("content") or item.get("text") or item.get("query") or "")
+        if role:                       # assistant / system / tool -> not user text
+            return ""
+        return str(item.get("userQuery") or item.get("query") or "")   # {userQuery, answer} turn
+    if isinstance(item, (list, tuple)) and item:
+        return " ".join(str(x) for x in item[1:]) if str(item[0]).strip().lower() == "user" else ""
+    return str(item or "")
+
+
+def _recall_recent_element_id(chat_history: Optional[List[Any]], *, max_items: int = 8) -> Optional[str]:
+    """The element UUID a follow-up that omits the id ('what are the related elements', 'explain
+    it') should resolve to. Prefers the user's OWN most-recent UUID (their stated subject) over a
+    UUID the assistant merely cited in a prior answer; falls back to any mention only when the
+    user never typed one (assistant-only reference / unknown history shapes). Newest-first.
+    """
+    if not chat_history:
+        return None
+    window = list(chat_history)[-max_items:]
+    for item in reversed(window):              # pass 1: the user's stated subject
+        m = _UUID_RE.search(_chat_item_user_text(item))
+        if m:
+            return m.group(1)
+    for item in reversed(window):              # pass 2: fall back to any mention
+        m = _UUID_RE.search(_chat_item_text(item))
+        if m:
+            return m.group(1)
+    return None
+
+
 def default_search_fn(*, llm: Optional[Any] = None, tool_strategy: str = "granular",
                       include_mcp_tools: bool = False, mcp_modules: Optional[List[str]] = None,
                       enabled_search_methods: Optional[List[str]] = None,
@@ -728,7 +797,12 @@ def default_search_fn(*, llm: Optional[Any] = None, tool_strategy: str = "granul
         # related tools, so it ran a generic search and fabricated/whiffed).
         #   * "related elements of <UUID>"  -> graph traversal + similarity (two buckets)
         #   * "explain/describe <UUID>"     -> by-id element fetch (graph, then backend API)
+        # When the id is OMITTED in a follow-up ("what are the related elements", "explain it"),
+        # recall the element under discussion from the conversation so the same path still fires.
+        chat_history = state.get("chat_history")
         related_id = _detect_related_elements_request(query)
+        if not related_id and _RELATED_FOLLOWUP_RE.match(query or ""):
+            related_id = _recall_recent_element_id(chat_history)
         if related_id:
             emit_trace_event(
                 "node_started",
@@ -737,6 +811,8 @@ def default_search_fn(*, llm: Optional[Any] = None, tool_strategy: str = "granul
             )
             return _related_elements_evidence(related_id)
         lookup_id = _detect_element_lookup_request(query)
+        if not lookup_id and _EXPLAIN_FOLLOWUP_RE.match(query or ""):
+            lookup_id = _recall_recent_element_id(chat_history)
         if lookup_id:
             emit_trace_event(
                 "node_started",
