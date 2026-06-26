@@ -782,9 +782,12 @@ responses:
 @app.route('/agent/chat', methods=['POST'])
 def agent_chat():
     """
-    Chat endpoint backed by the LangChain agent with optional persistent memory.
-
-    Accepts both camelCase (frontend) and snake_case field names.
+    Non-streaming agent chat — the single-response variant of `POST /agent/chat/stream`, which
+    is **the primary agent chat endpoint**. It accepts the SAME request body, fields, and
+    defaults (see `/agent/chat/stream` for the full field list, the minimum request, and the
+    file-upload flow); camelCase or snake_case are both accepted (camelCase wins) and only
+    `userQuery` is required. Instead of an SSE stream, this returns the final result as one JSON
+    response. The streaming-only `agentDev` field does not apply here.
 
     ---
     tags:
@@ -874,9 +877,9 @@ def agent_chat():
               example: granular
             includeMcpTools:
               type: boolean
-              default: false
-              description: Whether to include MCP-backed tools in the agent toolset.
-              example: false
+              nullable: true
+              description: Include MCP-backed tools (spatial/data analysis) in the agent toolset. Omit to use the server default from AGENT_INCLUDE_MCP_TOOLS (ON); send false to disable for this request.
+              example: true
             include_mcp_tools:
               type: boolean
               description: Snake_case alias for `includeMcpTools`.
@@ -997,6 +1000,24 @@ def agent_chat():
               default: false
               description: Enables verbose LangChain/agent execution logging.
               example: false
+            useSupervisor:
+              type: boolean
+              nullable: true
+              description: Use the supervisor-over-peers orchestration graph. Omit to use the server default from AGENT_SUPERVISOR (ON); send false to use the legacy agent-as-tools path.
+              example: true
+            use_supervisor:
+              type: boolean
+              nullable: true
+              description: Snake_case alias for `useSupervisor`.
+            codeExec:
+              type: boolean
+              nullable: true
+              description: Enable the sandboxed `execute_code` tool. Omit to use the server default from AGENT_CODE_EXEC (ON); send false to disable for this request.
+              example: true
+            code_exec:
+              type: boolean
+              nullable: true
+              description: Snake_case alias for `codeExec`.
           example:
             userQuery: Inspect the uploaded Chicago crime CSV and summarize trends by primary type.
             memoryId: agent-memory-chicago-001
@@ -1004,7 +1025,6 @@ def agent_chat():
             conversationName: Chicago crime analysis
             recentK: 6
             toolStrategy: granular
-            includeMcpTools: false
             enabledSearchMethods: ["keyword_search", "semantic_search", "opengeodata_search"]
             usePersistentMemory: true
             smartToolRouting: true
@@ -1287,7 +1307,9 @@ def agent_chat():
 @app.route('/agent/chat/stream', methods=['POST'])
 def agent_chat_stream():
     """
-    Stream agent chat events using Server-Sent Events (SSE).
+    Stream agent chat events using Server-Sent Events (SSE). **This is the primary agent chat
+    endpoint**; `POST /agent/chat` is the non-streaming variant that returns the same final
+    payload as a single JSON response.
 
     The response is `text/event-stream` with blocks of the form:
     `event: <name>\\ndata: <json>\\n\\n`
@@ -1295,6 +1317,68 @@ def agent_chat_stream():
     Node-compatible events: `status`, `result`, `error`.
     Additional categorized events: `routing`, `search`, `analysis`, `agent_trace`, `answer`, `file`.
     `agent_trace` includes live LLM messages, LLM tool decisions, and MCP call lifecycle events.
+
+    Accepts both camelCase (frontend) and snake_case field names; when both are present the
+    camelCase value wins. **Only `userQuery` is required** — every other field has a default.
+
+    Absolute minimum: `{ "userQuery": "Explain the National Inventory of Dams dataset" }`
+
+    Recommended — supply a client-chosen `memoryId` so you control the conversation id from the
+    first turn: a fresh id starts a new conversation, and reusing the same id on later turns
+    continues it so follow-ups retain context.
+
+    - New conversation (client picks the id):
+      `{ "userQuery": "Explain the National Inventory of Dams dataset", "memoryId": "agent-mem-1" }`
+    - Follow-up (same id continues it):
+      `{ "userQuery": "What are its related elements?", "memoryId": "agent-mem-1" }`
+
+    Omitting `memoryId` instead mints a NEW memory server-side and returns its id (in the terminal
+    `result` event), which you then reuse on later turns.
+
+    **Defaults when a field is omitted**
+
+    - `userQuery`: required (400 if missing).
+    - `memoryId` / `threadId`: none. With persistent memory on and no `memoryId`, a NEW memory
+      record is created and its id is returned (in the terminal `result` event), and a `threadId`
+      is auto-generated. Reuse the returned `memoryId`/`threadId` on later turns for continuity —
+      otherwise each call starts a new, history-less conversation.
+    - `conversationName`: `"agent-chat"` (name given to an auto-created memory).
+    - `recentK`: null = include ALL recorded turns; `0` = ignore history this turn.
+    - `usePersistentMemory`: `true` (read/write OpenSearch-backed memory).
+    - `toolStrategy`: `"granular"`.
+    - `enabledSearchMethods`: null = ALL granular retrieval tools — `keyword_search`,
+      `semantic_search`, `neo4j_search` (+ its `neo4j_get_element_by_id` /
+      `neo4j_explore_related_nodes` companions), `spatial_search`, `opengeodata_search`,
+      `agent_kb_search`, `get_kb_block`. Supplying a list restricts to those names (the neo4j
+      companions are kept whenever `neo4j_search` is listed; `agent_kb_search`/`get_kb_block` are
+      dropped unless explicitly named).
+    - `includeMcpTools`: server default `AGENT_INCLUDE_MCP_TOOLS` (ON); send `false` to disable.
+    - `mcpModules`: null = all MCP modules (when MCP tools are on).
+    - `smartToolRouting`: `true`.
+    - `useSupervisor`: server default `AGENT_SUPERVISOR` (ON = supervisor-over-peers graph).
+    - `codeExec`: server default `AGENT_CODE_EXEC` (ON = sandboxed `execute_code` tool); send
+      `false` to disable.
+    - `agentDev`: server default `AGENT_DEV` (off = status-only SSE). When true, also emit the SSE
+      detail tier — tool args/results and LLM interactions. (Streaming-only; ignored by
+      `/agent/chat`.)
+    - `forcedIntent`: none (automatic intent classification).
+    - `fileIds` / `filePaths` / `skillPaths`: none.
+    - `verbose`: `false`.
+
+    **Uploading files**
+
+    1. POST the file(s) to `/agent/files/upload` (multipart/form-data, form field `file` or
+       `files`); the response returns a `file_id` for each file.
+    2. Send those ids here as `fileIds`, with your `userQuery` and (for continuity) a stable
+       `threadId`/`memoryId`. The agent stages each file into its code/geo tools — inside
+       `execute_code` the file is reachable via the `input_files` argument and appears in the
+       working directory under both its `file_id` and its original filename. An extracted
+       shapefile (.shp/.shx/.dbf uploaded separately) can be referenced by ANY one component's
+       `file_id`; the siblings are auto-discovered. A file stays attached to the session
+       (keyed by `threadId`) on later turns, so a follow-up like "now plot it" can omit `fileIds`.
+
+       Example: `{ "userQuery": "Inspect this CSV and summarize by primary type",
+       "fileIds": ["file_0123456789ab"], "threadId": "agent-thread-1", "memoryId": "agent-mem-1" }`
 
     ---
     tags:
@@ -1384,9 +1468,9 @@ def agent_chat_stream():
               example: granular
             includeMcpTools:
               type: boolean
-              default: false
-              description: Whether to include MCP-backed tools in the agent toolset.
-              example: false
+              nullable: true
+              description: Include MCP-backed tools (spatial/data analysis) in the agent toolset. Omit to use the server default from AGENT_INCLUDE_MCP_TOOLS (ON); send false to disable for this request.
+              example: true
             include_mcp_tools:
               type: boolean
               description: Snake_case alias for `includeMcpTools`.
@@ -1507,6 +1591,33 @@ def agent_chat_stream():
               default: false
               description: Enables verbose LangChain/agent execution logging.
               example: false
+            useSupervisor:
+              type: boolean
+              nullable: true
+              description: Use the supervisor-over-peers orchestration graph. Omit to use the server default from AGENT_SUPERVISOR (ON); send false to use the legacy agent-as-tools path.
+              example: true
+            use_supervisor:
+              type: boolean
+              nullable: true
+              description: Snake_case alias for `useSupervisor`.
+            codeExec:
+              type: boolean
+              nullable: true
+              description: Enable the sandboxed `execute_code` tool. Omit to use the server default from AGENT_CODE_EXEC (ON); send false to disable for this request.
+              example: true
+            code_exec:
+              type: boolean
+              nullable: true
+              description: Snake_case alias for `codeExec`.
+            agentDev:
+              type: boolean
+              nullable: true
+              description: Streaming-only. When true, emit the SSE detail tier (tool args/results, LLM interactions); omit to use the server default from AGENT_DEV (off = status-only events).
+              example: false
+            agent_dev:
+              type: boolean
+              nullable: true
+              description: Snake_case alias for `agentDev`.
           example:
             userQuery: Inspect the attached CSV and summarize the main columns.
             memoryId: demo-session-1
@@ -1514,7 +1625,6 @@ def agent_chat_stream():
             conversationName: Streaming CSV analysis
             recentK: 8
             toolStrategy: granular
-            includeMcpTools: false
             enabledSearchMethods: ["keyword_search", "semantic_search", "opengeodata_search"]
             usePersistentMemory: true
             smartToolRouting: true
@@ -1522,6 +1632,7 @@ def agent_chat_stream():
             fileIds: ["file_0123456789ab"]
             skillPaths: ["./skills"]
             verbose: false
+            agentDev: false
     responses:
       200:
         description: |
