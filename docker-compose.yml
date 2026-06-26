@@ -71,6 +71,9 @@ services:
       - MCP_SERVER_URL=http://mcp-server:8000/mcp/
       - PORT=5002
       - AGENT_FILE_STORAGE_ROOT=/app/agent_chat_files
+      # Uploaded + generated files otherwise accumulate forever. Opt-in TTL sweep: set
+      # AGENT_FILE_RETENTION_DAYS > 0 to delete files older than N days (0/unset = keep forever).
+      - AGENT_FILE_RETENTION_DAYS=${AGENT_FILE_RETENTION_DAYS:-0}
       # Search feature flags (defaults; override in .env if desired)
       - SPATIAL_BACKEND_ENABLED=${SPATIAL_BACKEND_ENABLED:-1}
       - SEMANTIC_BACKEND_ENABLED=${SEMANTIC_BACKEND_ENABLED:-1}

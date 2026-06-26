@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
+import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 from uuid import uuid4
@@ -73,6 +76,142 @@ def _build_download_url(file_id: str) -> str:
     return f"/agent/files/{file_id}/download"
 
 
+# ---------------------------------------------------------------------------
+# Retention / TTL sweep
+# ---------------------------------------------------------------------------
+# The store has no other GC: uploads + generated outputs accumulate forever. An OPT-IN TTL
+# sweep deletes data files (and their metadata) older than AGENT_FILE_RETENTION_DAYS. It is
+# DISABLED by default (unset / <= 0) so existing deployments keep their current behavior until
+# an operator opts in — deleting user files is irreversible. Age is measured from each file's
+# last-modified time. The sweep runs opportunistically (throttled) when files are created, so
+# no background scheduler is needed; it can also be invoked directly (cron / CLI).
+
+logger = logging.getLogger(__name__)
+
+_SECONDS_PER_DAY = 86400.0
+_DEFAULT_SWEEP_INTERVAL_SECONDS = 3600.0
+_LAST_SWEEP = {"t": 0.0}
+_SWEEP_LOCK = threading.Lock()
+
+
+def _retention_seconds() -> Optional[float]:
+    """TTL in seconds from AGENT_FILE_RETENTION_DAYS, or None when retention is disabled
+    (unset, non-numeric, or <= 0). None => keep files forever (the default)."""
+    raw = os.getenv("AGENT_FILE_RETENTION_DAYS")
+    if raw is None:
+        return None
+    try:
+        days = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return days * _SECONDS_PER_DAY if days > 0 else None
+
+
+def _sweep_interval_seconds() -> float:
+    try:
+        return max(60.0, float(os.getenv("AGENT_FILE_SWEEP_INTERVAL_SECONDS",
+                                         str(_DEFAULT_SWEEP_INTERVAL_SECONDS))))
+    except (TypeError, ValueError):
+        return _DEFAULT_SWEEP_INTERVAL_SECONDS
+
+
+def sweep_expired_files(max_age_days: Optional[float] = None, *, now: Optional[float] = None) -> Dict[str, int]:
+    """Delete stored files (uploads + outputs) and their metadata older than the TTL.
+
+    Age is each file's mtime. Deleting an expired data file also removes its ``metadata/<id>.json``
+    sidecar; an expired metadata json whose data file is already gone is removed too (a present,
+    non-expired data file is never orphaned). TTL comes from *max_age_days* else
+    AGENT_FILE_RETENTION_DAYS; <= 0 / unset disables the sweep (no-op). Never raises — a sweep
+    must not break an upload or a request. Returns counts: {scanned, deleted, freed_bytes, errors}.
+    """
+    ttl = (max_age_days * _SECONDS_PER_DAY) if (max_age_days and max_age_days > 0) else _retention_seconds()
+    result = {"scanned": 0, "deleted": 0, "freed_bytes": 0, "errors": 0}
+    if not ttl:
+        return result
+    cutoff = (time.time() if now is None else now) - ttl
+    try:
+        root = storage_root()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("File sweep skipped: storage root unavailable (%s)", exc)
+        return result
+
+    def _expired(p: Path) -> bool:
+        try:
+            return p.stat().st_mtime < cutoff
+        except OSError:
+            return False
+
+    # 1) expired DATA files (+ their metadata sidecar)
+    for sub in ("uploads", "outputs"):
+        d = root / sub
+        if not d.is_dir():
+            continue
+        for p in d.iterdir():
+            if not p.is_file():
+                continue
+            result["scanned"] += 1
+            if not _expired(p):
+                continue
+            try:
+                size = p.stat().st_size
+                p.unlink()
+                result["deleted"] += 1
+                result["freed_bytes"] += size
+            except OSError:
+                result["errors"] += 1
+                continue
+            file_id = p.name.split("__", 1)[0]
+            meta = root / "metadata" / f"{file_id}.json"
+            try:
+                if meta.is_file():
+                    result["freed_bytes"] += meta.stat().st_size
+                    meta.unlink()
+                    result["deleted"] += 1
+            except OSError:
+                pass
+
+    # 2) expired ORPHAN metadata (its data file is already gone) — never orphan a present file
+    meta_dir = root / "metadata"
+    if meta_dir.is_dir():
+        for mp in meta_dir.glob("*.json"):
+            if not _expired(mp):
+                continue
+            file_id = mp.stem
+            data_present = any(
+                next((root / sub).glob(f"{file_id}__*"), None) is not None
+                for sub in ("uploads", "outputs")
+            )
+            if data_present:
+                continue
+            try:
+                mp.unlink()
+                result["deleted"] += 1
+            except OSError:
+                result["errors"] += 1
+
+    if result["deleted"]:
+        logger.info("File sweep removed %d item(s), freed %d bytes from %s",
+                    result["deleted"], result["freed_bytes"], root)
+    return result
+
+
+def maybe_sweep_expired_files() -> None:
+    """Opportunistic, throttled sweep — at most once per AGENT_FILE_SWEEP_INTERVAL_SECONDS per
+    process. Called from the file-creation paths so retention is enforced without a scheduler.
+    No-op when retention is disabled. Never raises."""
+    if _retention_seconds() is None:
+        return
+    nowt = time.time()
+    with _SWEEP_LOCK:
+        if nowt - _LAST_SWEEP["t"] < _sweep_interval_seconds():
+            return
+        _LAST_SWEEP["t"] = nowt
+    try:
+        sweep_expired_files()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Opportunistic file sweep failed: %s", exc)
+
+
 def get_file_record(file_id: str) -> Optional[Dict[str, Any]]:
     if not file_id:
         return None
@@ -135,6 +274,7 @@ def _record_path(record: Dict[str, Any]) -> Path:
 
 
 def save_uploaded_file(file_storage: FileStorage) -> Dict[str, Any]:
+    maybe_sweep_expired_files()
     original_name = secure_filename(file_storage.filename or "upload.bin") or "upload.bin"
     file_id = f"file_{uuid4().hex[:12]}"
     relative_path = Path("uploads") / f"{file_id}__{original_name}"
@@ -154,6 +294,7 @@ def save_uploaded_file(file_storage: FileStorage) -> Dict[str, Any]:
 
 
 def create_output_file(filename: str, content: str, overwrite: bool = False) -> Dict[str, Any]:
+    maybe_sweep_expired_files()
     safe_name = secure_filename(filename or "agent_output.txt") or "agent_output.txt"
     existing_record: Optional[Dict[str, Any]] = None
 
@@ -193,6 +334,7 @@ def create_output_file_from_path(
     filename: Optional[str] = None,
     overwrite: bool = False,
 ) -> Dict[str, Any]:
+    maybe_sweep_expired_files()
     source = Path(source_path).expanduser().resolve()
     if not source.is_file():
         raise ValueError(f"source file does not exist: {source}")
@@ -235,8 +377,10 @@ __all__ = [
     "create_output_file",
     "create_output_file_from_path",
     "get_file_record",
+    "maybe_sweep_expired_files",
     "require_file_record",
     "resolve_file_id",
     "save_uploaded_file",
     "storage_root",
+    "sweep_expired_files",
 ]
