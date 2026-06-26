@@ -871,3 +871,58 @@ def test_related_provenance_docs_not_reranked_or_truncated():
     )
     assert len(state["evidence"]) == 7   # not truncated to top_k=5; both buckets intact
     assert all(d.get("provenance") in ("curated", "content") for d in state["evidence"])
+
+
+# --- explain/describe <UUID>: deterministic by-id lookup ----------------------
+
+def test_detect_element_lookup_request():
+    from agent_runtime.supervisor.graph import _detect_element_lookup_request
+    uuid = "86df1948-9726-4d64-901c-66fcfdbca433"
+    assert _detect_element_lookup_request(uuid) == uuid                          # bare id
+    assert _detect_element_lookup_request(f"Explain {uuid}") == uuid
+    assert _detect_element_lookup_request(f"describe {uuid} please") == uuid
+    assert _detect_element_lookup_request(f"what is {uuid}?") == uuid
+    assert _detect_element_lookup_request(f"related elements of {uuid}") is None  # related handler owns this
+    assert _detect_element_lookup_request("explain dam failures") is None         # no UUID -> normal search
+
+
+def test_element_lookup_evidence_graph_then_api(monkeypatch):
+    import rag_pipeline.search.agents as agents
+    import agent_runtime.element_resolver as er
+    from agent_runtime.supervisor.graph import _element_lookup_evidence
+    UUID = "86df1948-9726-4d64-901c-66fcfdbca433"
+
+    # graph node present -> used (rich contents)
+    monkeypatch.setattr(agents, "get_neo4j_element_by_id_results",
+        lambda eid: [{"_id": eid, "_score": 1.0, "_source": {
+            "title": "National Inventory of Dams", "element_type": "dataset",
+            "contents": "All known dams in the U.S."}}])
+    docs = _element_lookup_evidence(UUID)
+    assert len(docs) == 1 and docs[0]["title"] == "National Inventory of Dams"
+    assert "dams" in docs[0]["contents"].lower()
+
+    # graph empty -> backend API fallback (works regardless of Neo4j auth/presence)
+    monkeypatch.setattr(agents, "get_neo4j_element_by_id_results", lambda eid: [])
+    monkeypatch.setattr(er, "resolve_element", lambda eid: {
+        "title": "NID", "resource_type": "dataset", "abstract": "dam inventory", "authors": [], "tags": []})
+    docs2 = _element_lookup_evidence(UUID)
+    assert len(docs2) == 1 and docs2[0]["title"] == "NID" and docs2[0]["contents"] == "dam inventory"
+    assert docs2[0]["source"] == "backend_api"
+
+
+def test_default_search_fn_short_circuits_id_lookup(monkeypatch):
+    """An 'explain <UUID>' query must be served by the deterministic by-id fetch, NOT by
+    building the LLM SearchAgent (whose tool-choice was the original failure)."""
+    import rag_pipeline.search.agents as agents
+    import agent_runtime.executor_factory as ef
+    from agent_runtime.supervisor.graph import default_search_fn
+    UUID = "86df1948-9726-4d64-901c-66fcfdbca433"
+    monkeypatch.setattr(agents, "get_neo4j_element_by_id_results",
+        lambda eid: [{"_id": eid, "_source": {"title": "NID", "element_type": "dataset", "contents": "x"}}])
+
+    def boom(*a, **k):
+        raise AssertionError("must NOT build the LLM SearchAgent for an id-lookup query")
+    monkeypatch.setattr(ef, "build_search_agent_executor", boom)
+
+    docs = default_search_fn()(f"Explain {UUID}", {"thread_id": "t"})
+    assert len(docs) == 1 and docs[0]["title"] == "NID"   # served deterministically, no LLM

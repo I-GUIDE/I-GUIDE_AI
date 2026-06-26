@@ -37,7 +37,12 @@ SEARCH_AGENT_PROMPT = (
     "4. If evidence is insufficient, explicitly say so.\n"
     "5. Do not infer local file paths or use file tools unless the user explicitly provided attached/uploaded files.\n"
     "6. If a relevant skill is available, call `load_skill` before applying that task-specific workflow.\n"
-    "7. Call `load_skill` at most once for the same skill in a user request. After it returns `status: ok` or `status: already_loaded`, do not call `load_skill` for that skill again; immediately use the relevant allowed tool or return the answer."
+    "7. Call `load_skill` at most once for the same skill in a user request. After it returns `status: ok` or `status: already_loaded`, do not call `load_skill` for that skill again; immediately use the relevant allowed tool or return the answer.\n"
+    "8. If the request contains a knowledge-element id (a UUID like "
+    "86df1948-9726-4d64-901c-66fcfdbca433), it refers to a SPECIFIC element: call a by-id tool "
+    "with that EXACT id — `neo4j_get_element_by_id` to explain/describe it, "
+    "`neo4j_explore_related_nodes` for its related elements, or `fetch_element_source` for its "
+    "source file — NOT `semantic_search`. Never paraphrase, summarize, or drop the id."
 )
 
 # CodeAgent — built by build_code_agent_executor; used by the standalone run_code_agent_query

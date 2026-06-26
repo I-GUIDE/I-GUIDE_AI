@@ -650,6 +650,66 @@ def _related_elements_evidence(element_id: str, *, depth: int = 2,
     return docs
 
 
+_ELEMENT_LOOKUP_INTENT_RE = re.compile(
+    r"\b(explain|describe|summari[sz]e|what\s+is|what'?s|tell\s+me\s+about|"
+    r"details?\s+(?:of|about|on|for)|info(?:rmation)?\s+(?:on|about|for)|overview\s+of|about)\b",
+    re.I,
+)
+
+
+def _detect_element_lookup_request(query: str) -> Optional[str]:
+    """Return the element UUID iff *query* asks to explain/describe a specific element by id, or
+    is essentially just a bare UUID. Returns None for a related-elements request (handled by
+    _detect_related_elements_request) and for any query without a UUID.
+    """
+    if not query:
+        return None
+    m = _UUID_RE.search(query)
+    if not m:
+        return None
+    uuid = m.group(1)
+    if query.strip() == uuid:               # the query IS just the id -> look it up
+        return uuid
+    if _RELATED_INTENT_RE.search(query):    # "related elements of <id>" has its own handler
+        return None
+    return uuid if _ELEMENT_LOOKUP_INTENT_RE.search(query) else None
+
+
+def _element_lookup_evidence(element_id: str) -> List[Dict[str, Any]]:
+    """Deterministic by-id element fetch for an "explain/describe <UUID>" request. Tries the
+    graph node first (rich contents); falls back to the platform backend API so it still works
+    when the element isn't in — or the agent can't reach — Neo4j. Returns 0..1 evidence docs.
+    Never raises.
+    """
+    try:
+        from rag_pipeline.search.agents import _hit_to_document, get_neo4j_element_by_id_results
+
+        hits = get_neo4j_element_by_id_results(element_id) or []
+        if hits:
+            doc = _hit_to_document(hits[0], source_name="neo4j")
+            if str(doc.get("title") or "").strip() and doc.get("title") != "Untitled":
+                return [doc]
+    except Exception:
+        pass
+    try:
+        from agent_runtime.element_resolver import resolve_element
+
+        meta = resolve_element(element_id) or {}
+        if str(meta.get("title") or "").strip():
+            return [{
+                "doc_id": element_id,
+                "source": "backend_api",
+                "title": str(meta.get("title")),
+                "element_type": str(meta.get("resource_type") or "resource"),
+                "contents": str(meta.get("abstract") or ""),
+                "authors": meta.get("authors") or [],
+                "tags": meta.get("tags") or [],
+            }]
+    except Exception:
+        pass
+    return []
+
+
 def default_search_fn(*, llm: Optional[Any] = None, tool_strategy: str = "granular",
                       include_mcp_tools: bool = False, mcp_modules: Optional[List[str]] = None,
                       enabled_search_methods: Optional[List[str]] = None,
@@ -663,9 +723,11 @@ def default_search_fn(*, llm: Optional[Any] = None, tool_strategy: str = "granul
         )
         from agent_runtime.runtime_utils import build_search_evidence_payload
 
-        # Deterministic short-circuit: "related elements of <UUID>" is answered by graph
-        # traversal + similarity, NOT by letting the LLM pick a tool (the original failure was
-        # that nothing steered it to neo4j_explore_related_nodes, so it ran a generic search).
+        # Deterministic short-circuits for id-bearing queries — do NOT rely on the LLM picking
+        # the right tool (the original failures were that nothing steered it to the by-id /
+        # related tools, so it ran a generic search and fabricated/whiffed).
+        #   * "related elements of <UUID>"  -> graph traversal + similarity (two buckets)
+        #   * "explain/describe <UUID>"     -> by-id element fetch (graph, then backend API)
         related_id = _detect_related_elements_request(query)
         if related_id:
             emit_trace_event(
@@ -674,6 +736,14 @@ def default_search_fn(*, llm: Optional[Any] = None, tool_strategy: str = "granul
                 node="search",
             )
             return _related_elements_evidence(related_id)
+        lookup_id = _detect_element_lookup_request(query)
+        if lookup_id:
+            emit_trace_event(
+                "node_started",
+                {"stage": "search", "message": f"Element lookup for {lookup_id}"},
+                node="search",
+            )
+            return _element_lookup_evidence(lookup_id)
 
         executor = build_search_agent_executor(
             llm=llm, tool_strategy=tool_strategy, include_mcp_tools=include_mcp_tools,
