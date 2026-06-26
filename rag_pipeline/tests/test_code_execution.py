@@ -23,6 +23,10 @@ from agent_runtime.code_execution import (
 
 def test_is_code_exec_enabled(monkeypatch):
     monkeypatch.delenv("AGENT_CODE_EXEC", raising=False)
+    assert is_code_exec_enabled() is True            # ON by default
+    monkeypatch.setenv("AGENT_CODE_EXEC", "0")
+    assert is_code_exec_enabled() is False           # explicit falsy disables
+    monkeypatch.setenv("AGENT_CODE_EXEC", "false")
     assert is_code_exec_enabled() is False
     monkeypatch.setenv("AGENT_CODE_EXEC", "1")
     assert is_code_exec_enabled() is True

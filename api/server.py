@@ -99,7 +99,8 @@ def _normalize_agent_chat_request(data: dict) -> dict:
     use_supervisor_raw = _coalesce(data.get("useSupervisor"), data.get("use_supervisor"))
     use_supervisor = None if use_supervisor_raw is None else bool(use_supervisor_raw)
     # code_exec is tri-state: absent (None) falls back to the AGENT_CODE_EXEC env
-    # default (off). Enables the sandboxed execute_code tool for this request.
+    # default (ON; set AGENT_CODE_EXEC=0/false to disable). Controls the sandboxed
+    # execute_code tool for this request.
     code_exec_raw = _coalesce(data.get("codeExec"), data.get("code_exec"))
     code_exec = None if code_exec_raw is None else bool(code_exec_raw)
 

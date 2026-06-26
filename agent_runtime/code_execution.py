@@ -110,8 +110,9 @@ def _sanitize_deps(dependencies: Optional[List[Any]]) -> Tuple[List[str], List[s
 
 
 def is_code_exec_enabled() -> bool:
-    """Whether code execution is enabled (``AGENT_CODE_EXEC`` truthy)."""
-    return (os.getenv("AGENT_CODE_EXEC") or "").strip().lower() in {"1", "true", "yes", "on"}
+    """Whether code execution is enabled. **On by default**; set ``AGENT_CODE_EXEC`` to a falsy
+    value (0/false/no/off) to disable the sandboxed ``execute_code`` tool."""
+    return (os.getenv("AGENT_CODE_EXEC", "1") or "").strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _clip(text: Any, limit: int = MAX_OUTPUT_CHARS) -> str:
