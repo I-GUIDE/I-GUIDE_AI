@@ -42,6 +42,17 @@ def _landing_url(src: Dict[str, Any]) -> str:
     if url:
         return str(url)
     links = src.get("links")
+    if isinstance(links, dict):
+        # OpenGeoData assets carry links as {label: url} (e.g. {"Digital Data": "...", "Original
+        # Metadata": "..."}). Prefer a landing/data page over an XML metadata record, else the
+        # first http(s) value.
+        http_vals = [
+            (str(k), str(v)) for k, v in links.items()
+            if isinstance(v, str) and v.startswith(("http://", "https://"))
+        ]
+        if http_vals:
+            non_meta = [v for k, v in http_vals if "metadata" not in k.lower()]
+            return non_meta[0] if non_meta else http_vals[0][1]
     if isinstance(links, list):
         for ln in links:
             if isinstance(ln, dict) and (ln.get("url") or ln.get("href")):

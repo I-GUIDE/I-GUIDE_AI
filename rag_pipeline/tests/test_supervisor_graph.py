@@ -742,6 +742,29 @@ def test_format_documents_emits_url_line(monkeypatch):
     assert "url: https://platform.i-guide.io/datasets/abc" in out
 
 
+def test_opengeodata_hits_carry_landing_url_for_hyperlink():
+    """OpenGeoData assets carry links as a {label: url} DICT; _landing_url must extract a landing
+    url from it (preferring a non-metadata link) so the doc gets a url the synthesizer can render
+    as a hyperlink, mirroring internal KB elements."""
+    from agent_runtime.langchain_granular_tools import _landing_url, _normalize_hits
+    from agent_runtime.supervisor.evidence_subgraph import _element_url
+
+    links = {"Digital Data": "https://doi.org/10.5066/F7833R62",
+             "Original Metadata": "https://data.usgs.gov/meta.xml"}
+    assert _landing_url({"links": links}) == "https://doi.org/10.5066/F7833R62"   # non-metadata wins
+    # metadata-only -> still returns a link rather than nothing
+    assert _landing_url({"links": {"Original Metadata": "https://x/meta.xml"}}) == "https://x/meta.xml"
+    # list shape still supported; top-level url/landing_url still preferred
+    assert _landing_url({"links": [{"url": "https://l/1"}]}) == "https://l/1"
+    assert _landing_url({"url": "https://top"}) == "https://top"
+
+    hit = {"_id": "og-1", "_score": 1.0, "_source": {
+        "title": "US Dams", "element_type": "opengeodata", "contents": "inventory", "links": links}}
+    doc = _normalize_hits([hit], "opengeodata")[0]
+    assert doc["url"] == "https://doi.org/10.5066/F7833R62"
+    assert _element_url(doc) == doc["url"]     # surfaced end-to-end for the hyperlink
+
+
 # --- audit precision: only HIGH severity warns; reconcile is crash-proof ------
 
 def test_medium_severity_does_not_warn_user():
