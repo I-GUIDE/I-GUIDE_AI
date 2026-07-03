@@ -42,7 +42,14 @@ SEARCH_AGENT_PROMPT = (
     "86df1948-9726-4d64-901c-66fcfdbca433), it refers to a SPECIFIC element: call a by-id tool "
     "with that EXACT id — `neo4j_get_element_by_id` to explain/describe it, "
     "`neo4j_explore_related_nodes` for its related elements, or `fetch_element_source` for its "
-    "source file — NOT `semantic_search`. Never paraphrase, summarize, or drop the id."
+    "source file — NOT `semantic_search`. Never paraphrase, summarize, or drop the id.\n"
+    "9. `opengeodata_search` (when available) finds EXTERNAL open geospatial datasets via "
+    "federated public sources (NASA CMR, Data.gov, Socrata) and COMPLEMENTS the internal I-GUIDE "
+    "KB — it does not replace it. When the user wants to DISCOVER datasets/data about a topic, "
+    "especially tied to a place (e.g. 'datasets about dams in Illinois', 'satellite imagery for "
+    "California wildfires', 'open data on air quality'), call `opengeodata_search` IN ADDITION TO "
+    "the internal keyword/semantic search and keep both result sets. Skip it for questions that "
+    "are purely about existing I-GUIDE KB elements."
 )
 
 # CodeAgent — built by build_code_agent_executor; used by the standalone run_code_agent_query
