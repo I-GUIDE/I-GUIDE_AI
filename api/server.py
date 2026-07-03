@@ -1115,6 +1115,26 @@ def agent_chat():
               type: object
               description: Reserved object for generated artifacts when supplied by upstream agent payloads.
               example: {}
+            opengeodata_results:
+              type: array
+              description: >-
+                Structured OpenGeoData hits (from `opengeodata_search`) surfaced alongside the
+                markdown answer, projected from the run's evidence. Empty when the run used no
+                external OpenGeoData. Each item carries title, url (landing page), source/provider,
+                and — when available — bbox, datetime, license, links.
+              items:
+                type: object
+                properties:
+                  doc_id: { type: string, example: cmr-1 }
+                  title: { type: string, example: US Army Corps National Inventory of Dams }
+                  url: { type: string, example: "https://doi.org/10.5066/F7833R62" }
+                  source: { type: string, example: opengeodata }
+                  provider: { type: string, example: Data.gov }
+                  bbox:
+                    type: array
+                    items: { type: number }
+                    example: [-91.5, 37.0, -87.5, 42.5]
+              example: []
             agent_result:
               type: object
               description: JSON-safe raw agent execution result, including orchestration result, route trace, final answer, thread id, and available skills.

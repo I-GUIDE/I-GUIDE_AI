@@ -242,3 +242,38 @@ def test_uploaded_files_carry_to_later_turns(monkeypatch):
     # a DIFFERENT session does not see them
     acs.run_agent_chat(user_input="hi", thread_id="s2", use_persistent_memory=False)
     assert rec[3]["file_ids"] == []
+
+
+# --- opengeodata results surfaced as structured JSON objects in the response ---
+
+def test_extract_opengeodata_results_projects_only_opengeodata():
+    result = {"orchestration_result": {"evidence": [
+        {"doc_id": "og1", "source": "opengeodata", "element_type": "opengeodata", "title": "US Dams",
+         "url": "https://doi.org/x", "bbox": [-90, 40, -88, 42], "provider": "USGS"},
+        {"doc_id": "kb1", "source": "keyword", "element_type": "dataset", "title": "Internal DS"},
+    ]}}
+    ogd = acs._extract_opengeodata_results(result)
+    assert [d["doc_id"] for d in ogd] == ["og1"]                       # internal KB hit excluded
+    assert ogd[0]["title"] == "US Dams" and ogd[0]["bbox"] == [-90, 40, -88, 42]
+    assert acs._extract_opengeodata_results({}) == []
+    assert acs._extract_opengeodata_results(None) == []
+
+
+def test_run_agent_chat_surfaces_opengeodata_results(monkeypatch):
+    """The client response exposes OpenGeoData hits as structured JSON objects projected from the
+    run's evidence, alongside the markdown answer."""
+    def fake(query, *, chat_history=None, thread_id=None, **kwargs):
+        return {
+            "final_answer": "See [US Dams](https://doi.org/x).",
+            "thread_id": thread_id, "available_skills": [], "route_trace": {},
+            "orchestration_result": {"evidence": [
+                {"doc_id": "og1", "source": "opengeodata", "element_type": "opengeodata",
+                 "title": "US Dams", "url": "https://doi.org/x", "provider": "USGS"},
+                {"doc_id": "kb1", "source": "semantic", "element_type": "dataset", "title": "KB DS"},
+            ]},
+        }
+    monkeypatch.setattr(acs, "run_agent_query", fake)
+    resp = acs.run_agent_chat(user_input="open datasets for dams", thread_id="s1",
+                              use_persistent_memory=False)
+    ogd = resp["opengeodata_results"]
+    assert [d["doc_id"] for d in ogd] == ["og1"] and ogd[0]["url"] == "https://doi.org/x"

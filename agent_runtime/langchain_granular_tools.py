@@ -69,17 +69,23 @@ def _normalize_hits(hits: List[Dict[str, Any]], source: str) -> List[Dict[str, A
         doc_id = str(hit.get("_id") or doc.get("doc_id") or "")
         if not doc_id:
             continue
-        normalized.append(
-            {
-                "doc_id": doc_id,
-                "source": source,
-                "score": hit.get("_score", 0.0),
-                "title": doc.get("title") or "Untitled",
-                "element_type": doc.get("element_type") or doc.get("resource-type") or "resource",
-                "contents": (doc.get("contents") or "")[:800],
-                "url": _landing_url(doc),  # external landing url (OpenGeoData); "" for internal
-            }
-        )
+        item: Dict[str, Any] = {
+            "doc_id": doc_id,
+            "source": source,
+            "score": hit.get("_score", 0.0),
+            "title": doc.get("title") or "Untitled",
+            "element_type": doc.get("element_type") or doc.get("resource-type") or "resource",
+            "contents": (doc.get("contents") or "")[:800],
+            "url": _landing_url(doc),  # external landing url (OpenGeoData); "" for internal
+        }
+        # Preserve the structured geospatial metadata carried by external (OpenGeoData) hits so the
+        # final response can surface them as rich JSON objects (map bbox, provider, license, ...).
+        # These keys are absent on internal KB hits, so this is a no-op there.
+        for field in ("bbox", "datetime", "provider", "license", "links", "keywords", "source_system"):
+            value = doc.get(field)
+            if value is not None:
+                item[field] = value
+        normalized.append(item)
     return normalized
 
 

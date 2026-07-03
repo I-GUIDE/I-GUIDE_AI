@@ -95,6 +95,26 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
+def _extract_opengeodata_results(agent_result: Optional[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """Project the OpenGeoData hits out of the run's evidence so the client receives them as
+    structured JSON objects (title, url, source, provider, bbox, links, ...) alongside the
+    markdown answer. Returns [] when the run used no OpenGeoData (or a non-supervisor path)."""
+    if not isinstance(agent_result, Mapping):
+        return []
+    orch = agent_result.get("orchestration_result")
+    evidence = orch.get("evidence") if isinstance(orch, Mapping) else None
+    results: List[Dict[str, Any]] = []
+    for doc in (evidence or []):
+        if not isinstance(doc, Mapping):
+            continue
+        src = doc.get("document") if isinstance(doc.get("document"), Mapping) else doc
+        etype = str(src.get("element_type") or src.get("resource-type") or "").strip().lower()
+        srcname = str(src.get("source") or src.get("source_system") or "").strip().lower()
+        if etype == "opengeodata" or srcname == "opengeodata":
+            results.append(_json_safe(dict(src)))
+    return results
+
+
 def _normalize_file_paths(file_paths: Optional[Sequence[Any]]) -> List[str]:
     if isinstance(file_paths, (str, bytes)):
         file_paths = [file_paths]
@@ -298,6 +318,7 @@ def run_agent_chat(
         "enabled_search_methods": normalized_enabled_search_methods,
         "use_persistent_memory": use_persistent_memory,
         "route_trace": result.get("route_trace") or {},
+        "opengeodata_results": _extract_opengeodata_results(result),
         "agent_result": _json_safe(result),
     }
     if memory_warning:
@@ -481,6 +502,7 @@ def stream_agent_chat_events(
         "enabled_search_methods": normalized_enabled_search_methods,
         "use_persistent_memory": use_persistent_memory,
         "route_trace": (completed_response or {}).get("route_trace") or {},
+        "opengeodata_results": _extract_opengeodata_results(completed_response or {}),
         "agent_result": _json_safe(completed_response or {}),
     }
     if memory_warning:
