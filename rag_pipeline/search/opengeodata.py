@@ -602,59 +602,18 @@ def run_opengeodata(
     providers: Optional[Dict[str, Any]] = None,
     nl: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    logger.info("OpenGeoData run_opengeodata() called")
-    try:
-        if nl:
-            try:
-                logger.info("OpenGeoData NL parsing enabled; processing NL query.")
-                q, bb, tt = get_q_bbox_timer_openai(
-                    nl["user_query"],
-                    current_date=nl["current_date"],
-                    api_base=nl.get("api_base"),
-                    api_key=nl.get("api_key"),
-                    model=nl["model"],
-                    default_bbox=tuple(nl.get("default_bbox")) if nl.get("default_bbox") else None,
-                    default_timer=tuple(nl.get("default_timer")) if nl.get("default_timer") else None,
-                )
-                logger.info(
-                    "OpenGeoData NL augmented query: %s bbox:%s timer:%s",
-                    q,
-                    bb,
-                    tt,
-                )
-                logger.info(f"OpenGeoData will call discover() with: query='{q}', bbox={bb}, timer={tt}")
-            except NLQueryError as nl_exc:
-                logger.warning(f"OpenGeoData NL parsing failed: {nl_exc}. Falling back to direct query.")
-                logger.info(f"OpenGeoData fallback: nl dict keys={list(nl.keys())}, nl.get('default_bbox')={nl.get('default_bbox')}, nl.get('default_timer')={nl.get('default_timer')}")
-    
-                # Fall back to using the query directly without NL parsing
-                q = nl.get("user_query") or query or ""
-                bb = _valid_bbox(nl.get("default_bbox") or bbox) if (nl.get("default_bbox") or bbox) else None
-                tt: Optional[Tuple[Optional[str], Optional[str]]] = None
-                timer_to_use = nl.get("default_timer") or timer
-                if timer_to_use and len(timer_to_use) >= 2:
-                    tt = (_iso_date(timer_to_use[0]), _iso_date(timer_to_use[1]))
-        else:
-            logger.info("OpenGeoData NL parsing not used; proceeding with direct query.")
-            q = query or ""
-            bb = _valid_bbox(bbox) if bbox else None
-            tt: Optional[Tuple[Optional[str], Optional[str]]] = None
-            if timer and len(timer) >= 2:
-                tt = (_iso_date(timer[0]), _iso_date(timer[1]))
-        assets = discover(q, bb, tt, limit=limit, providers=providers)
-        assets = sorted(assets, key=lambda a: -score(a, q.lower().split(), bb, tt))[:limit]
-        result = {
-            "query": q,
-            "bbox": list(bb) if bb else None,
-            "timer": [tt[0], tt[1]] if tt else [None, None],
-            "count": len(assets),
-            "assets": [_asset_to_dict(asset) for asset in assets],
-        }
-        return result
-    except NLQueryError as exc:
-        raise OpenGeoDataError(str(exc))
-    except Exception as exc:
-        raise OpenGeoDataError(str(exc))
+    """Run an OpenGeoData discovery query; returns ``{query, bbox, timer, count, assets}``.
+
+    Delegates to the refactored engine in :mod:`opengeodata_new` (new sources — NASA CMR,
+    Data.gov, Socrata — with LLM query normalization via the internal ``llm_utils.call_llm``).
+    Kept as the stable module entry point so ``get_opengeodata_results`` / ``run_opengeodata_search``
+    (and the tests that patch ``opengeodata.run_opengeodata``) keep working unchanged.
+    """
+    from .opengeodata_new import run_opengeodata as _run_engine
+
+    return _run_engine(
+        query=query, bbox=bbox, timer=timer, limit=limit, providers=providers, nl=nl,
+    )
 
 
 def _current_date_iso() -> str:

@@ -125,3 +125,26 @@ def test_opengeodata_real_query_returns_results():
     doc = hits[0]["_source"]
     assert doc.get("doc_id")
     assert doc.get("title")
+
+
+def test_get_opengeodata_results_routes_through_new_engine(monkeypatch):
+    """The tool entry now delegates to the refactored engine (opengeodata_new). Mock that
+    engine's LLM NL-parse + discover and confirm get_opengeodata_results returns normalized hits
+    produced by it — proving the wiring, not just that the old mocks still intercept."""
+    import rag_pipeline.search.opengeodata_new as ND
+    from rag_pipeline.search.opengeodata_utils import GeoAsset
+
+    # internal LLM NL-parse: no place -> no network geocoding
+    monkeypatch.setattr(ND, "call_my_llm",
+                        lambda prompt: '{"q": "dams", "place": null, "timer": [null, null]}')
+    asset = GeoAsset(id="cmr-1", title="US Dams", abstract="national dam inventory",
+                     keywords=["dams"], bbox=None, datetime=None, license="CC-BY",
+                     links={"self": "http://example/x"}, source="cmr", provider="NASA CMR")
+    monkeypatch.setattr(ND, "discover", lambda *a, **k: [asset])
+
+    hits = get_opengeodata_results("risk of aging dams", limit=5)
+    assert hits, "expected normalized hits from the new engine"
+    src = hits[0]["_source"]
+    assert src["title"] == "US Dams"
+    assert src["element_type"] == "opengeodata"
+    assert src["source_system"] == "cmr"
