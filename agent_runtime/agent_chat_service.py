@@ -98,21 +98,30 @@ def _json_safe(value: Any) -> Any:
 def _extract_opengeodata_results(agent_result: Optional[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     """Project the OpenGeoData hits out of the run's evidence so the client receives them as
     structured JSON objects (title, url, source, provider, bbox, links, ...) alongside the
-    markdown answer. Returns [] when the run used no OpenGeoData (or a non-supervisor path)."""
-    if not isinstance(agent_result, Mapping):
+    markdown answer. Returns [] when the run used no OpenGeoData (or a non-supervisor path).
+
+    Never raises: this runs while building the terminal streaming response, so any failure here
+    must degrade to [] rather than abort the stream (which would deprive the client of its
+    result event).
+    """
+    try:
+        if not isinstance(agent_result, Mapping):
+            return []
+        orch = agent_result.get("orchestration_result")
+        evidence = orch.get("evidence") if isinstance(orch, Mapping) else None
+        results: List[Dict[str, Any]] = []
+        for doc in (evidence or []):
+            if not isinstance(doc, Mapping):
+                continue
+            src = doc.get("document") if isinstance(doc.get("document"), Mapping) else doc
+            etype = str(src.get("element_type") or src.get("resource-type") or "").strip().lower()
+            srcname = str(src.get("source") or src.get("source_system") or "").strip().lower()
+            if etype == "opengeodata" or srcname == "opengeodata":
+                results.append(_json_safe(dict(src)))
+        return results
+    except Exception as exc:  # pragma: no cover - defensive; must not break the response
+        logger.warning("Failed to extract opengeodata_results: %s", exc)
         return []
-    orch = agent_result.get("orchestration_result")
-    evidence = orch.get("evidence") if isinstance(orch, Mapping) else None
-    results: List[Dict[str, Any]] = []
-    for doc in (evidence or []):
-        if not isinstance(doc, Mapping):
-            continue
-        src = doc.get("document") if isinstance(doc.get("document"), Mapping) else doc
-        etype = str(src.get("element_type") or src.get("resource-type") or "").strip().lower()
-        srcname = str(src.get("source") or src.get("source_system") or "").strip().lower()
-        if etype == "opengeodata" or srcname == "opengeodata":
-            results.append(_json_safe(dict(src)))
-    return results
 
 
 def _normalize_file_paths(file_paths: Optional[Sequence[Any]]) -> List[str]:

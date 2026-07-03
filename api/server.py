@@ -150,6 +150,7 @@ def _format_agent_chat_result(payload: dict) -> dict:
         "filePaths": payload.get("filePaths") or payload.get("file_paths") or [],
         "skillPaths": payload.get("skillPaths") or payload.get("skill_roots") or [],
         "availableSkills": payload.get("availableSkills") or payload.get("available_skills") or [],
+        "opengeodata_results": payload.get("opengeodata_results") or [],
     }
     warning = payload.get("warning")
     if warning:

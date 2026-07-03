@@ -277,3 +277,12 @@ def test_run_agent_chat_surfaces_opengeodata_results(monkeypatch):
                               use_persistent_memory=False)
     ogd = resp["opengeodata_results"]
     assert [d["doc_id"] for d in ogd] == ["og1"] and ogd[0]["url"] == "https://doi.org/x"
+
+
+def test_format_agent_chat_result_passes_through_opengeodata_results():
+    """The API output shaper (_format_agent_chat_result) — used by BOTH /agent/chat and the
+    streaming `result` event — must surface opengeodata_results; it was being dropped."""
+    from api.server import _format_agent_chat_result
+    out = _format_agent_chat_result({"answer": "a", "opengeodata_results": [{"doc_id": "og1", "url": "https://x"}]})
+    assert out["opengeodata_results"] == [{"doc_id": "og1", "url": "https://x"}]
+    assert _format_agent_chat_result({"answer": "a"})["opengeodata_results"] == []   # default empty
