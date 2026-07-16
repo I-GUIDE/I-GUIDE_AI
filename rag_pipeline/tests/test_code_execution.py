@@ -368,3 +368,18 @@ def test_code_exec_flag_controls_tool_wiring(monkeypatch):
     # Per-request OFF -> not wired.
     sg.default_code_fn(code_exec=False)("write code", [], {"thread_id": None})
     assert "execute_code" not in captured["tools"]
+
+
+def test_unavailable_work_root_returns_tool_error_not_crash(monkeypatch, tmp_path):
+    """A missing/uncreatable work root (e.g. the DooD bind mount absent) must yield an
+    ExecResult error — the deployed failure mode was mkdtemp raising FileNotFoundError and
+    killing the whole turn/stream."""
+    import agent_runtime.code_execution as ce
+    blocker = tmp_path / "not_a_dir"
+    blocker.write_text("file, not dir")
+    # _work_root() catches makedirs failure -> force mkdtemp itself to fail instead.
+    monkeypatch.setattr(ce, "_work_root", lambda: str(blocker))
+    res = LocalSubprocessExecutor().execute("print('hi')")
+    assert res.exit_code is None
+    assert "work dir unavailable" in (res.error or "")
+    assert "AGENT_CODE_EXEC_WORK_ROOT" in (res.error or "")

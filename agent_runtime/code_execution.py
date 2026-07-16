@@ -275,7 +275,18 @@ class CodeExecutor:
                               backend=self.backend, code=(code or ""))
         timeout = int(timeout or DEFAULT_TIMEOUT)
         deps, rejected = _sanitize_deps(dependencies)
-        work = Path(tempfile.mkdtemp(prefix="agentexec_", dir=_work_root()))
+        try:
+            work = Path(tempfile.mkdtemp(prefix="agentexec_", dir=_work_root()))
+        except OSError as exc:
+            # A missing/unwritable work root (e.g. the AGENT_CODE_EXEC_WORK_ROOT bind mount not
+            # present in this deployment) must surface as a TOOL error the agent can report —
+            # never crash the whole turn/stream.
+            return ExecResult(
+                exit_code=None,
+                error=(f"code-execution work dir unavailable: {exc}. "
+                       f"Check {WORK_ROOT_ENV} and its bind mount in the deployment."),
+                backend=self.backend, code=(code or ""),
+            )
         try:
             (work / "script.py").write_text(code or "", encoding="utf-8")
             # Stage uploaded/input files into the work dir so the code can read them.
