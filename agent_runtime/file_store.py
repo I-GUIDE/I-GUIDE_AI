@@ -76,6 +76,28 @@ def _build_download_url(file_id: str) -> str:
     return f"/agent/files/{file_id}/download"
 
 
+def _public_base_url() -> str:
+    """Optional absolute origin for download URLs (e.g. ``http://149.165.147.219:3500``).
+
+    Unset (default): ``download_url`` stays HOST-RELATIVE and clients resolve it against the
+    origin they call — robust across port mappings and proxies. Set ``AGENT_PUBLIC_BASE_URL``
+    when clients can't do that resolution and need ready-to-use absolute URLs.
+    """
+    base = (os.getenv("AGENT_PUBLIC_BASE_URL") or "").strip().rstrip("/")
+    return base if base.lower().startswith(("http://", "https://")) else ""
+
+
+def _with_public_url(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Absolutize the record's download_url for EMISSION only. Persisted metadata always keeps
+    the host-relative path, so records stay valid if the public base URL changes later."""
+    base = _public_base_url()
+    url = record.get("download_url")
+    if base and isinstance(url, str) and url.startswith("/"):
+        record = dict(record)
+        record["download_url"] = f"{base}{url}"
+    return record
+
+
 # ---------------------------------------------------------------------------
 # Retention / TTL sweep
 # ---------------------------------------------------------------------------
@@ -218,7 +240,7 @@ def get_file_record(file_id: str) -> Optional[Dict[str, Any]]:
     meta_path = _metadata_path(str(file_id).strip())
     if not meta_path.exists():
         return None
-    return json.loads(meta_path.read_text(encoding="utf-8"))
+    return _with_public_url(json.loads(meta_path.read_text(encoding="utf-8")))
 
 
 def require_file_record(file_id: str) -> Dict[str, Any]:
@@ -290,7 +312,7 @@ def save_uploaded_file(file_storage: FileStorage) -> Dict[str, Any]:
         "size_bytes": target.stat().st_size,
         "download_url": _build_download_url(file_id),
     }
-    return _write_record(record)
+    return _with_public_url(_write_record(record))
 
 
 def create_output_file(filename: str, content: str, overwrite: bool = False) -> Dict[str, Any]:
@@ -326,7 +348,7 @@ def create_output_file(filename: str, content: str, overwrite: bool = False) -> 
         "size_bytes": target.stat().st_size,
         "download_url": _build_download_url(file_id),
     }
-    return _write_record(record)
+    return _with_public_url(_write_record(record))
 
 
 def create_output_file_from_path(
@@ -370,7 +392,7 @@ def create_output_file_from_path(
         "size_bytes": target.stat().st_size,
         "download_url": _build_download_url(file_id),
     }
-    return _write_record(record)
+    return _with_public_url(_write_record(record))
 
 
 __all__ = [

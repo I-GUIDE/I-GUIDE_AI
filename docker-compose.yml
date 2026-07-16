@@ -71,6 +71,9 @@ services:
       - MCP_SERVER_URL=http://mcp-server:8000/mcp/
       - PORT=5002
       - AGENT_FILE_STORAGE_ROOT=/app/agent_chat_files
+      # Optional absolute origin for file download_urls (e.g. http://149.165.147.219:3500).
+      # Unset = host-relative /agent/files/<id>/download; clients resolve against the API origin.
+      - AGENT_PUBLIC_BASE_URL=${AGENT_PUBLIC_BASE_URL:-}
       # Uploaded + generated files otherwise accumulate forever. Opt-in TTL sweep: set
       # AGENT_FILE_RETENTION_DAYS > 0 to delete files older than N days (0/unset = keep forever).
       - AGENT_FILE_RETENTION_DAYS=${AGENT_FILE_RETENTION_DAYS:-0}

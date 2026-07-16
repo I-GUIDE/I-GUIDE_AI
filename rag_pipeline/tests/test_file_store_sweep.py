@@ -106,3 +106,27 @@ def test_maybe_sweep_noop_when_retention_disabled(store, monkeypatch):
     file_store._LAST_SWEEP["t"] = 0.0
     file_store.maybe_sweep_expired_files()
     assert old_d.exists()                            # disabled -> never sweeps
+
+
+# --- AGENT_PUBLIC_BASE_URL: absolute download URLs from the server side --------
+
+def test_download_url_relative_by_default(store, monkeypatch):
+    monkeypatch.delenv("AGENT_PUBLIC_BASE_URL", raising=False)
+    rec = file_store.create_output_file("a.txt", "x")
+    assert rec["download_url"] == f"/agent/files/{rec['file_id']}/download"
+
+
+def test_public_base_url_absolutizes_emission_not_persistence(store, monkeypatch):
+    monkeypatch.setenv("AGENT_PUBLIC_BASE_URL", "http://149.165.147.219:3500/")   # trailing slash ok
+    rec = file_store.create_output_file("b.txt", "x")
+    fid = rec["file_id"]
+    assert rec["download_url"] == f"http://149.165.147.219:3500/agent/files/{fid}/download"
+    # read boundary absolutizes too
+    got = file_store.get_file_record(fid)
+    assert got["download_url"].startswith("http://149.165.147.219:3500/agent/files/")
+    # persisted metadata stays HOST-RELATIVE (origin-agnostic if the base changes later)
+    raw = json.loads((store / "metadata" / f"{fid}.json").read_text())
+    assert raw["download_url"] == f"/agent/files/{fid}/download"
+    # invalid scheme -> ignored, falls back to relative
+    monkeypatch.setenv("AGENT_PUBLIC_BASE_URL", "not-a-url")
+    assert file_store.get_file_record(fid)["download_url"] == f"/agent/files/{fid}/download"
