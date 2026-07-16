@@ -1401,6 +1401,22 @@ def agent_chat_stream():
        Example: `{ "userQuery": "Inspect this CSV and summarize by primary type",
        "fileIds": ["file_0123456789ab"], "threadId": "agent-thread-1", "memoryId": "agent-mem-1" }`
 
+    **Downloadable files (how clients render download links)**
+
+    Every stored file — uploads and agent-generated artifacts (plots, exports, executed source) —
+    is described by a file record `{ "file_id", "filename", "download_url", "kind" }` whose
+    `download_url` is a HOST-RELATIVE path: `/agent/files/<file_id>/download`. Clients must
+    resolve it against the API origin they call (e.g. `new URL(download_url, apiOrigin)`); the
+    download endpoint is a plain unauthenticated GET. File records can appear at several places
+    in the stream — `file` events, tool results inside `search`/`analysis` detail payloads, and
+    the terminal `result` — so a robust client collects them from any event (deduping by
+    `file_id`) rather than watching a single event type. Image artifacts (PNG/JPG maps, plots)
+    may ALSO be embedded inline in the answer markdown as `![caption](download_url)`; when
+    rendering a separate attachments list, skip records whose resolved URL (or `/<file_id>/`
+    path segment) already appears in an inline image to avoid showing them twice. The reference
+    implementation is `examples/iguide_chat_prototype.html` (`collectDownloads` / `absoluteUrl` /
+    `renderFiles`).
+
     ---
     tags:
       - Agent Chat
