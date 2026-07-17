@@ -421,6 +421,45 @@ def _collect_image_artifacts(*sources: Any) -> List[Dict[str, str]]:
     return list(found.values())
 
 
+def _raw_history_text(chat_history: Optional[List[Any]]) -> str:
+    """Concatenate raw chat-history contents (NOT image-stripped) for reference scanning."""
+    parts: List[str] = []
+    for item in chat_history or []:
+        if isinstance(item, dict) and "content" in item:
+            parts.append(str(item.get("content") or ""))
+        elif isinstance(item, (list, tuple)) and len(item) == 2:
+            parts.append(str(item[1]))
+        else:
+            parts.append(str(item))
+    return "\n".join(parts)
+
+
+def _drop_previously_shown(images: List[Dict[str, str]], chat_history: Optional[List[Any]]) -> List[Dict[str, str]]:
+    """Drop artifacts already displayed in an EARLIER turn.
+
+    An image/map/plot belongs to the turn that produced it. The code peer keeps a
+    checkpointed thread, so on later turns its replayed tool results re-surface a
+    prior turn's artifact in ``code_result``; without this filter the synthesizer
+    would embed that stale artifact again (the reported "image carried across
+    chats" bug). We treat an artifact as already-shown if its download_url or its
+    file_id (as a ``/<id>/`` URL path segment) appears anywhere in prior history —
+    the same match rule ``_append_image_embeds`` uses for the current answer.
+    """
+    if not images:
+        return images
+    history = _raw_history_text(chat_history)
+    if not history:
+        return images
+    kept: List[Dict[str, str]] = []
+    for img in images:
+        url = img.get("download_url") or ""
+        fid = img.get("file_id") or ""
+        if (url and url in history) or (fid and (f"/{fid}/" in history or f"/{fid}?" in history)):
+            continue
+        kept.append(img)
+    return kept
+
+
 def _append_image_embeds(answer: str, images: List[Dict[str, str]]) -> str:
     """Append markdown image embeds for produced images not already referenced in *answer*.
 
@@ -444,6 +483,20 @@ def _append_image_embeds(answer: str, images: List[Dict[str, str]]) -> str:
     return f"{body}{sep}" + "\n\n".join(blocks)
 
 
+# Markdown image embed: ![alt](url). Stripped from replayed history so the
+# synthesizer can't re-embed a plot/map produced in an EARLIER turn into the
+# current answer (it should only embed artifacts from the current turn's
+# evidence/results). The alt text is kept as a plain marker so the model still
+# knows an image was shown before, just without a URL it can copy.
+_MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
+
+
+def _strip_image_markdown(text: Any) -> str:
+    return _MD_IMAGE_RE.sub(
+        lambda m: f"[image shown earlier: {m.group(1).strip() or 'figure'}]", str(text)
+    )
+
+
 def _format_chat_history(chat_history: Optional[List[Any]], *, max_items: int = 8, max_chars: int = 4000) -> str:
     """Render recent chat history as compact 'role: content' lines for prompts."""
     if not chat_history:
@@ -456,7 +509,7 @@ def _format_chat_history(chat_history: Optional[List[Any]], *, max_items: int = 
             role, content = item[0], item[1]
         else:
             role, content = "user", item
-        lines.append(f"{role}: {content}")
+        lines.append(f"{role}: {_strip_image_markdown(content)}")
     text = "\n".join(lines)
     return text if len(text) <= max_chars else "…" + text[-max_chars:]
 
@@ -1204,7 +1257,9 @@ def build_supervisor_graph(
         q = state.get("query", "")
         evidence = state.get("evidence") or []
         ar, cr = state.get("analysis_results"), state.get("code_result")
-        artifacts = _collect_image_artifacts(ar, cr)
+        # Scope artifacts to THIS turn: a plot/map shown in an earlier turn must not be
+        # re-embedded here (the code peer's checkpointed thread replays it into code_result).
+        artifacts = _drop_previously_shown(_collect_image_artifacts(ar, cr), state.get("chat_history"))
         emit_trace_event("node_started", {"stage": "synthesize", "message": "Composing answer"}, node="synthesize")
         has_grounding = _has_grounding(evidence, ar, cr, artifacts)
         has_history = bool(state.get("chat_history") or [])
