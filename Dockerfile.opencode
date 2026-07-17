@@ -1,0 +1,31 @@
+# Sandbox image for the opencode code peer (AGENT_CODE_PEER=opencode).
+#
+# Build:    docker build -f Dockerfile.opencode -t agent-opencode .
+# Runtime:  agent_runtime/opencode_peer.py launches one hardened container per
+#           run from this image (override the name via AGENT_OPENCODE_IMAGE).
+#
+# The container runs read-only as the host uid with HOME=/work (a throwaway
+# bind mount), so everything opencode or its generated code writes lands in
+# /work and is persisted as downloadable artifacts.
+
+FROM node:22-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      python3 python3-pip python3-venv \
+      ca-certificates curl git ripgrep unzip \
+ && rm -rf /var/lib/apt/lists/* \
+ && ln -sf /usr/bin/python3 /usr/local/bin/python
+
+# Pin a specific version for reproducible sandboxes; bump deliberately.
+ARG OPENCODE_VERSION=latest
+RUN npm install -g opencode-ai@${OPENCODE_VERSION} && npm cache clean --force
+
+# Debian's PEP-668 guard would reject pip installs; the rootfs is read-only at
+# runtime anyway, so `pip install --user` (into /work/.local) is the only path
+# that can work — let it.
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+
+# Common scientific stack preinstalled so most runs need no per-run installs.
+# Extend here (e.g. geopandas, rasterio) if your workloads need more.
+RUN pip install --no-cache-dir numpy pandas matplotlib requests
