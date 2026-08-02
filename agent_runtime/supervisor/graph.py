@@ -919,6 +919,13 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
             tools.extend(make_geo_analysis_tools())
         except Exception:
             pass
+        # Agent-side geocoding (the code sandbox has NO network): named places/institutions
+        # -> coordinates, so maps of named locations never require asking the user.
+        try:
+            from agent_runtime.langchain_granular_tools import make_langchain_geocode_tools
+            tools.extend(make_langchain_geocode_tools())
+        except Exception:
+            pass
         tools.append(request_tool)
         # When files are attached to the conversation, let the analysis peer inspect
         # them directly (read_text_file / inspect_file_for_analysis) instead of only
@@ -1002,6 +1009,14 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
             tools.extend(t for t in make_langchain_granular_tools(
                 enabled_search_methods=["agent_kb_search", "get_kb_block"])
                 if getattr(t, "name", "") in {"agent_kb_search", "get_kb_block"})
+        except Exception:
+            pass
+        # Geocoding runs agent-side (the sandbox has NO network): lets the peer turn named
+        # places/institutions into coordinates and pass them into execute_code as data,
+        # instead of asking the user for coordinates.
+        try:
+            from agent_runtime.langchain_granular_tools import make_langchain_geocode_tools
+            tools.extend(make_langchain_geocode_tools())
         except Exception:
             pass
         # When files are attached, give the code peer the vector/shapefile tools too, so it

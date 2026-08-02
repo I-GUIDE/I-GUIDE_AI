@@ -56,6 +56,8 @@ ANALYSIS_WORKFLOW_PROMPT = (
     "'choropleth' / 'by community area' / 'by region' / 'rate' map means SHADED POLYGONS. "
     "Produce the exact type the user named; if you can only make the other type, say so "
     "explicitly rather than passing it off as what was requested.\n"
+    "To map NAMED places/institutions, call `geocode_places` first to get their lat/lon "
+    "(never invent coordinates or ask the user for them; drop names that return found=false). "
     "If you need evidence from the knowledge base, prior results, or another capability "
     "before you can run the analysis, call request_capability(capability=..., reason=...) "
     "instead of guessing — the supervisor will fulfill the request and re-run you.\n"
@@ -110,7 +112,13 @@ CODE_PEER_PROMPT = (
     "If you need evidence from the knowledge base, prior analysis results, or another "
     "capability before you can write correct code, call request_capability(capability=..., "
     "reason=...) instead of guessing — the supervisor will fulfill it and re-run you. "
-    "If evidence is insufficient, say what is missing."
+    "If evidence is insufficient, say what is missing.\n"
+    "To MAP NAMED PLACES (institutions, cities, regions — e.g. a bubble map from a CSV of "
+    "institution names), call `geocode_places` with the names FIRST, then write the returned "
+    "lat/lon pairs into your code as literal data (a dict/list) and plot offline. The sandbox "
+    "has NO network — code cannot call a geocoding API at runtime — and you must not invent "
+    "coordinates or ask the user for them. Drop names that come back found=false (organizations "
+    "without a location, 'null' rows) and note them in your report."
 )
 
 # Composed by the synthesizer ONLY in the genuinely-cold case — nothing was retrieved or

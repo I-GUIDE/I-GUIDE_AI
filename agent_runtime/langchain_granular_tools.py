@@ -158,6 +158,84 @@ def opengeodata_search_tool(query: str, limit: int = 8, session_context_json: Op
     return _build_payload(hits, source="opengeodata")
 
 
+_GEOCODE_MAX_PLACES = 40  # Nominatim is ~1 req/s (cached per process); bound a tool call's runtime
+
+
+def geocode_places_tool(places: Any) -> str:
+    """Geocode place/institution names to coordinates via Nominatim (agent-side network).
+
+    Accepts a JSON list or a comma/newline-separated string of names. Returns JSON:
+    ``{"results": [{"place", "found", "lat", "lon", "bbox"}], "not_found": [...], "count"}``
+    where lat/lon is the center of the geocoded bounding box. Names that cannot be geocoded
+    (organizations without a location, typos, "null") come back found=false — drop them.
+    """
+    # The code-exec sandbox has NO network, so geocoding must happen here, in the agent
+    # process (which reuses the cached, rate-limited Nominatim helper from opengeodata).
+    from rag_pipeline.search.opengeodata_new import geocode_place
+
+    if isinstance(places, str):
+        try:
+            parsed = json.loads(places)
+            names = parsed if isinstance(parsed, list) else None
+        except json.JSONDecodeError:
+            names = None
+        if names is None:
+            names = [p.strip() for chunk in places.split("\n") for p in chunk.split(",")]
+    elif isinstance(places, (list, tuple)):
+        names = list(places)
+    else:
+        names = [places]
+    names = [str(n).strip() for n in names if str(n or "").strip()]
+    dropped = max(0, len(names) - _GEOCODE_MAX_PLACES)
+    names = names[:_GEOCODE_MAX_PLACES]
+
+    results: List[Dict[str, Any]] = []
+    not_found: List[str] = []
+    for name in names:
+        try:
+            bbox = geocode_place(name)
+        except Exception:
+            bbox = None
+        if bbox:
+            minlon, minlat, maxlon, maxlat = bbox
+            results.append({"place": name, "found": True,
+                            "lat": round((minlat + maxlat) / 2.0, 6),
+                            "lon": round((minlon + maxlon) / 2.0, 6),
+                            "bbox": [minlon, minlat, maxlon, maxlat]})
+        else:
+            results.append({"place": name, "found": False})
+            not_found.append(name)
+    payload: Dict[str, Any] = {"results": results, "not_found": not_found,
+                               "count": sum(1 for r in results if r["found"])}
+    if dropped:
+        payload["note"] = f"input truncated: only the first {_GEOCODE_MAX_PLACES} names geocoded ({dropped} dropped)"
+    return json.dumps(payload, ensure_ascii=True)
+
+
+def make_langchain_geocode_tools() -> List[Any]:
+    """The geocoding tool for peers that plot named places (code/analysis)."""
+    try:
+        from langchain_core.tools import StructuredTool
+    except Exception:  # pragma: no cover - optional dependency
+        return []
+    return [
+        StructuredTool.from_function(
+            func=geocode_places_tool,
+            name="geocode_places",
+            description=(
+                "Geocode place or institution names to coordinates (Nominatim). Input: a JSON "
+                "list (or comma-separated string) of names; returns per-name lat/lon (bbox "
+                "center) with found=false for names that aren't real places. USE THIS to get "
+                "coordinates for maps (e.g. a bubble map from a CSV of institutions) and pass "
+                "them into execute_code as literal data — sandboxed code has NO network and "
+                "cannot geocode itself. Never ask the user for coordinates. "
+                f"Max {_GEOCODE_MAX_PLACES} names per call (~1s per uncached name)."
+            ),
+            metadata={"category": "geospatial"},
+        )
+    ]
+
+
 def make_langchain_qgis_tools(*, session_id: Optional[str] = None) -> List[Any]:
     # QGIS is not installed in the default agent image (only GDAL, for the geopandas-backed
     # geo tools). Expose each QGIS tool only when its backend is actually present, so the agent
@@ -419,6 +497,8 @@ __all__ = [
     "qgis_metric_buffer_tool",
     "qgis_processing_help_tool",
     "qgis_processing_run_tool",
+    "geocode_places_tool",
+    "make_langchain_geocode_tools",
     "make_langchain_qgis_tools",
     "make_langchain_granular_tools",
 ]
