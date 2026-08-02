@@ -105,11 +105,18 @@ def _format_related_two_buckets(documents: List[Any], *, max_chars: int = 2500) 
     """Render a related-element result as two clearly-separated buckets so the synthesizer
     presents contributor-specified links apart from similarity hits (and the grounding auditor
     can tell them apart). Triggered whenever any doc carries a ``provenance`` tag."""
+    seed = [d for d in documents if isinstance(d, dict) and d.get("provenance") == "seed"]
     curated = [d for d in documents if isinstance(d, dict) and d.get("provenance") == "curated"]
     content = [d for d in documents if isinstance(d, dict) and d.get("provenance") == "content"]
-    return "\n".join([
-        "[CURATED related elements — specified by the contributor via the knowledge graph "
-        "(:RELATED). Authoritative: present THESE as the element's related elements.]",
+    parts: List[str] = []
+    if seed:
+        parts.append("[QUERIED ELEMENT — the resource whose related elements were requested. Use "
+                     "THIS title/link when naming the resource in the answer; do not infer its "
+                     "identity from the other items.]")
+        parts.append("\n\n".join(_doc_block(d, max_chars=max_chars) for d in seed))
+    parts.extend([
+        "\n[CURATED related elements — specified by the contributor. Authoritative: present "
+        "THESE as the element's related elements.]",
         "\n\n".join(_doc_block(d, max_chars=max_chars) for d in curated) if curated
         else "(none — the contributor has not specified any related elements for this element)",
         "\n[CONTENT-RELATED elements — found by similarity search. These are NOT contributor-"
@@ -118,11 +125,12 @@ def _format_related_two_buckets(documents: List[Any], *, max_chars: int = 2500) 
         "\n\n".join(_doc_block(d, max_chars=max_chars) for d in content) if content
         else "(no content-similar elements found)",
     ])
+    return "\n".join(parts)
 
 
 def _format_documents(documents: List[Any], *, limit: int = 8, max_chars: int = 2500) -> str:
     # A related-element result carries provenance tags -> render two labeled buckets.
-    if any(isinstance(d, dict) and d.get("provenance") in ("curated", "content") for d in documents):
+    if any(isinstance(d, dict) and d.get("provenance") in ("seed", "curated", "content") for d in documents):
         return _format_related_two_buckets(documents, max_chars=max_chars)
     blocks = [_doc_block(doc, max_chars=max_chars) for doc in documents[:limit]]
     return "\n\n".join(blocks) if blocks else "(no evidence)"

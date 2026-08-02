@@ -634,17 +634,20 @@ def _related_elements_evidence(element_id: str, *, depth: int = 2,
                                curated_cap: int = 25, content_k: int = 6) -> List[Dict[str, Any]]:
     """Deterministic two-bucket evidence for a related-elements request.
 
-    Bucket 1 (CURATED): contributor-specified :RELATED neighbors via Neo4j graph traversal —
-    the single source of truth. Bucket 2 (CONTENT): semantically similar elements, found with
-    the seed's topic, explicitly framed as similarity (never curated). Both seed and curated
-    ids are excluded from the content bucket. Every doc is tagged ``provenance`` ('curated' |
-    'content'); curated docs come first. Never raises — degrades to whatever it could gather.
+    Bucket 1 (CURATED): contributor-specified related elements — the Neo4j :RELATED traversal
+    first; when the graph yields nothing (missing edges, stale node, auth failure) fall back to
+    the platform API's ``related-elements`` field (what the contributor actually set). Bucket 2
+    (CONTENT): semantically similar elements, explicitly framed as similarity (never curated).
+    The SEED element itself is included first (tagged ``provenance='seed'``) so the synthesizer
+    can name the queried resource instead of guessing its identity. Every doc is tagged
+    ``provenance`` ('seed' | 'curated' | 'content'). Never raises — degrades to whatever it
+    could gather.
     """
     docs: List[Dict[str, Any]] = []
     seen_ids = {str(element_id)}
     seed_title = ""
 
-    # bucket 1 — curated graph relationships (authoritative)
+    # bucket 1 — curated graph relationships (authoritative when present)
     try:
         from rag_pipeline.search.agents import explore_neo4j_related_nodes
 
@@ -652,6 +655,7 @@ def _related_elements_evidence(element_id: str, *, depth: int = 2,
     except Exception:
         payload = {}
     seed_title = str((payload.get("seed") or {}).get("title") or "").strip()
+    curated: List[Dict[str, Any]] = []
     for d in (payload.get("documents") or [])[:curated_cap]:
         if not isinstance(d, dict):
             continue
@@ -663,17 +667,52 @@ def _related_elements_evidence(element_id: str, *, depth: int = 2,
         tagged = dict(d)
         tagged["provenance"] = "curated"
         tagged.setdefault("source", "graph")
-        docs.append(tagged)
+        curated.append(tagged)
 
-    # The content bucket needs the seed's topic. Prefer the graph seed's title; fall back to the
-    # platform metadata title so it still works when the element has no node/edges in this graph.
-    if not seed_title:
-        try:
-            from agent_runtime.element_resolver import resolve_element
+    # Platform metadata: the authoritative element identity + the contributor-specified
+    # related-elements list (used as the curated fallback when the graph has no edges).
+    meta: Dict[str, Any] = {}
+    try:
+        from agent_runtime.element_resolver import resolve_element
 
-            seed_title = str((resolve_element(element_id) or {}).get("title") or "").strip()
-        except Exception:
-            seed_title = ""
+        meta = resolve_element(element_id) or {}
+    except Exception:
+        meta = {}
+    api_title = str(meta.get("title") or "").strip()
+    if api_title:
+        # The platform is the source of truth for the element's identity; a stale graph node
+        # can carry a different title (observed live), which would mislabel the whole answer.
+        seed_title = api_title
+
+    # curated FALLBACK: the platform API's contributor-specified related-elements.
+    if not curated:
+        for rel in (meta.get("related") or [])[:curated_cap]:
+            if not isinstance(rel, dict):
+                continue
+            rid = str(rel.get("element_id") or rel.get("id") or "")
+            if not rid or rid in seen_ids:
+                continue
+            seen_ids.add(rid)
+            curated.append({
+                "doc_id": rid,
+                "title": str(rel.get("title") or "Untitled"),
+                "element_type": str(rel.get("resource_type") or rel.get("resource-type") or "resource"),
+                "contents": "",
+                "provenance": "curated",
+                "source": "platform_api",
+            })
+
+    # SEED element first, so the synthesizer names the queried resource correctly.
+    if seed_title:
+        docs.append({
+            "doc_id": str(element_id),
+            "title": seed_title,
+            "element_type": str(meta.get("resource_type") or "resource"),
+            "contents": str(meta.get("abstract") or "")[:800],
+            "provenance": "seed",
+            "source": "platform_api" if api_title else "graph",
+        })
+    docs.extend(curated)
 
     # bucket 2 — content-similar elements (similarity, explicitly NOT curated)
     if seed_title:
@@ -700,6 +739,48 @@ def _related_elements_evidence(element_id: str, *, depth: int = 2,
             added += 1
             if added >= content_k:
                 break
+    return docs
+
+
+# Strong popularity-intent phrases only. Deliberately TIGHTER than the graph tier's own
+# by_popularity pattern (whose bare "popular" would hijack e.g. "explain popular culture in
+# geography"); execution still goes through the same tier-1 dispatch, and detection stricter
+# than execution is safe (missed phrasings just take the normal search path).
+_POPULARITY_RE = re.compile(
+    r"\b(?:most\s+(?:popular|clicked|viewed|visited|accessed)|"
+    r"top\s+(?:clicked|viewed|rated)|highest\s+clicks?|trending)\b",
+    re.I,
+)
+
+
+def _detect_popularity_request(query: str) -> bool:
+    """True iff *query* explicitly asks for a popularity/usage ranking."""
+    return bool(_POPULARITY_RE.search(query or ""))
+
+
+def _popularity_evidence(query: str, *, limit: int = 10) -> List[Dict[str, Any]]:
+    """Deterministic popularity lookup: run the graph's tier-1 dispatch (by_popularity Cypher,
+    sorted by real click_count) and normalize to evidence docs. The click count is appended to
+    each doc's contents so the synthesizer reports actual popularity, not topical similarity.
+    Returns [] when the graph yields nothing (caller falls back to the normal search agent)."""
+    try:
+        from rag_pipeline.search.agents import _hit_to_document, get_neo4j_agent_results
+
+        hits = get_neo4j_agent_results(query, limit=limit) or []
+    except Exception:
+        return []
+    docs: List[Dict[str, Any]] = []
+    for hit in hits:
+        try:
+            doc = _hit_to_document(hit, source_name="neo4j")
+        except Exception:
+            continue
+        clicks = hit.get("_score")
+        if isinstance(clicks, (int, float)) and clicks > 0:
+            doc["click_count"] = int(clicks)
+            doc["contents"] = (str(doc.get("contents") or "").strip() +
+                               f"\n[popularity: {int(clicks)} clicks]").strip()
+        docs.append(doc)
     return docs
 
 
@@ -873,6 +954,18 @@ def default_search_fn(*, llm: Optional[Any] = None, tool_strategy: str = "granul
                 node="search",
             )
             return _element_lookup_evidence(lookup_id)
+        # "most popular / most viewed / trending ..." -> the graph's click_count ranking, not a
+        # semantic search whose topical hits would be misrepresented as popularity.
+        if _detect_popularity_request(query):
+            emit_trace_event(
+                "node_started",
+                {"stage": "search", "message": "Popularity ranking from the knowledge graph"},
+                node="search",
+            )
+            pop_docs = _popularity_evidence(query)
+            if pop_docs:
+                return pop_docs
+            # graph empty/unreachable -> fall through to the normal search agent
 
         executor = build_search_agent_executor(
             llm=llm, tool_strategy=tool_strategy, include_mcp_tools=include_mcp_tools,
@@ -1225,7 +1318,7 @@ def build_supervisor_graph(
             docs, needs = raw, []
         # Skip rerank/top_k for a two-bucket related-element result: reranking would interleave
         # and truncate the curated vs content buckets. Their order/grouping is handled downstream.
-        has_provenance = any(isinstance(d, dict) and d.get("provenance") in ("curated", "content") for d in docs)
+        has_provenance = any(isinstance(d, dict) and d.get("provenance") in ("seed", "curated", "content") for d in docs)
         if do_rerank and len(docs) > 1 and not has_provenance:
             docs = rerank_documents(q, docs, top_k=top_k, llm=llm)  # operator bundled into search
         before = len(state.get("evidence") or [])

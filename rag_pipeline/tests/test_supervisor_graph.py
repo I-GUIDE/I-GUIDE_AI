@@ -856,15 +856,20 @@ def test_detect_related_elements_request():
 
 
 def test_related_elements_evidence_splits_curated_and_content(monkeypatch):
+    import agent_runtime.element_resolver as er
     import rag_pipeline.search.agents as agents
     import rag_pipeline.search.semantic as semantic
     from agent_runtime.supervisor.graph import _related_elements_evidence
     SEED = "86df1948-9726-4d64-901c-66fcfdbca433"
     monkeypatch.setattr(agents, "explore_neo4j_related_nodes", lambda eid, depth=2, limit=50: {
-        "seed": {"doc_id": SEED, "title": "National Inventory of Dams"},
+        "seed": {"doc_id": SEED, "title": "Stale Graph Title"},
         "documents": [{"doc_id": "rel1", "title": "Dam Failure Study",
                        "element_type": "publication", "contents": "..."}],
     })
+    # The platform API is authoritative for the element's identity.
+    monkeypatch.setattr(er, "resolve_element", lambda eid: {
+        "title": "National Inventory of Dams", "resource_type": "dataset",
+        "abstract": "all known dams", "related": []})
 
     def hit(i, did):
         return {"_id": did, "_score": 0.5, "_source": {"title": f"Sim {i}",
@@ -876,9 +881,40 @@ def test_related_elements_evidence_splits_curated_and_content(monkeypatch):
     docs = _related_elements_evidence(SEED, content_k=5)
     curated = [d["doc_id"] for d in docs if d["provenance"] == "curated"]
     content = [d["doc_id"] for d in docs if d["provenance"] == "content"]
+    seed = [d for d in docs if d["provenance"] == "seed"]
     assert curated == ["rel1"]
     assert content == ["sim1", "sim2"]          # seed excluded, curated not duplicated
     assert SEED not in content
+    # seed doc included FIRST, named from the PLATFORM (stale graph title overridden)
+    assert seed and docs[0]["provenance"] == "seed"
+    assert seed[0]["title"] == "National Inventory of Dams"
+
+
+def test_related_elements_curated_falls_back_to_platform_api(monkeypatch):
+    """When the graph yields nothing (no edges / stale node / auth failure), the curated bucket
+    must come from the platform API's contributor-specified related-elements — the live failure:
+    the platform had 2 related elements but the answer said 'none specified'."""
+    import agent_runtime.element_resolver as er
+    import rag_pipeline.search.agents as agents
+    import rag_pipeline.search.semantic as semantic
+    from agent_runtime.supervisor.graph import _related_elements_evidence
+    SEED = "5e9c7566-1be5-49ea-aaec-fa304f401dd2"
+    monkeypatch.setattr(agents, "explore_neo4j_related_nodes", lambda eid, depth=2, limit=50: {})
+    monkeypatch.setattr(er, "resolve_element", lambda eid: {
+        "title": "Dataset for SPASTC", "resource_type": "dataset", "abstract": "spatial partitioning",
+        "related": [
+            {"element_id": "d65a13bd", "title": "SPASTC paper", "resource_type": "publication"},
+            {"element_id": "b1fa548b", "title": "SPASTC notebook", "resource_type": "notebook"},
+        ]})
+    monkeypatch.setattr(semantic, "semantic_search", lambda q, size=12: [])
+
+    docs = _related_elements_evidence(SEED)
+    seed = [d for d in docs if d["provenance"] == "seed"]
+    curated = [d for d in docs if d["provenance"] == "curated"]
+    assert seed[0]["title"] == "Dataset for SPASTC"
+    assert [d["doc_id"] for d in curated] == ["d65a13bd", "b1fa548b"]   # from the platform API
+    assert all(d["source"] == "platform_api" for d in curated)
+    assert curated[0]["element_type"] == "publication"                  # -> /publications/... url
 
 
 def test_related_provenance_docs_not_reranked_or_truncated():
@@ -984,6 +1020,7 @@ def test_followup_regexes_match_subjectless_not_topical():
 def test_default_search_fn_recalls_id_for_subjectless_followup(monkeypatch):
     """'What are the related elements' (no id) must recall the element under discussion from
     chat_history and run the deterministic related lookup — not the LLM SearchAgent."""
+    import agent_runtime.element_resolver as er
     import rag_pipeline.search.agents as agents
     import rag_pipeline.search.semantic as semantic
     import agent_runtime.executor_factory as ef
@@ -997,6 +1034,7 @@ def test_default_search_fn_recalls_id_for_subjectless_followup(monkeypatch):
                 "documents": [{"doc_id": "rel1", "title": "X", "element_type": "publication", "contents": "y"}]}
     monkeypatch.setattr(agents, "explore_neo4j_related_nodes", explore)
     monkeypatch.setattr(semantic, "semantic_search", lambda q, size=12: [])
+    monkeypatch.setattr(er, "resolve_element", lambda eid: {"title": "NID", "resource_type": "dataset", "related": []})
 
     def boom(*a, **k):
         raise AssertionError("must NOT build the LLM SearchAgent when the id is recallable")
@@ -1042,3 +1080,54 @@ def test_followup_regexes_extended_coverage():
     assert not _RELATED_FOLLOWUP_RE.match("datasets related to floods")
     assert not _EXPLAIN_FOLLOWUP_RE.match("explain dam failures")
     assert not _EXPLAIN_FOLLOWUP_RE.match("information about floods")
+
+
+# --- popularity queries: deterministic click_count ranking ---------------------
+
+def test_detect_popularity_request():
+    from agent_runtime.supervisor.graph import _detect_popularity_request
+    assert _detect_popularity_request("What are the most popular knowledge elements")
+    assert _detect_popularity_request("trending datasets")
+    assert _detect_popularity_request("most viewed notebooks")
+    assert not _detect_popularity_request("datasets about dam failures")
+    assert not _detect_popularity_request("explain popular culture in geography")  # bare "popular" must not hijack
+
+
+def test_default_search_fn_short_circuits_popularity(monkeypatch):
+    """'most popular ...' must be served by the graph's click_count ranking, not the LLM agent."""
+    import rag_pipeline.search.agents as agents
+    import agent_runtime.executor_factory as ef
+    from agent_runtime.supervisor.graph import default_search_fn
+
+    monkeypatch.setattr(agents, "get_neo4j_agent_results", lambda q, limit=10: [
+        {"_id": "e1", "_score": 42.0, "_source": {"title": "Hot Dataset", "element_type": "dataset", "contents": "x"}},
+        {"_id": "e2", "_score": 7.0, "_source": {"title": "Warm Notebook", "element_type": "notebook", "contents": "y"}},
+    ])
+
+    def boom(*a, **k):
+        raise AssertionError("must NOT build the LLM SearchAgent for a popularity query")
+    monkeypatch.setattr(ef, "build_search_agent_executor", boom)
+
+    docs = default_search_fn()("What are the most popular knowledge elements", {"thread_id": "t"})
+    assert [d["doc_id"] for d in docs] == ["e1", "e2"]
+    assert docs[0]["click_count"] == 42                      # real usage counts carried
+    assert "[popularity: 42 clicks]" in docs[0]["contents"]  # visible to the synthesizer
+
+
+def test_popularity_falls_back_to_search_agent_when_graph_empty(monkeypatch):
+    """Graph unreachable/empty -> fall through to the normal search agent (not a dead end)."""
+    import rag_pipeline.search.agents as agents
+    import agent_runtime.executor_factory as ef
+    from agent_runtime.supervisor.graph import default_search_fn
+
+    monkeypatch.setattr(agents, "get_neo4j_agent_results", lambda q, limit=10: [])
+    called = {}
+
+    def fake_build(**kwargs):
+        called["built"] = True
+        return object()
+    monkeypatch.setattr(ef, "build_search_agent_executor", fake_build)
+    monkeypatch.setattr(ef, "invoke_agent_with_payload_fallback", lambda *a, **k: {"messages": []})
+
+    default_search_fn()("most popular datasets", {"thread_id": "t"})
+    assert called.get("built") is True

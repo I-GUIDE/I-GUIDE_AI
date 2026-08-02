@@ -49,7 +49,11 @@ SEARCH_AGENT_PROMPT = (
     "especially tied to a place (e.g. 'datasets about dams in Illinois', 'satellite imagery for "
     "California wildfires', 'open data on air quality'), call `opengeodata_search` IN ADDITION TO "
     "the internal keyword/semantic search and keep both result sets. Skip it for questions that "
-    "are purely about existing I-GUIDE KB elements."
+    "are purely about existing I-GUIDE KB elements.\n"
+    "10. POPULARITY questions ('most popular/viewed/clicked elements', 'trending datasets') are "
+    "answered by REAL usage counts: call `neo4j_search` with the user's wording (its "
+    "deterministic tier ranks by click_count) — never substitute `semantic_search`, whose "
+    "topically-similar results are NOT popularity data and must not be presented as such."
 )
 
 # CodeAgent — built by build_code_agent_executor; used by the standalone run_code_agent_query
