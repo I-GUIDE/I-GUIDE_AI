@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import queue
 import threading
+import time
 from typing import Any, Dict, Generator, List, Optional
 
 from agent_runtime.executor_factory import (
@@ -295,15 +297,29 @@ def stream_agent_query_events(
     worker = threading.Thread(target=_worker, name="agent-stream-worker", daemon=True)
     worker.start()
 
+    # Emit a keepalive whenever the agent goes quiet (long LLM turn / sandbox run) so no
+    # client or intermediary times out the stream mid-run. Node's fetch (undici) kills a
+    # response body that is silent for 300s ("Body Timeout Error"); proxies have similar
+    # idle limits. The API layer renders this event as an SSE comment line.
+    try:
+        heartbeat_s = max(1.0, float(os.getenv("AGENT_STREAM_HEARTBEAT_SECONDS", "20")))
+    except (TypeError, ValueError):
+        heartbeat_s = 20.0
+    last_emit = time.monotonic()
+
     while True:
         try:
             item = outbox.get(timeout=0.25)
         except queue.Empty:
             if worker.is_alive():
+                if time.monotonic() - last_emit >= heartbeat_s:
+                    last_emit = time.monotonic()
+                    yield {"event": "keepalive", "data": {}}
                 continue
             break
         if item.get("event") == "__worker_done__":
             break
+        last_emit = time.monotonic()
         yield item
 
     worker.join(timeout=0)

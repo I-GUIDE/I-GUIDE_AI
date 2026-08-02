@@ -1801,6 +1801,13 @@ def agent_chat_stream():
                     agent_role = item.get("agent_role") or payload.get("role")
                     node_name = item.get("node")
 
+                    # Heartbeat during quiet stretches (long LLM/sandbox runs): an SSE COMMENT
+                    # line keeps bytes flowing so clients/proxies (e.g. Node fetch's 300s body
+                    # timeout) don't kill the stream; SSE parsers ignore comment lines.
+                    if event_name == "keepalive":
+                        yield ": keepalive\n\n"
+                        continue
+
                     # Graph node lifecycle (triage / fast_answer / orchestrate):
                     # surface distinctly so the UI can show pipeline progress.
                     if event_name in {"node_started", "node_completed"}:
