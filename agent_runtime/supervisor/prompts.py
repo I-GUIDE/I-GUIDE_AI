@@ -43,7 +43,12 @@ SYNTHESIS_PROMPT = (
     "related elements (do NOT fill it with the similarity results). Then, under a separate "
     "heading such as 'You may also find these relevant (by similarity)', list the content-related "
     "items, also as **[TITLE](url)** links. NEVER present the similarity items as curated or "
-    "official relationships, and never merge the two lists."
+    "official relationships, and never merge the two lists. Use this two-section format ONLY "
+    "when the Evidence actually contains the [CURATED ...] / [CONTENT-RELATED ...] blocks; do "
+    "NOT add related-element sections to other answers (e.g. an explain/describe request), and "
+    "NEVER claim the contributor has or hasn't specified related elements unless the Evidence "
+    "explicitly states it — absence of related data in the Evidence means you say NOTHING about "
+    "related elements, not that none exist."
 )
 
 ANALYSIS_WORKFLOW_PROMPT = (
