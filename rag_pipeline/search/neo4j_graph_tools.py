@@ -48,6 +48,10 @@ _DEFAULT_INTERNAL_LABELS = {
 }
 
 _PUBLIC_VISIBILITY = "public"
+# The platform stores node visibility as the STRING 'public' on newer nodes and the legacy
+# NUMERIC 10 on older ones (utils.parseVisibility in the platform backend treats both as
+# PUBLIC). Compare via toString(...) IN list so legacy nodes aren't silently filtered out.
+_PUBLIC_VISIBILITIES = [_PUBLIC_VISIBILITY, "10"]
 _MAX_RELATED_DEPTH = 3
 _DEFAULT_RELATED_DEPTH = 2
 
@@ -183,7 +187,7 @@ LIMIT $limit
 
 _CYPHER_GET_ELEMENT_BY_ID = """
 MATCH (n {id: $element_id})
-WHERE n.visibility = $public_visibility
+WHERE toString(n.visibility) IN $public_visibilities
 OPTIONAL MATCH (c)-[:CONTRIBUTED]-(n)
 RETURN n AS node,
        1.0 AS score,
@@ -195,7 +199,7 @@ LIMIT 1
 """
 _CYPHER_GET_ELEMENT_BY_ID = """
 MATCH (n {id: $element_id})
-WHERE n.visibility = $public_visibility
+WHERE toString(n.visibility) IN $public_visibilities
 OPTIONAL MATCH (c)-[:CONTRIBUTED]-(n)
 RETURN n AS node,
        1.0 AS score,
@@ -444,7 +448,7 @@ def build_element_by_id_query(element_id: str) -> Tuple[str, Dict[str, Any]]:
     """
     return _CYPHER_GET_ELEMENT_BY_ID, {
         "element_id": _normalize_element_id(element_id),
-        "public_visibility": _PUBLIC_VISIBILITY,
+        "public_visibilities": _PUBLIC_VISIBILITIES,
     }
 
 
@@ -463,11 +467,11 @@ def build_explore_related_nodes_query(
     safe_limit = _clamp_int(limit, 50, 1, 100)
     cypher = f"""
 MATCH (seed {{id: $element_id}})
-WHERE seed.visibility = $public_visibility
+WHERE toString(seed.visibility) IN $public_visibilities
 CALL {{
   WITH seed
   MATCH path = (seed)-[:RELATED*1..{safe_depth}]-(related)
-  WHERE all(path_node IN nodes(path) WHERE path_node.visibility = $public_visibility)
+  WHERE all(path_node IN nodes(path) WHERE toString(path_node.visibility) IN $public_visibilities)
   WITH related, relationships(path) AS rels, length(path) AS path_depth
   ORDER BY path_depth ASC
   LIMIT $limit
@@ -480,7 +484,7 @@ RETURN seed, nodes, edges
 """
     return cypher, {
         "element_id": _normalize_element_id(element_id),
-        "public_visibility": _PUBLIC_VISIBILITY,
+        "public_visibilities": _PUBLIC_VISIBILITIES,
         "limit": safe_limit,
     }
 

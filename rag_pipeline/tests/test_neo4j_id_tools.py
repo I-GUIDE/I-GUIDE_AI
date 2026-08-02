@@ -14,9 +14,10 @@ def test_element_by_id_query_is_public_only_and_rejects_empty_id():
     cypher, params = build_element_by_id_query("nb1")
 
     assert "MATCH (n {id: $element_id})" in cypher
-    assert "n.visibility = $public_visibility" in cypher
+    # tolerant filter: platform stores visibility as 'public' (string) or legacy 10 (numeric)
+    assert "toString(n.visibility) IN $public_visibilities" in cypher
     assert "OPTIONAL MATCH (c)-[:CONTRIBUTED]-(n)" in cypher
-    assert params == {"element_id": "nb1", "public_visibility": "public"}
+    assert params == {"element_id": "nb1", "public_visibilities": ["public", "10"]}
 
     with pytest.raises(ValueError):
         build_element_by_id_query("")
@@ -27,8 +28,8 @@ def test_related_nodes_query_clamps_depth_and_limit():
 
     assert "MATCH (seed {id: $element_id})" in cypher
     assert "[:RELATED*1..3]" in cypher
-    assert "path_node.visibility = $public_visibility" in cypher
-    assert params == {"element_id": "nb1", "public_visibility": "public", "limit": 100}
+    assert "toString(path_node.visibility) IN $public_visibilities" in cypher
+    assert params == {"element_id": "nb1", "public_visibilities": ["public", "10"], "limit": 100}
 
     with pytest.raises(ValueError):
         build_explore_related_nodes_query("   ")
