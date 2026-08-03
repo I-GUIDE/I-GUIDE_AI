@@ -121,8 +121,16 @@ def build_orchestrator_graph(
     """
 
     def triage_node(state: OrchestratorState) -> Dict[str, Any]:
+        from agent_runtime.capabilities import is_capability_query
+
         query = state.get("query", "")
-        route = "fast" if is_trivial_query(query) else "orchestrate"
+        if is_capability_query(query):
+            # "what tools do you have" is about the ASSISTANT, not the knowledge base — no
+            # peer in the supervisor pipeline sees the tool registry, so retrieval would
+            # return irrelevant KB docs (or nothing). Answer from the live registries.
+            route = "capabilities"
+        else:
+            route = "fast" if is_trivial_query(query) else "orchestrate"
         emit_trace_event(
             "node_started",
             {"stage": "triage", "message": "Routing the request"},
@@ -134,6 +142,28 @@ def build_orchestrator_graph(
             node="triage",
         )
         return {"route": route}
+
+    def capabilities_node(state: OrchestratorState) -> Dict[str, Any]:
+        from agent_runtime.capabilities import describe_capabilities
+
+        emit_trace_event(
+            "node_started",
+            {"stage": "capabilities", "message": "Describing available tools"},
+            node="capabilities",
+        )
+        answer = describe_capabilities(
+            enabled_search_methods=enabled_search_methods,
+            include_mcp_tools=include_mcp_tools,
+            mcp_modules=mcp_modules,
+            code_exec=code_exec,
+            skill_roots=skill_roots,
+        )
+        emit_trace_event(
+            "node_completed",
+            {"stage": "capabilities", "message": "Capability summary ready"},
+            node="capabilities",
+        )
+        return {"final_answer": answer, "available_agent_names": []}
 
     def fast_answer_node(state: OrchestratorState) -> Dict[str, Any]:
         emit_trace_event(
@@ -178,14 +208,16 @@ def build_orchestrator_graph(
     builder = StateGraph(OrchestratorState)
     builder.add_node("triage", triage_node)
     builder.add_node("fast_answer", fast_answer_node)
+    builder.add_node("capabilities", capabilities_node)
     builder.add_node("orchestrate", orchestrate_node)
     builder.add_edge(START, "triage")
     builder.add_conditional_edges(
         "triage",
         lambda state: state.get("route", "orchestrate"),
-        {"fast": "fast_answer", "orchestrate": "orchestrate"},
+        {"fast": "fast_answer", "capabilities": "capabilities", "orchestrate": "orchestrate"},
     )
     builder.add_edge("fast_answer", END)
+    builder.add_edge("capabilities", END)
     builder.add_edge("orchestrate", END)
     # No checkpointer on the outer graph: it is stateless per request, while the
     # inner orchestrator agent keeps its own checkpointed short-term memory.
