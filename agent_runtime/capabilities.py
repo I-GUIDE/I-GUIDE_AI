@@ -51,13 +51,12 @@ def is_capability_query(query: str) -> bool:
     return bool(_CAPABILITY_RE.search(query or ""))
 
 
-def _line(tool: Any) -> str:
-    name = getattr(tool, "name", "") or "tool"
-    desc = str(getattr(tool, "description", "") or "").strip()
-    first = desc.split(". ")[0].rstrip(".")
-    if len(first) > 140:
-        first = first[:137] + "..."
-    return f"- **{name}** — {first}." if first else f"- **{name}**"
+def _names(factory, **kwargs) -> set:
+    """Tool names from a registry factory; empty set when the registry is unavailable."""
+    try:
+        return {str(getattr(t, "name", "")) for t in (factory(**kwargs) or [])}
+    except Exception:
+        return set()
 
 
 def describe_capabilities(
@@ -68,112 +67,142 @@ def describe_capabilities(
     code_exec: Optional[bool] = None,
     skill_roots: Optional[List[str]] = None,
 ) -> str:
-    """Compose a markdown self-description from the LIVE tool registries.
+    """Compose a capability-level self-description from the LIVE tool registries.
 
-    Best-effort and never raises: each registry is probed independently, so a missing optional
-    backend (e.g. QGIS not installed) simply drops out of the answer instead of breaking it.
+    Written for a user, not a developer: capabilities are described in plain language rather
+    than by internal tool name. Probes the FULL registries (a per-request search-method
+    allowlist or MCP flag is a client choice, not a limit on what the assistant can do), but
+    stays honest about DEPLOYMENT-level gates — an optional backend that is genuinely absent
+    (QGIS, MCP server, code sandbox) is reported as unavailable instead of promised.
+    Best-effort per registry; never raises.
     """
-    groups: Dict[str, List[str]] = {"search": [], "external": [], "qgis": [], "files": [], "geocode": []}
+    from agent_runtime.langchain_granular_tools import (
+        make_langchain_geocode_tools,
+        make_langchain_granular_tools,
+    )
 
-    try:
-        from agent_runtime.langchain_granular_tools import make_langchain_granular_tools
-
-        for tool in make_langchain_granular_tools(enabled_search_methods, include_file_tools=True):
-            name = getattr(tool, "name", "")
-            if name in _SEARCH_TOOLS:
-                groups["search"].append(_line(tool))
-            elif name in _EXTERNAL_TOOLS:
-                groups["external"].append(_line(tool))
-            elif name.startswith(("qgis_", "pyqgis_")):
-                groups["qgis"].append(_line(tool))
-            else:
-                groups["files"].append(_line(tool))
-    except Exception:
-        pass
-    try:
-        from agent_runtime.langchain_granular_tools import make_langchain_geocode_tools
-
-        groups["geocode"].extend(_line(t) for t in make_langchain_geocode_tools())
-    except Exception:
-        pass
-
-    # --- analysis-peer registries (not part of the granular toolset) ---
-    groups["geo"] = []
-    groups["mcp"] = []
-    groups["kbflows"] = []
+    # Probe unfiltered: what this deployment can actually do.
+    granular = _names(make_langchain_granular_tools, enabled_search_methods=None,
+                      include_file_tools=True)
+    has_qgis = any(n.startswith(("qgis_", "pyqgis_")) for n in granular)
+    has_geocode = bool(_names(make_langchain_geocode_tools))
+    geo = set()
     try:
         from agent_runtime.langchain_geo_tools import make_langchain_geo_tools
 
-        groups["geo"].extend(_line(t) for t in make_langchain_geo_tools(default_input_file_ids=None))
+        geo = _names(make_langchain_geo_tools, default_input_file_ids=None)
     except Exception:
         pass
-    mcp_on = mcp_tools_enabled_default() if include_mcp_tools is None else bool(include_mcp_tools)
-    if mcp_on:
-        try:
-            from agent_runtime.langchain_mcp_tools import make_langchain_mcp_tools
-
-            groups["mcp"].extend(_line(t) for t in make_langchain_mcp_tools(
-                include_modules=mcp_modules or ["spatial_analysis_tools"]))
-        except Exception:
-            pass
+    kbflows = set()
     try:
         from extractors.geo_handles import make_geo_analysis_tools
 
-        groups["kbflows"].extend(_line(t) for t in make_geo_analysis_tools())
+        kbflows = _names(make_geo_analysis_tools)
     except Exception:
         pass
+    mcp = set()
+    if mcp_tools_enabled_default() if include_mcp_tools is None else bool(include_mcp_tools):
+        try:
+            from agent_runtime.langchain_mcp_tools import make_langchain_mcp_tools
 
+            mcp = _names(make_langchain_mcp_tools,
+                         include_modules=mcp_modules or ["spatial_analysis_tools"])
+        except Exception:
+            pass
     exec_enabled = None
     try:
-        from agent_runtime.code_execution import get_code_executor, is_code_exec_enabled
+        from agent_runtime.code_execution import is_code_exec_enabled
 
         exec_enabled = bool(code_exec) if code_exec is not None else is_code_exec_enabled()
-        backend = getattr(get_code_executor(), "backend", "unknown") if exec_enabled else None
     except Exception:
-        backend = None
-
+        pass
     skills: List[str] = []
     try:
         from agent_runtime.skills import SkillRegistry
 
-        skills = [str(s.get("name")) for s in SkillRegistry.discover(skill_roots).catalog() if s.get("name")]
+        skills = [str(sk.get("name")) for sk in SkillRegistry.discover(skill_roots).catalog()
+                  if sk.get("name")]
     except Exception:
         pass
 
-    parts: List[str] = ["Here is what I can do, grouped by capability:"]
-    if groups["search"]:
-        parts.append("\n**Knowledge-base search (I-GUIDE platform)**\n" + "\n".join(groups["search"]))
-    if groups["external"]:
-        parts.append("\n**External open-data discovery**\n" + "\n".join(groups["external"]))
-    if groups["qgis"]:
-        parts.append("\n**Geospatial analysis (QGIS, headless)**\n" + "\n".join(groups["qgis"]))
-    if groups["geo"]:
-        parts.append("\n**Geospatial file handling (uploaded shapefiles / GeoJSON / TIGER zips)**\n"
-                     + "\n".join(groups["geo"])
-                     + "\nExtracted shapefile components (.shp/.shx/.dbf) are auto-discovered from any one part.")
-    if groups["mcp"]:
-        parts.append("\n**Spatial-analysis tools (MCP)**\n" + "\n".join(groups["mcp"]))
-    if groups["kbflows"]:
-        parts.append("\n**Runnable knowledge-base workflows**\n" + "\n".join(groups["kbflows"]))
-    if groups["geocode"]:
-        parts.append("\n**Geocoding**\n" + "\n".join(groups["geocode"]))
-    if exec_enabled is not None:
-        parts.append(
-            "\n**Code execution**\n- **execute_code** — "
-            + (f"enabled (sandboxed, backend: {backend}); runs Python with dependency installs, "
-               "reads uploaded files, and returns plots/files as downloadable artifacts."
-               if exec_enabled else "currently disabled on this deployment.")
-        )
-    if groups["files"]:
-        parts.append("\n**Files & outputs**\n" + "\n".join(groups["files"]))
+    parts: List[str] = ["Here is what I can help with:"]
+
+    finding: List[str] = []
+    if {"keyword_search", "semantic_search"} & granular:
+        finding.append("search the I-GUIDE knowledge base by keyword and by meaning, so you "
+                       "can find datasets, notebooks, publications, and OERs even when your "
+                       "wording differs from theirs")
+    if "neo4j_search" in granular:
+        finding.append("follow the knowledge graph — find work by a given author, "
+                       "organization, tag, or resource type, and rank elements by how much "
+                       "they are actually used")
+    if "spatial_search" in granular:
+        finding.append("bias a search toward a place you mention")
+    if {"neo4j_get_element_by_id", "neo4j_explore_related_nodes"} & granular:
+        finding.append("look up a specific element by its id, explain it, and list the related "
+                       "elements its contributor curated")
+    if "opengeodata_search" in granular:
+        finding.append("look beyond the platform for open geospatial data, searching public "
+                       "catalogs such as NASA CMR, Data.gov, and Socrata")
+    if {"agent_kb_search", "get_kb_block"} & granular:
+        finding.append("dig into the code and methods extracted from ingested submissions when "
+                       "you need implementation-level detail")
+    if finding:
+        parts.append("\n**Finding things**\nI can " + _join(finding) + ".")
+
+    analysis: List[str] = []
+    if geo:
+        analysis.append("inspect an uploaded vector dataset (its coordinate system, extent, "
+                        "geometry type, columns, and feature count), draw it as a map or a "
+                        "choropleth, reproject it, convert it to GeoJSON, and spatially join "
+                        "two datasets — shapefiles split across several files are reassembled "
+                        "automatically, and zipped or TIGER/Line data is read directly")
+    if kbflows:
+        analysis.append("build hexbin heat maps and choropleths, and run spatial functions "
+                        "extracted from knowledge-base notebooks on your data")
+    if has_qgis:
+        analysis.append("run QGIS itself, headless — metric buffers, any QGIS processing "
+                        "algorithm, layer summaries, and rendered map images")
+    if mcp:
+        analysis.append(f"use {len(mcp)} additional spatial-analysis tools provided by the "
+                        "connected MCP service")
+    if has_geocode:
+        analysis.append("turn place or institution names into coordinates, so named locations "
+                        "can be mapped without you supplying latitudes and longitudes")
+    if analysis:
+        parts.append("\n**Working with geospatial data**\nI can " + _join(analysis) + ".")
+
+    if exec_enabled:
+        parts.append("\n**Computing and coding**\nI write Python and actually run it in a "
+                     "sandbox — installing the libraries it needs, reading the files you "
+                     "upload, and returning the plots, maps, and data files it produces as "
+                     "downloads. I read the errors and revise until it works.")
+    elif exec_enabled is False:
+        parts.append("\n**Computing and coding**\nI can write and explain code, but running "
+                     "it is disabled on this deployment, so I cannot execute it for you.")
+
+    if not has_qgis:
+        parts.append("\n_QGIS is not installed on this deployment, so QGIS-specific operations "
+                     "run through the equivalent Python geospatial tools instead._")
+
     if skills:
-        parts.append("\n**Skills**\n" + "\n".join(f"- {s}" for s in skills))
-    parts.append(
-        "\nI also keep conversation memory across turns, look up knowledge elements by id, list "
-        "contributor-specified related elements, rank elements by real usage (popularity), and "
-        "cite every answer with links to its sources."
-    )
+        parts.append("\n**Task-specific workflows**\nI can load and follow these packaged "
+                     "workflows: " + ", ".join(skills) + ".")
+
+    parts.append("\n**How I answer**\nI remember the conversation, so you can refer back to "
+                 "earlier results or files; I keep your uploads available across turns; I "
+                 "ground answers in what I actually retrieved or computed and cite each source "
+                 "as a link; and I tell you when the evidence does not support an answer "
+                 "rather than guessing.")
+    parts.append("\nJust describe what you are after — I pick the right tools for it.")
     return "\n".join(parts)
+
+
+def _join(items: List[str]) -> str:
+    """Join clauses into readable prose ('a, b, and c')."""
+    if len(items) == 1:
+        return items[0]
+    return "; ".join(items[:-1]) + "; and " + items[-1]
 
 
 __all__ = ["is_capability_query", "describe_capabilities"]

@@ -34,38 +34,37 @@ def test_capability_detection_does_not_hijack_domain_questions():
         assert not is_capability_query(q), q
 
 
-def test_describe_capabilities_reflects_live_registries():
+def test_describe_capabilities_is_capability_prose_not_a_tool_dump():
+    """User-facing prose: no internal tool names, no per-tool bullet list."""
     text = describe_capabilities()
-    # core retrieval tools present and grouped
-    for name in ("keyword_search", "semantic_search", "neo4j_search", "opengeodata_search",
-                 "geocode_places"):
-        assert name in text, name
-    assert "Knowledge-base search" in text
-    assert "execute_code" in text                         # code exec section present
+    for internal in ("keyword_search", "semantic_search", "neo4j_search", "spatial_search",
+                     "opengeodata_search", "inspect_vector", "plot_vector", "geocode_places",
+                     "execute_code", "kb_point_heatmap", "agent_kb_search"):
+        assert internal not in text, internal
+    # capabilities are described in plain language instead
+    assert "knowledge base by keyword and by meaning" in text
+    assert "coordinate system" in text            # vector inspection
+    assert "coordinates" in text                  # geocoding
+    assert "Finding things" in text and "Working with geospatial data" in text
 
 
-def test_describe_capabilities_includes_analysis_peer_registries():
-    """The analysis peer's own tools live in separate registries (geo tools, MCP spatial-analysis,
-    runnable KB workflows) — they were missing from the self-description."""
+def test_describe_capabilities_covers_all_registries():
+    """Everything the deployment offers is represented — including the pieces a per-request
+    client allowlist would hide (external open data, KB code/method search, MCP)."""
     text = describe_capabilities(include_mcp_tools=True)
-    # geo tools (analysis/code peers, for uploaded vector data)
-    assert "inspect_vector" in text and "plot_vector" in text
-    assert "Geospatial file handling" in text
-    # MCP spatial-analysis module tools are enumerated by name (not just mentioned)
-    assert "Spatial-analysis tools (MCP)" in text
-    assert text.count("- **mcp_") >= 1 or "spatial" in text.lower()
+    assert "NASA CMR" in text and "Data.gov" in text          # external open data
+    assert "implementation-level detail" in text              # agent-KB code/method search
+    assert "heat maps" in text                                # runnable KB workflows
+    assert "MCP service" in text                              # MCP spatial-analysis tools
+    assert "related elements its contributor curated" in text # by-id + related
 
 
-def test_describe_capabilities_mcp_off_hides_section():
-    text = describe_capabilities(include_mcp_tools=False)
-    assert "Spatial-analysis tools (MCP)" not in text
-
-
-def test_describe_capabilities_honors_request_config():
+def test_describe_capabilities_ignores_request_allowlist_but_honors_deployment_gates():
+    """A client's search-method allowlist is not a limit on what the assistant can do, so the
+    self-description still covers everything; a real deployment gate (code exec off) is honest."""
     text = describe_capabilities(enabled_search_methods=["keyword_search"], code_exec=False)
-    assert "keyword_search" in text
-    assert "semantic_search" not in text                  # allowlist respected
-    assert "currently disabled" in text                   # honest about code exec being off
+    assert "NASA CMR" in text                                  # not narrowed by the allowlist
+    assert "running it is disabled on this deployment" in text  # honest about code exec
 
 
 def test_graph_routes_capability_question_deterministically(monkeypatch):
@@ -81,4 +80,5 @@ def test_graph_routes_capability_question_deterministically(monkeypatch):
     graph = og.build_orchestrator_graph(llm=object())     # llm never invoked on this route
     state = graph.invoke({"query": "what tools do you have", "chat_history": [], "thread_id": None})
     answer = state.get("final_answer") or ""
-    assert "keyword_search" in answer and "semantic_search" in answer
+    assert "Here is what I can help with" in answer
+    assert "knowledge base by keyword and by meaning" in answer
