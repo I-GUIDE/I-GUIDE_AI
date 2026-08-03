@@ -19,6 +19,9 @@ from rag_pipeline.qgis_headless_tools import (
 def qgis_job_root(tmp_path, monkeypatch):
     root = tmp_path / "agent_files"
     monkeypatch.setenv("AGENT_FILE_STORAGE_ROOT", str(root))
+    # A developer .env may set AGENT_PUBLIC_BASE_URL (loaded via load_dotenv on import) —
+    # these tests assert the host-relative download_url form.
+    monkeypatch.delenv("AGENT_PUBLIC_BASE_URL", raising=False)
     return root
 
 
