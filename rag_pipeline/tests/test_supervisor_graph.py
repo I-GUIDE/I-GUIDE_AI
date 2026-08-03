@@ -1121,6 +1121,10 @@ def test_popularity_falls_back_to_search_agent_when_graph_empty(monkeypatch):
     from agent_runtime.supervisor.graph import default_search_fn
 
     monkeypatch.setattr(agents, "get_neo4j_agent_results", lambda q, limit=10: [])
+    import rag_pipeline.search.keyword as kw
+    import rag_pipeline.search.semantic as sem
+    monkeypatch.setattr(kw, "get_keyword_search_results", lambda q, size=8: [])
+    monkeypatch.setattr(sem, "semantic_search", lambda q, size=8: [])
     called = {}
 
     def fake_build(**kwargs):
@@ -1131,3 +1135,55 @@ def test_popularity_falls_back_to_search_agent_when_graph_empty(monkeypatch):
 
     default_search_fn()("most popular datasets", {"thread_id": "t"})
     assert called.get("built") is True
+
+
+# --- search completeness: multi-method sweep + top_k ---------------------------
+
+def _kw_hit(did, title):
+    return {"_id": did, "_score": 1.0, "_source": {"title": title, "element_type": "dataset", "contents": "x"}}
+
+
+def test_direct_search_sweep_runs_both_core_methods_and_respects_allowlist(monkeypatch):
+    import rag_pipeline.search.keyword as kw
+    import rag_pipeline.search.semantic as sem
+    from agent_runtime.supervisor.graph import _direct_search_sweep
+    monkeypatch.setattr(kw, "get_keyword_search_results", lambda q, size=8: [_kw_hit("k1", "KW Hit")])
+    monkeypatch.setattr(sem, "semantic_search", lambda q, size=8: [_kw_hit("s1", "Sem Hit")])
+
+    docs = _direct_search_sweep("floods", None)
+    assert {d["doc_id"] for d in docs} == {"k1", "s1"}          # BOTH methods contributed
+    docs2 = _direct_search_sweep("floods", ["semantic_search"])
+    assert {d["doc_id"] for d in docs2} == {"s1"}               # allowlist respected
+
+    def boom(q, size=8):
+        raise RuntimeError("opensearch down")
+    monkeypatch.setattr(kw, "get_keyword_search_results", boom)
+    docs3 = _direct_search_sweep("floods", None)
+    assert {d["doc_id"] for d in docs3} == {"s1"}               # one method failing never raises
+
+
+def test_search_fn_unions_sweep_with_llm_harvest(monkeypatch):
+    """Even when the LLM SearchAgent calls a single tool (or none), the search turn returns
+    multi-method coverage: the deterministic keyword+semantic sweep is unioned in."""
+    import agent_runtime.executor_factory as ef
+    import rag_pipeline.search.keyword as kw
+    import rag_pipeline.search.semantic as sem
+    from agent_runtime.supervisor.graph import default_search_fn
+
+    monkeypatch.setattr(ef, "build_search_agent_executor", lambda **k: object())
+    monkeypatch.setattr(ef, "invoke_agent_with_payload_fallback", lambda *a, **k: {"messages": []})
+    monkeypatch.setattr(kw, "get_keyword_search_results", lambda q, size=8: [_kw_hit("k1", "KW")])
+    monkeypatch.setattr(sem, "semantic_search", lambda q, size=8: [_kw_hit("k1", "KW"), _kw_hit("s1", "Sem")])
+
+    docs = default_search_fn()("datasets about floods", {"thread_id": "t"})
+    assert [d["doc_id"] for d in docs] == ["k1", "s1"]          # merged + deduped on k1
+
+
+def test_default_top_k_env_tunable(monkeypatch):
+    from agent_runtime.supervisor.graph import _default_top_k
+    monkeypatch.delenv("AGENT_SUPERVISOR_TOP_K", raising=False)
+    assert _default_top_k() == 8                                 # raised from the historical 5
+    monkeypatch.setenv("AGENT_SUPERVISOR_TOP_K", "12")
+    assert _default_top_k() == 12
+    monkeypatch.setenv("AGENT_SUPERVISOR_TOP_K", "bogus")
+    assert _default_top_k() == 8

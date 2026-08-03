@@ -58,6 +58,15 @@ def _max_peer_runs() -> int:
         return 3
 
 
+def _default_top_k() -> int:
+    """Evidence kept after the search rerank. A single search action fans out across several
+    retrieval methods, so truncating to the historical 5 made listing answers incomplete."""
+    try:
+        return max(1, int(os.getenv("AGENT_SUPERVISOR_TOP_K", "8")))
+    except (TypeError, ValueError):
+        return 8
+
+
 def _search_exhausted(state: "SupervisorState") -> bool:
     """Whether further searching is pointless: it hit the attempt cap, or the most
     recent search returned NO new evidence. Stops the supervisor (and peer 'needs')
@@ -913,6 +922,41 @@ def _recall_recent_element_id(chat_history: Optional[List[Any]], *, max_items: i
     return None
 
 
+def _direct_search_sweep(query: str, enabled_search_methods: Optional[List[str]],
+                         *, k: int = 8) -> List[Dict[str, Any]]:
+    """Deterministic multi-method retrieval sweep: run keyword AND semantic search directly
+    (cheap OpenSearch calls, no LLM) so every search turn has baseline coverage from BOTH
+    core methods regardless of which tools the LLM SearchAgent chose to call — it frequently
+    stops after a single tool, leaving results incomplete. Respects the request's
+    enabled_search_methods allowlist. Never raises; each method degrades independently."""
+    allow = ({str(m).strip() for m in enabled_search_methods}
+             if enabled_search_methods is not None else None)
+
+    def permitted(name: str) -> bool:
+        return allow is None or name in allow
+
+    docs: List[Dict[str, Any]] = []
+    if permitted("keyword_search"):
+        try:
+            from rag_pipeline.search.agents import _hit_to_document
+            from rag_pipeline.search.keyword import get_keyword_search_results
+
+            docs.extend(_hit_to_document(h, source_name="keyword")
+                        for h in (get_keyword_search_results(query, size=k) or []))
+        except Exception:
+            pass
+    if permitted("semantic_search"):
+        try:
+            from rag_pipeline.search.agents import _hit_to_document
+            from rag_pipeline.search.semantic import semantic_search
+
+            docs.extend(_hit_to_document(h, source_name="semantic")
+                        for h in (semantic_search(query, size=k) or []))
+        except Exception:
+            pass
+    return [d for d in docs if isinstance(d, dict)]
+
+
 def default_search_fn(*, llm: Optional[Any] = None, tool_strategy: str = "granular",
                       include_mcp_tools: bool = False, mcp_modules: Optional[List[str]] = None,
                       enabled_search_methods: Optional[List[str]] = None,
@@ -976,7 +1020,10 @@ def default_search_fn(*, llm: Optional[Any] = None, tool_strategy: str = "granul
             executor, query=_as_retrieval_request(query), chat_history=None,
             config=agent_config(child_thread_id(state.get("thread_id"), "sup_search")),
         )
-        return extract_documents_from_search_evidence(build_search_evidence_payload(query, resp, None))
+        harvested = extract_documents_from_search_evidence(build_search_evidence_payload(query, resp, None))
+        # Completeness sweep: union in direct keyword+semantic hits so one search turn always
+        # carries multi-method coverage, even when the LLM peer called a single tool.
+        return _merge_dedup(harvested, _direct_search_sweep(query, enabled_search_methods))
 
     return fn
 
@@ -1242,11 +1289,12 @@ def build_supervisor_graph(
     code_fn: Optional[CodeFn] = None,
     synthesize_fn: Optional[SynthesizeFn] = None,
     llm: Optional[Any] = None,
-    top_k: int = 5,
+    top_k: Optional[int] = None,
     do_rerank: bool = True,
     do_audit: bool = True,
 ) -> Any:
     """Compile the supervisor-over-peers graph. Workers default to existing agents."""
+    top_k = top_k if top_k is not None else _default_top_k()
     decide = decide_fn or default_decide_fn(llm=llm)
     do_search = search_fn or default_search_fn(llm=llm)
     do_analyze = analyze_fn or default_analyze_fn(llm=llm)
