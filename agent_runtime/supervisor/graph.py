@@ -1043,6 +1043,120 @@ def default_search_fn(*, llm: Optional[Any] = None, tool_strategy: str = "granul
     return fn
 
 
+# --- deterministic QGIS map workflow -------------------------------------------
+# When the user explicitly asks for QGIS (or for a map drawn "on a basemap"/"map layer"), the
+# LLM peer used to write matplotlib/geopandas code instead: no basemap, and a buffer computed in
+# DEGREES (~21.5 km instead of 25 km, varying with latitude). Detect that request and run the
+# real QGIS chain deterministically — metric buffer in a projected CRS, then a PyQGIS render
+# over an OSM basemap — so neither the projection nor the basemap depends on tool-choice whim.
+_QGIS_MAP_RE = re.compile(
+    r"\bqgis\b|\bpyqgis\b|\bbase\s?map\b|\bmap\s+layer\b|on\s+top\s+of\s+(?:a\s+)?map",
+    re.I,
+)
+_DISTANCE_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(kilometers?|kilometres?|km|meters?|metres?|miles?|mi|m)\b", re.I
+)
+_VECTOR_EXTS = (".geojson", ".json", ".shp", ".gpkg", ".zip", ".gml", ".kml")
+
+
+def _detect_qgis_map_request(query: str) -> Optional[Dict[str, Any]]:
+    """Return ``{"distance_meters": float|None}`` iff *query* asks for a QGIS/basemap map."""
+    if not _QGIS_MAP_RE.search(query or ""):
+        return None
+    distance_m: Optional[float] = None
+    m = _DISTANCE_RE.search(query or "")
+    if m:
+        value, unit = float(m.group(1)), m.group(2).lower()
+        if unit.startswith(("km", "kilomet")):
+            distance_m = value * 1000.0
+        elif unit in ("mi", "mile", "miles"):
+            distance_m = value * 1609.344
+        else:
+            distance_m = value
+    return {"distance_meters": distance_m}
+
+
+def _first_vector_path(input_file_ids: Optional[List[str]]) -> Optional[str]:
+    """On-disk path of the first uploaded vector dataset, or None."""
+    from agent_runtime.file_store import get_file_record, resolve_file_id
+
+    for fid in (input_file_ids or []):
+        try:
+            record = get_file_record(str(fid)) or {}
+            name = str(record.get("filename") or "").lower()
+            if name.endswith(_VECTOR_EXTS):
+                return str(resolve_file_id(str(fid)))
+        except Exception:
+            continue
+    return None
+
+
+def _run_qgis_map_workflow(query: str, *, input_file_ids: Optional[List[str]],
+                           thread_id: Optional[str],
+                           distance_meters: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    """Run buffer(optional) -> render-with-basemap via the QGIS tools. None if not applicable."""
+    from rag_pipeline.qgis_headless_tools import (
+        pyqgis_available,
+        pyqgis_render_map_tool,
+        qgis_metric_buffer_tool,
+        qgis_process_available,
+    )
+
+    layer_path = _first_vector_path(input_file_ids)
+    if not layer_path:
+        return None
+    want_buffer = bool(distance_meters and distance_meters > 0)
+    if want_buffer and not qgis_process_available():
+        return None          # buffering needs the qgis_process CLI
+    if not pyqgis_available():
+        return None          # rendering needs the PyQGIS bindings
+
+    from agent_runtime.executor_factory import child_thread_id
+
+    session = child_thread_id(thread_id, "analysis_qgis") or "qgis"
+    steps: List[Dict[str, Any]] = []
+    layers: List[Dict[str, Any]] = []
+    buffer_km: Optional[float] = None
+
+    if want_buffer:
+        try:
+            buf = json.loads(qgis_metric_buffer_tool(
+                input_layer=layer_path, distance_meters=float(distance_meters),
+                output_filename="buffer.geojson", session_id=session))
+        except Exception as exc:
+            return {"summary": f"QGIS buffer failed: {exc}", "qgis_workflow": True}
+        steps.append({"step": "qgis_metric_buffer", "result": buf})
+        if not buf.get("ok") or not buf.get("output_path"):
+            return {"summary": "QGIS metric buffer did not produce an output layer.",
+                    "steps": steps, "qgis_workflow": True}
+        buffer_km = float(distance_meters) / 1000.0
+        layers.append({"path": buf["output_path"], "name": f"{buffer_km:g} km buffer",
+                       "style": {"fill_color": "#5DCAA555", "stroke_color": "#0F6E56",
+                                 "stroke_width": 0.6}})
+    layers.append({"path": layer_path, "name": "input layer",
+                   "style": {"fill_color": "#D85A30", "size": 3.0}})
+
+    try:
+        render = json.loads(pyqgis_render_map_tool(
+            layers_json=json.dumps(layers), output_filename="qgis_map.png",
+            width=1100, height=1200, basemap="osm", session_id=session))
+    except Exception as exc:
+        return {"summary": f"QGIS render failed: {exc}", "steps": steps, "qgis_workflow": True}
+    steps.append({"step": "pyqgis_render_map", "result": render})
+
+    basemap = str(render.get("basemap") or "")
+    parts = []
+    if buffer_km:
+        crs = (steps[0]["result"] or {}).get("projected_crs")
+        parts.append(f"Computed a true {buffer_km:g} km buffer with QGIS "
+                     f"(native:buffer in the projected CRS {crs}, reprojected back to EPSG:4326)")
+    parts.append(f"rendered the layers with headless PyQGIS over the {basemap or 'no'} basemap"
+                 f" (map CRS {render.get('crs')})" if render.get("ok")
+                 else "the PyQGIS render did not complete")
+    return {"summary": ". ".join(parts) + ".", "steps": steps, "qgis_workflow": True,
+            "basemap": basemap or None}
+
+
 def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = True,
                        mcp_modules: Optional[List[str]] = None,
                        skill_roots: Optional[List[str]] = None,
@@ -1058,6 +1172,29 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
             invoke_agent_with_payload_fallback,
         )
         from agent_runtime.langchain_granular_tools import make_langchain_qgis_tools
+
+        # Deterministic QGIS chain when the user asked for QGIS / a basemap map: guarantees a
+        # metric buffer and a real basemap instead of a matplotlib fallback.
+        qgis_req = _detect_qgis_map_request(query)
+        if qgis_req:
+            emit_trace_event(
+                "node_started",
+                {"stage": "analyze", "message": "Running QGIS map workflow"},
+                node="analyze",
+            )
+            qgis_result = _run_qgis_map_workflow(
+                query, input_file_ids=input_file_ids, thread_id=state.get("thread_id"),
+                distance_meters=qgis_req.get("distance_meters"),
+            )
+            if qgis_result:
+                emit_trace_event(
+                    "node_completed",
+                    {"stage": "analyze", "message": "QGIS map ready"},
+                    node="analyze",
+                )
+                return qgis_result
+
+
         from agent_runtime.runtime_utils import extract_final_answer, extract_search_artifacts
 
         thread_id = state.get("thread_id")
