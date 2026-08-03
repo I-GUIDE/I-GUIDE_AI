@@ -25,8 +25,9 @@ import json
 import os
 import shutil
 import tempfile
+import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 _SELF_CONTAINED = {".geojson", ".json", ".gpkg", ".parquet", ".geoparquet", ".fgb", ".kml"}
 # Components of an (extracted) ESRI shapefile set — any one of these is enough to reference it.
@@ -136,6 +137,134 @@ def _epsg(crs: Any) -> Optional[str]:
         return None
 
 
+# --- tabular (CSV/TSV) point data -------------------------------------------------
+# gpd.read_file() on a CSV returns a plain DataFrame with NO geometry, so downstream calls fail
+# obscurely (e.g. "'DataFrame' object has no attribute 'to_file'"). Build point geometry from
+# coordinate columns instead, accepting decimal degrees OR DMS strings (24°07'12.0"N) — field
+# datasets and paper supplements very often ship coordinates in DMS.
+_LAT_KEYS = ("latitude", "lat", "y", "ycoord", "y_coord", "northing", "decimallatitude")
+_LON_KEYS = ("longitude", "lon", "long", "lng", "x", "xcoord", "x_coord", "easting", "decimallongitude")
+_DMS_RE = re.compile(
+    r"""^\s*(-?\d+(?:\.\d+)?)\s*[°d:\s]\s*      # degrees
+        (?:(\d+(?:\.\d+)?)\s*['m\u2032:\s]\s*)?  # minutes (optional)
+        (?:(\d+(?:\.\d+)?)\s*["s\u2033]?\s*)?     # seconds (optional)
+        ([NSEWnsew])?\s*$""",
+    re.VERBOSE,
+)
+
+
+def parse_coordinate(value: Any) -> Optional[float]:
+    """Decimal degrees from a number or a DMS/DM string; None when unparseable.
+
+    Accepts ``24°07'12.0"N``, ``24 07 12 N``, ``121°14.5'E``, ``-97.1833`` and similar.
+    A S/W hemisphere suffix negates the value.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    match = _DMS_RE.match(text.replace("\u2019", "'").replace("\u201d", '"'))
+    if not match:
+        return None
+    deg, minutes, seconds, hemi = match.groups()
+    try:
+        dec = abs(float(deg)) + (float(minutes or 0) / 60.0) + (float(seconds or 0) / 3600.0)
+    except (TypeError, ValueError):
+        return None
+    if str(deg).startswith("-") or (hemi or "").upper() in ("S", "W"):
+        dec = -dec
+    return dec
+
+
+def _pick_coord_column(columns: Any, keys: Sequence[str]) -> Optional[str]:
+    lookup = {str(c).strip().lower().replace(" ", "").replace("_", ""): c for c in columns}
+    for key in keys:
+        hit = lookup.get(key.replace("_", ""))
+        if hit is not None:
+            return hit
+    for norm, original in lookup.items():       # substring fallback ("site_latitude")
+        if any(norm.endswith(k.replace("_", "")) or k.replace("_", "") in norm for k in keys):
+            return original
+    return None
+
+
+def dataframe_to_points(df: Any) -> Any:
+    """Build an EPSG:4326 point GeoDataFrame from a table's coordinate columns.
+
+    Raises ValueError when no usable coordinate columns/values are present, so callers can report a clear message instead of failing later on a missing ``.to_file``.
+    """
+    import geopandas as gpd
+
+    lat_col = _pick_coord_column(df.columns, _LAT_KEYS)
+    lon_col = _pick_coord_column(df.columns, _LON_KEYS)
+    if lat_col is None or lon_col is None:
+        raise ValueError(
+            "tabular input has no recognizable coordinate columns; expected latitude/longitude "
+            f"(or lat/lon, y/x). Columns present: {list(df.columns)[:12]}"
+        )
+    lats = [parse_coordinate(v) for v in df[lat_col]]
+    lons = [parse_coordinate(v) for v in df[lon_col]]
+    keep = [
+        i for i, (la, lo) in enumerate(zip(lats, lons))
+        if la is not None and lo is not None and -90 <= la <= 90 and -180 <= lo <= 180
+    ]
+    if not keep:
+        raise ValueError(
+            f"could not parse any coordinates from columns {lat_col!r}/{lon_col!r} "
+            "(supported: decimal degrees or DMS such as 24°07'12.0\"N)"
+        )
+    sub = df.iloc[keep].copy()
+    sub["latitude"] = [lats[i] for i in keep]
+    sub["longitude"] = [lons[i] for i in keep]
+    return gpd.GeoDataFrame(
+        sub, geometry=gpd.points_from_xy(sub["longitude"], sub["latitude"]), crs="EPSG:4326"
+    )
+
+
+def read_vector(read_path: Any, layer: Optional[str] = None) -> Any:
+    """Load any supported vector source as a GeoDataFrame.
+
+    Falls back to tabular point construction when the source carries no geometry (a CSV/TSV of
+    coordinates), which is why plain spreadsheets can be mapped/exported like any other layer.
+    """
+    import geopandas as gpd
+
+    gdf = None
+    try:
+        gdf = gpd.read_file(read_path, layer=layer) if layer else gpd.read_file(read_path)
+    except Exception as exc:
+        table_error = exc
+        gdf = None
+    else:
+        table_error = None
+    has_geom = (
+        gdf is not None
+        and hasattr(gdf, "geometry")
+        and "geometry" in getattr(gdf, "columns", [])
+        and not gdf.geometry.isna().all()
+    )
+    if has_geom:
+        return gdf
+    # No geometry: treat it as a table of coordinates.
+    import pandas as pd
+
+    frame = gdf
+    if frame is None or not hasattr(frame, "columns"):
+        suffix = str(read_path).lower()
+        sep = "\t" if suffix.endswith((".tsv", ".tab")) else None
+        try:
+            frame = pd.read_csv(read_path, sep=sep, engine="python")
+        except Exception as exc:
+            raise ValueError(f"unreadable vector/tabular source: {table_error or exc}") from exc
+    return dataframe_to_points(frame)
+
 def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None) -> List[Any]:
     """Build the vector/shapefile StructuredTools (geopandas-backed).
 
@@ -175,7 +304,7 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             dtypes = list(_dtypes) if _dtypes is not None else []
             cols = [{"name": str(f), "dtype": str(d)} for f, d in zip(fields, dtypes)]
             tb = info.get("total_bounds")
-            return json.dumps({
+            payload = {
                 "ok": True,
                 "driver": info.get("driver"),
                 "layers": layers,
@@ -184,7 +313,27 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                 "crs": info.get("crs"),
                 "columns": cols,
                 "bounds": [float(x) for x in tb] if tb is not None else None,
-            }, default=str)
+            }
+            # A CSV/TSV of coordinates has no geometry OF ITS OWN, so pyogrio reports none —
+            # which reads as "not mappable". Report the geometry we can DERIVE from its
+            # coordinate columns instead, so the caller knows the layer is usable as points.
+            if not payload["geometry_type"]:
+                try:
+                    derived = read_vector(read_path, layer)
+                    b = derived.total_bounds
+                    payload.update({
+                        "geometry_type": "Point",
+                        "crs": "EPSG:4326",
+                        "feature_count": int(len(derived)),
+                        "bounds": [float(x) for x in b],
+                        "geometry_source": "derived from coordinate columns "
+                                           "(decimal degrees or DMS) — usable directly with "
+                                           "plot_vector / vector_to_geojson / spatial tools",
+                    })
+                except Exception as derive_exc:
+                    payload["geometry_note"] = (
+                        f"no geometry in the file and none could be derived: {derive_exc}")
+            return json.dumps(payload, default=str)
         except Exception as exc:
             return json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}", "hint": _SIB})
         finally:
@@ -206,7 +355,7 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             from agent_runtime.file_store import create_output_file_from_path
 
             read_path, tmp = _stage(file_id, sibling_file_ids)
-            gdf = gpd.read_file(read_path, layer=layer) if layer else gpd.read_file(read_path)
+            gdf = read_vector(read_path, layer)
             total = len(gdf)
             downsampled = total > max_features
             if downsampled:
@@ -249,7 +398,7 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             from agent_runtime.file_store import create_output_file_from_path
 
             read_path, tmp = _stage(file_id, sibling_file_ids)
-            gdf = gpd.read_file(read_path, layer=layer) if layer else gpd.read_file(read_path)
+            gdf = read_vector(read_path, layer)
             if target_crs and getattr(gdf, "crs", None) is not None:
                 gdf = gdf.to_crs(target_crs)
             out = Path(tempfile.mkdtemp(prefix="vec_gj_")) / "vector.geojson"
@@ -279,7 +428,7 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             from agent_runtime.file_store import create_output_file_from_path
 
             read_path, tmp = _stage(file_id, sibling_file_ids)
-            gdf = gpd.read_file(read_path, layer=layer) if layer else gpd.read_file(read_path)
+            gdf = read_vector(read_path, layer)
             if getattr(gdf, "crs", None) is None:
                 return json.dumps({"ok": False, "error": "source has no CRS (.prj missing); cannot reproject"})
             gdf = gdf.to_crs(target_crs)
@@ -314,8 +463,8 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
 
             lp, t1 = _stage(left_file_id, left_siblings)
             rp, t2 = _stage(right_file_id, right_siblings)
-            left = gpd.read_file(lp)
-            right = gpd.read_file(rp)
+            left = read_vector(lp)
+            right = read_vector(rp)
             note = None
             if getattr(left, "crs", None) is not None and getattr(right, "crs", None) is not None:
                 if left.crs != right.crs:
