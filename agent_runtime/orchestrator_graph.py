@@ -152,6 +152,7 @@ def build_orchestrator_graph(
             node="capabilities",
         )
         answer = describe_capabilities(
+            llm=llm or build_default_llm(),
             enabled_search_methods=enabled_search_methods,
             include_mcp_tools=include_mcp_tools,
             mcp_modules=mcp_modules,

@@ -9,7 +9,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
 from uuid import uuid4
 
 from .agent_file_store import create_output_file_from_path, get_file_record, resolve_file_id, storage_root
@@ -27,15 +27,50 @@ def _qgis_force_override() -> Optional[bool]:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
+def qgis_process_bin() -> Optional[str]:
+    """Resolved ``qgis_process`` executable, or None when QGIS is genuinely absent.
+
+    ``QGIS_PROCESS_BIN`` is honored when it resolves, but a configured path that does NOT exist
+    here falls back to the plain name on PATH — otherwise a developer .env pointing at a local
+    QGIS install (e.g. a macOS /Applications path) silently disables QGIS inside the Linux
+    container, where the binary is on PATH all along.
+    """
+    configured = (os.getenv("QGIS_PROCESS_BIN") or "").strip()
+    if configured:
+        resolved = shutil.which(configured)
+        if resolved:
+            return resolved
+    return shutil.which(DEFAULT_QGIS_PROCESS_BIN)
+
+
 def qgis_process_available() -> bool:
-    """Whether the ``qgis_process`` CLI (used by the processing/buffer tools) is on PATH."""
+    """Whether the ``qgis_process`` CLI (used by the processing/buffer tools) is usable."""
     forced = _qgis_force_override()
     if forced is not None:
         return forced
-    return shutil.which(os.getenv("QGIS_PROCESS_BIN", DEFAULT_QGIS_PROCESS_BIN)) is not None
+    return qgis_process_bin() is not None
 
 
 _PYQGIS_PROBE_CACHE: Dict[str, bool] = {}
+
+
+def qgis_python_candidates() -> List[str]:
+    """Interpreters to probe for the PyQGIS bindings, in priority order.
+
+    ``QGIS_PYTHON_BIN`` first (the image sets it to the distro python that ``python3-qgis``
+    targets), then this interpreter, then the distro python — so a configured path that does
+    not exist on this host (e.g. a dev machine's QGIS.app python leaking in through .env) does
+    not disable PyQGIS when a working interpreter is available. Each candidate is only accepted
+    if it can actually import ``qgis``.
+    """
+    candidates: List[str] = []
+    configured = (os.getenv("QGIS_PYTHON_BIN") or "").strip()
+    for candidate in (configured, sys.executable, "/usr/bin/python3"):
+        if not candidate or candidate in candidates:
+            continue
+        if candidate == sys.executable or os.path.exists(candidate) or shutil.which(candidate):
+            candidates.append(candidate)
+    return candidates
 
 
 def pyqgis_available() -> bool:
@@ -49,23 +84,27 @@ def pyqgis_available() -> bool:
     forced = _qgis_force_override()
     if forced is not None:
         return forced
-    python_bin = os.getenv("QGIS_PYTHON_BIN", DEFAULT_QGIS_PYTHON_BIN)
-    if python_bin in _PYQGIS_PROBE_CACHE:
-        return _PYQGIS_PROBE_CACHE[python_bin]
-    ok = False
-    try:
-        if python_bin == sys.executable:
-            ok = importlib.util.find_spec("qgis") is not None
-        else:
-            probe = subprocess.run(
-                [python_bin, "-c", "import importlib.util as u, sys; sys.exit(0 if u.find_spec('qgis') else 1)"],
-                capture_output=True, timeout=15,
-            )
-            ok = probe.returncode == 0
-    except Exception:
+    for python_bin in qgis_python_candidates():
+        if python_bin in _PYQGIS_PROBE_CACHE:
+            if _PYQGIS_PROBE_CACHE[python_bin]:
+                return True
+            continue
         ok = False
-    _PYQGIS_PROBE_CACHE[python_bin] = ok
-    return ok
+        try:
+            if python_bin == sys.executable:
+                ok = importlib.util.find_spec("qgis") is not None
+            else:
+                probe = subprocess.run(
+                    [python_bin, "-c", "import importlib.util as u, sys; sys.exit(0 if u.find_spec('qgis') else 1)"],
+                    capture_output=True, timeout=15,
+                )
+                ok = probe.returncode == 0
+        except Exception:
+            ok = False
+        _PYQGIS_PROBE_CACHE[python_bin] = ok
+        if ok:
+            return True
+    return False
 
 
 def qgis_available() -> bool:

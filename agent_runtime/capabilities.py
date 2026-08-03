@@ -1,16 +1,25 @@
-"""Deterministic self-description: answer "what tools do you have" from the live registries.
+"""Self-description: answer "what tools do you have" from the LIVE tool registries.
 
 In the supervisor architecture no LLM sees the full tool registry (the decider is a bare
 router, the search peer's prose is discarded, and the synthesizer is tool-free and
-grounded-only), so a meta question like "what tools do you have" either retrieved irrelevant
-KB documents about "tools" or hit the no-grounding reply. This module detects capability/meta
-questions at triage and composes the answer directly from the actual tool factories — so it is
-always truthful for the running deployment and the request's configuration (search-method
-allowlist, code-exec flag, skills, MCP modules).
+grounded-only), so a meta question like "what tools do you have" retrieved irrelevant KB
+documents or hit the no-grounding reply.
+
+This module answers those questions WITHOUT hardcoded capability prose:
+
+1. ``collect_capability_inventory`` reads the actual tool factories — every tool's real name and
+   description, plus deployment flags (code execution, skills, MCP) — so a tool added, removed,
+   or gated anywhere in the codebase changes this answer with no edit here.
+2. ``describe_capabilities`` hands that inventory to the LLM (``CAPABILITY_SUMMARY_PROMPT``),
+   which writes it up in plain language. No capability sentence is authored here.
+
+The only non-LLM path is a mechanical fallback that lists the inventory verbatim when no model
+is reachable — still derived from the registries, nothing to maintain by hand.
 """
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Dict, List, Optional
 
@@ -22,28 +31,10 @@ _CAPABILITY_RE = re.compile(
     r"|\byour\s+(?:tools?|capabilities|skills?)\b"
     r"|^\s*what\s+can\s+you\s+do\b"
     r"|^\s*what\s+are\s+you\s+able\s+to\s+do\b"
-    r"|\bwhat\s+(?:skills?|capabilities)\s+do\s+you\s+have\b"
+    r"|\bwhat\s+(?:kind\s+of\s+)?(?:tools?|skills?|capabilities)\s+do\s+you\s+have\b"
     r"|^\s*(?:list|show)(?:\s+me)?\s+(?:your\s+)?(?:available\s+)?(?:tools?|capabilities|skills?)\s*\??\s*$)",
     re.IGNORECASE,
 )
-
-# Grouping of the granular toolset by capability, for a readable answer.
-_SEARCH_TOOLS = {
-    "keyword_search", "semantic_search", "neo4j_search", "neo4j_get_element_by_id",
-    "neo4j_explore_related_nodes", "spatial_search", "agent_kb_search", "get_kb_block",
-}
-_EXTERNAL_TOOLS = {"opengeodata_search"}
-_GEOCODE_TOOLS = {"geocode_places"}
-
-
-def mcp_tools_enabled_default() -> bool:
-    """The server's MCP default (AGENT_INCLUDE_MCP_TOOLS) when a request doesn't specify."""
-    try:
-        from agent_runtime.langchain_mcp_tools import mcp_tools_enabled
-
-        return bool(mcp_tools_enabled())
-    except Exception:
-        return False
 
 
 def is_capability_query(query: str) -> bool:
@@ -51,158 +42,175 @@ def is_capability_query(query: str) -> bool:
     return bool(_CAPABILITY_RE.search(query or ""))
 
 
-def _names(factory, **kwargs) -> set:
-    """Tool names from a registry factory; empty set when the registry is unavailable."""
+def _tool_entries(factory, **kwargs) -> List[Dict[str, str]]:
+    """``[{name, description}]`` from a registry factory; [] when it is unavailable."""
+    out: List[Dict[str, str]] = []
     try:
-        return {str(getattr(t, "name", "")) for t in (factory(**kwargs) or [])}
+        for tool in (factory(**kwargs) or []):
+            name = str(getattr(tool, "name", "") or "").strip()
+            if not name:
+                continue
+            desc = " ".join(str(getattr(tool, "description", "") or "").split())
+            out.append({"name": name, "description": desc[:400]})
     except Exception:
-        return set()
+        return out
+    return out
 
 
-def describe_capabilities(
+def collect_capability_inventory(
     *,
     enabled_search_methods: Optional[List[str]] = None,
     include_mcp_tools: Optional[bool] = None,
     mcp_modules: Optional[List[str]] = None,
     code_exec: Optional[bool] = None,
     skill_roots: Optional[List[str]] = None,
-) -> str:
-    """Compose a capability-level self-description from the LIVE tool registries.
+) -> Dict[str, Any]:
+    """The assistant's live capability inventory, read from the real tool registries.
 
-    Written for a user, not a developer: capabilities are described in plain language rather
-    than by internal tool name. Probes the FULL registries (a per-request search-method
-    allowlist or MCP flag is a client choice, not a limit on what the assistant can do), but
-    stays honest about DEPLOYMENT-level gates — an optional backend that is genuinely absent
-    (QGIS, MCP server, code sandbox) is reported as unavailable instead of promised.
-    Best-effort per registry; never raises.
+    Probes the registries UNFILTERED: a per-request search-method allowlist or MCP flag is a
+    client choice, not a limit on what the assistant can do. Deployment-level gates are reported
+    as facts instead (code execution on/off, which optional backends are present), so the answer
+    is truthful for the running deployment. Every registry is probed independently and failures
+    degrade to omission — this never raises.
     """
-    from agent_runtime.langchain_granular_tools import (
-        make_langchain_geocode_tools,
-        make_langchain_granular_tools,
-    )
+    tools: List[Dict[str, str]] = []
+    try:
+        from agent_runtime.langchain_granular_tools import (
+            make_langchain_geocode_tools,
+            make_langchain_granular_tools,
+        )
 
-    # Probe unfiltered: what this deployment can actually do.
-    granular = _names(make_langchain_granular_tools, enabled_search_methods=None,
-                      include_file_tools=True)
-    has_qgis = any(n.startswith(("qgis_", "pyqgis_")) for n in granular)
-    has_geocode = bool(_names(make_langchain_geocode_tools))
-    geo = set()
+        tools += _tool_entries(make_langchain_granular_tools,
+                               enabled_search_methods=None, include_file_tools=True)
+        tools += _tool_entries(make_langchain_geocode_tools)
+    except Exception:
+        pass
     try:
         from agent_runtime.langchain_geo_tools import make_langchain_geo_tools
 
-        geo = _names(make_langchain_geo_tools, default_input_file_ids=None)
+        tools += _tool_entries(make_langchain_geo_tools, default_input_file_ids=None)
     except Exception:
         pass
-    kbflows = set()
     try:
         from extractors.geo_handles import make_geo_analysis_tools
 
-        kbflows = _names(make_geo_analysis_tools)
+        tools += _tool_entries(make_geo_analysis_tools)
     except Exception:
         pass
-    mcp = set()
-    if mcp_tools_enabled_default() if include_mcp_tools is None else bool(include_mcp_tools):
+
+    mcp_on = include_mcp_tools
+    if mcp_on is None:
+        try:
+            from agent_runtime.langchain_mcp_tools import mcp_tools_enabled
+
+            mcp_on = bool(mcp_tools_enabled())
+        except Exception:
+            mcp_on = False
+    if mcp_on:
         try:
             from agent_runtime.langchain_mcp_tools import make_langchain_mcp_tools
 
-            mcp = _names(make_langchain_mcp_tools,
-                         include_modules=mcp_modules or ["spatial_analysis_tools"])
+            tools += _tool_entries(make_langchain_mcp_tools,
+                                   include_modules=mcp_modules or ["spatial_analysis_tools"])
         except Exception:
             pass
-    exec_enabled = None
+
+    exec_enabled: Optional[bool] = None
+    exec_backend: Optional[str] = None
     try:
-        from agent_runtime.code_execution import is_code_exec_enabled
+        from agent_runtime.code_execution import get_code_executor, is_code_exec_enabled
 
         exec_enabled = bool(code_exec) if code_exec is not None else is_code_exec_enabled()
+        if exec_enabled:
+            exec_backend = str(getattr(get_code_executor(), "backend", "") or "") or None
     except Exception:
         pass
-    skills: List[str] = []
+
+    skills: List[Dict[str, str]] = []
     try:
         from agent_runtime.skills import SkillRegistry
 
-        skills = [str(sk.get("name")) for sk in SkillRegistry.discover(skill_roots).catalog()
-                  if sk.get("name")]
+        for entry in SkillRegistry.discover(skill_roots).catalog():
+            name = str(entry.get("name") or "").strip()
+            if name:
+                skills.append({"name": name,
+                               "description": " ".join(str(entry.get("description") or "").split())[:300]})
     except Exception:
         pass
 
-    parts: List[str] = ["Here is what I can help with:"]
+    # De-duplicate by tool name, preserving first-seen order.
+    seen: set = set()
+    unique: List[Dict[str, str]] = []
+    for entry in tools:
+        if entry["name"] in seen:
+            continue
+        seen.add(entry["name"])
+        unique.append(entry)
 
-    finding: List[str] = []
-    if {"keyword_search", "semantic_search"} & granular:
-        finding.append("search the I-GUIDE knowledge base by keyword and by meaning, so you "
-                       "can find datasets, notebooks, publications, and OERs even when your "
-                       "wording differs from theirs")
-    if "neo4j_search" in granular:
-        finding.append("follow the knowledge graph — find work by a given author, "
-                       "organization, tag, or resource type, and rank elements by how much "
-                       "they are actually used")
-    if "spatial_search" in granular:
-        finding.append("bias a search toward a place you mention")
-    if {"neo4j_get_element_by_id", "neo4j_explore_related_nodes"} & granular:
-        finding.append("look up a specific element by its id, explain it, and list the related "
-                       "elements its contributor curated")
-    if "opengeodata_search" in granular:
-        finding.append("look beyond the platform for open geospatial data, searching public "
-                       "catalogs such as NASA CMR, Data.gov, and Socrata")
-    if {"agent_kb_search", "get_kb_block"} & granular:
-        finding.append("dig into the code and methods extracted from ingested submissions when "
-                       "you need implementation-level detail")
-    if finding:
-        parts.append("\n**Finding things**\nI can " + _join(finding) + ".")
-
-    analysis: List[str] = []
-    if geo:
-        analysis.append("inspect an uploaded vector dataset (its coordinate system, extent, "
-                        "geometry type, columns, and feature count), draw it as a map or a "
-                        "choropleth, reproject it, convert it to GeoJSON, and spatially join "
-                        "two datasets — shapefiles split across several files are reassembled "
-                        "automatically, and zipped or TIGER/Line data is read directly")
-    if kbflows:
-        analysis.append("build hexbin heat maps and choropleths, and run spatial functions "
-                        "extracted from knowledge-base notebooks on your data")
-    if has_qgis:
-        analysis.append("run QGIS itself, headless — metric buffers, any QGIS processing "
-                        "algorithm, layer summaries, and rendered map images")
-    if mcp:
-        analysis.append(f"use {len(mcp)} additional spatial-analysis tools provided by the "
-                        "connected MCP service")
-    if has_geocode:
-        analysis.append("turn place or institution names into coordinates, so named locations "
-                        "can be mapped without you supplying latitudes and longitudes")
-    if analysis:
-        parts.append("\n**Working with geospatial data**\nI can " + _join(analysis) + ".")
-
-    if exec_enabled:
-        parts.append("\n**Computing and coding**\nI write Python and actually run it in a "
-                     "sandbox — installing the libraries it needs, reading the files you "
-                     "upload, and returning the plots, maps, and data files it produces as "
-                     "downloads. I read the errors and revise until it works.")
-    elif exec_enabled is False:
-        parts.append("\n**Computing and coding**\nI can write and explain code, but running "
-                     "it is disabled on this deployment, so I cannot execute it for you.")
-
-    if not has_qgis:
-        parts.append("\n_QGIS is not installed on this deployment, so QGIS-specific operations "
-                     "run through the equivalent Python geospatial tools instead._")
-
-    if skills:
-        parts.append("\n**Task-specific workflows**\nI can load and follow these packaged "
-                     "workflows: " + ", ".join(skills) + ".")
-
-    parts.append("\n**How I answer**\nI remember the conversation, so you can refer back to "
-                 "earlier results or files; I keep your uploads available across turns; I "
-                 "ground answers in what I actually retrieved or computed and cite each source "
-                 "as a link; and I tell you when the evidence does not support an answer "
-                 "rather than guessing.")
-    parts.append("\nJust describe what you are after — I pick the right tools for it.")
-    return "\n".join(parts)
+    return {
+        "tools": unique,
+        "code_execution": {"enabled": exec_enabled, "sandbox_backend": exec_backend},
+        "skills": skills,
+    }
 
 
-def _join(items: List[str]) -> str:
-    """Join clauses into readable prose ('a, b, and c')."""
-    if len(items) == 1:
-        return items[0]
-    return "; ".join(items[:-1]) + "; and " + items[-1]
+def _mechanical_summary(inventory: Dict[str, Any]) -> str:
+    """Last-resort listing of the inventory when no LLM is reachable.
+
+    Mechanically derived from the registries (no authored capability text), so it also stays
+    correct as tools change.
+    """
+    lines: List[str] = ["Available capabilities:"]
+    for entry in inventory.get("tools") or []:
+        desc = entry.get("description") or ""
+        first = desc.split(". ")[0].rstrip(".")
+        lines.append(f"- {entry['name']}" + (f" — {first}." if first else ""))
+    code = inventory.get("code_execution") or {}
+    if code.get("enabled") is not None:
+        lines.append(f"- code execution: {'enabled' if code.get('enabled') else 'disabled'}"
+                     + (f" (sandbox: {code.get('sandbox_backend')})" if code.get("sandbox_backend") else ""))
+    for skill in inventory.get("skills") or []:
+        lines.append(f"- skill: {skill['name']}")
+    return "\n".join(lines)
 
 
-__all__ = ["is_capability_query", "describe_capabilities"]
+def describe_capabilities(*, llm: Optional[Any] = None, **config: Any) -> str:
+    """Answer a capability question in plain language, composed by the LLM from the live
+    inventory. Falls back to a mechanical listing of that same inventory if no model answers.
+
+    ``config`` is forwarded to :func:`collect_capability_inventory`.
+    """
+    inventory = collect_capability_inventory(**config)
+    try:
+        from agent_runtime.prompts import CAPABILITY_SUMMARY_PROMPT
+
+        active = llm
+        if active is None:
+            from agent_runtime.executor_factory import build_default_llm
+
+            active = build_default_llm()
+        prompt = CAPABILITY_SUMMARY_PROMPT.format(
+            inventory=json.dumps(inventory, ensure_ascii=True, indent=1)[:12000]
+        )
+        if hasattr(active, "invoke"):
+            raw = active.invoke(prompt)
+            content = getattr(raw, "content", raw)
+            if isinstance(content, list):
+                text = "".join(
+                    str(p.get("text") or p.get("content") or "") if isinstance(p, dict)
+                    else str(getattr(p, "text", p)) for p in content
+                )
+            else:
+                text = str(content or "")
+        elif callable(active):
+            text = str(active(prompt))
+        else:
+            text = ""
+        if text.strip():
+            return text.strip()
+    except Exception:
+        pass
+    return _mechanical_summary(inventory)
+
+
+__all__ = ["is_capability_query", "collect_capability_inventory", "describe_capabilities"]

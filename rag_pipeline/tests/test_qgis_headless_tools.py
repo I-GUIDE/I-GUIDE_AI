@@ -287,10 +287,16 @@ def test_qgis_probes_force_override(monkeypatch):
 
 
 def test_qgis_cli_probe_uses_path(monkeypatch):
+    """A configured binary that does not resolve falls back to the plain name on PATH; QGIS is
+    reported unavailable only when nothing resolves at all (host-independent via which stub)."""
     from rag_pipeline import qgis_headless_tools as q
     monkeypatch.delenv("AGENT_QGIS_ENABLED", raising=False)
     monkeypatch.setenv("QGIS_PROCESS_BIN", "qgis_process_definitely_absent_zzz")
-    assert q.qgis_process_available() is False
+    monkeypatch.setattr(q.shutil, "which", lambda p: None)
+    assert q.qgis_process_available() is False        # nothing on PATH either
+    monkeypatch.setattr(q.shutil, "which",
+                        lambda p: "/usr/bin/qgis_process" if p == "qgis_process" else None)
+    assert q.qgis_process_available() is True         # falls back to the PATH binary
 
 
 def test_qgis_tools_gated_out_when_unavailable(monkeypatch):
@@ -387,3 +393,58 @@ def test_pyqgis_available_probes_worker_python(monkeypatch):
     assert qgis_headless_tools.pyqgis_available() is True
     monkeypatch.setenv("AGENT_QGIS_ENABLED", "0")
     assert qgis_headless_tools.pyqgis_available() is False
+
+
+# --- detection robustness: a dev .env path must not disable QGIS in the container -----
+
+def test_qgis_process_bin_falls_back_to_path_when_configured_path_is_absent(monkeypatch):
+    """The live deployment bug: .env set QGIS_PROCESS_BIN to a macOS /Applications path, which
+    doesn't exist in the Linux container, so detection returned False even though
+    /usr/bin/qgis_process was on PATH."""
+    import rag_pipeline.qgis_headless_tools as q
+    monkeypatch.delenv("AGENT_QGIS_ENABLED", raising=False)
+    monkeypatch.setenv("QGIS_PROCESS_BIN", "/Applications/QGIS-LTR.app/Contents/MacOS/bin/qgis_process")
+    monkeypatch.setattr(q.shutil, "which",
+                        lambda p: "/usr/bin/qgis_process" if p == "qgis_process" else None)
+    assert q.qgis_process_bin() == "/usr/bin/qgis_process"     # fell back to PATH
+    assert q.qgis_process_available() is True
+
+    # genuinely absent -> still False (no false positive)
+    monkeypatch.setattr(q.shutil, "which", lambda p: None)
+    assert q.qgis_process_bin() is None
+    assert q.qgis_process_available() is False
+
+
+def test_configured_qgis_process_bin_is_preferred_when_it_resolves(monkeypatch):
+    import rag_pipeline.qgis_headless_tools as q
+    monkeypatch.delenv("AGENT_QGIS_ENABLED", raising=False)
+    monkeypatch.setenv("QGIS_PROCESS_BIN", "/opt/qgis/bin/qgis_process")
+    monkeypatch.setattr(q.shutil, "which", lambda p: p if p.startswith("/opt/qgis") else "/usr/bin/qgis_process")
+    assert q.qgis_process_bin() == "/opt/qgis/bin/qgis_process"
+
+
+def test_pyqgis_candidates_skip_nonexistent_configured_interpreter(monkeypatch):
+    import sys
+    import rag_pipeline.qgis_headless_tools as q
+    monkeypatch.setenv("QGIS_PYTHON_BIN", "/Applications/QGIS-LTR.app/Contents/MacOS/bin/python3")
+    monkeypatch.setattr(q.os.path, "exists", lambda p: p == "/usr/bin/python3")
+    monkeypatch.setattr(q.shutil, "which", lambda p: None)
+    cands = q.qgis_python_candidates()
+    assert "/Applications/QGIS-LTR.app/Contents/MacOS/bin/python3" not in cands  # absent -> skipped
+    assert sys.executable in cands and "/usr/bin/python3" in cands               # workable ones kept
+
+
+def test_pyqgis_available_accepts_a_working_fallback_interpreter(monkeypatch):
+    import rag_pipeline.qgis_headless_tools as q
+    q._PYQGIS_PROBE_CACHE.clear()
+    monkeypatch.delenv("AGENT_QGIS_ENABLED", raising=False)
+    monkeypatch.setattr(q, "qgis_python_candidates", lambda: ["/nope/python3", "/usr/bin/python3"])
+
+    class _Probe:
+        def __init__(self, rc): self.returncode = rc
+
+    def fake_run(argv, **kwargs):
+        return _Probe(0 if argv[0] == "/usr/bin/python3" else 1)
+    monkeypatch.setattr(q.subprocess, "run", fake_run)
+    assert q.pyqgis_available() is True          # first candidate fails, second imports qgis
+    q._PYQGIS_PROBE_CACHE.clear()

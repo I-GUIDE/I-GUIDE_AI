@@ -34,37 +34,71 @@ def test_capability_detection_does_not_hijack_domain_questions():
         assert not is_capability_query(q), q
 
 
-def test_describe_capabilities_is_capability_prose_not_a_tool_dump():
-    """User-facing prose: no internal tool names, no per-tool bullet list."""
-    text = describe_capabilities()
-    for internal in ("keyword_search", "semantic_search", "neo4j_search", "spatial_search",
-                     "opengeodata_search", "inspect_vector", "plot_vector", "geocode_places",
-                     "execute_code", "kb_point_heatmap", "agent_kb_search"):
-        assert internal not in text, internal
-    # capabilities are described in plain language instead
-    assert "knowledge base by keyword and by meaning" in text
-    assert "coordinate system" in text            # vector inspection
-    assert "coordinates" in text                  # geocoding
-    assert "Finding things" in text and "Working with geospatial data" in text
+def test_inventory_is_read_from_the_live_registries():
+    """The answer's source of truth is the real tool registry — nothing hardcoded here — so a
+    tool added/removed anywhere shows up without editing this module."""
+    from agent_runtime.capabilities import collect_capability_inventory
+    inv = collect_capability_inventory()
+    names = {t["name"] for t in inv["tools"]}
+    # representative tools from several independent registries
+    assert {"keyword_search", "semantic_search", "neo4j_search"} <= names      # granular search
+    assert "geocode_places" in names                                          # geocode registry
+    assert {"inspect_vector", "plot_vector"} <= names                         # geo registry
+    assert all(t["description"] for t in inv["tools"] if t["name"] == "keyword_search")
+    assert inv["code_execution"]["enabled"] in (True, False)
+    assert isinstance(inv["skills"], list)
 
 
-def test_describe_capabilities_covers_all_registries():
-    """Everything the deployment offers is represented — including the pieces a per-request
-    client allowlist would hide (external open data, KB code/method search, MCP)."""
-    text = describe_capabilities(include_mcp_tools=True)
-    assert "NASA CMR" in text and "Data.gov" in text          # external open data
-    assert "implementation-level detail" in text              # agent-KB code/method search
-    assert "heat maps" in text                                # runnable KB workflows
-    assert "MCP service" in text                              # MCP spatial-analysis tools
-    assert "related elements its contributor curated" in text # by-id + related
+def test_new_tool_appears_without_touching_this_module(monkeypatch):
+    """Data-driven proof: a tool that exists only in the registry reaches the LLM prompt."""
+    from types import SimpleNamespace
+    import agent_runtime.capabilities as cap
+
+    monkeypatch.setattr(cap, "collect_capability_inventory", lambda **k: {
+        "tools": [{"name": "brand_new_tool", "description": "Does a brand new thing."}],
+        "code_execution": {"enabled": True, "sandbox_backend": "docker"}, "skills": [],
+    })
+    seen = {}
+
+    def fake_llm(prompt):
+        seen["prompt"] = prompt
+        return "Composed answer."
+    assert cap.describe_capabilities(llm=fake_llm) == "Composed answer."
+    assert "brand_new_tool" in seen["prompt"]           # inventory reached the model
+    assert "Does a brand new thing." in seen["prompt"]
 
 
-def test_describe_capabilities_ignores_request_allowlist_but_honors_deployment_gates():
-    """A client's search-method allowlist is not a limit on what the assistant can do, so the
-    self-description still covers everything; a real deployment gate (code exec off) is honest."""
-    text = describe_capabilities(enabled_search_methods=["keyword_search"], code_exec=False)
-    assert "NASA CMR" in text                                  # not narrowed by the allowlist
-    assert "running it is disabled on this deployment" in text  # honest about code exec
+def test_answer_is_llm_composed_from_the_inventory():
+    """describe_capabilities delegates the wording to the LLM (no authored capability prose)."""
+    from agent_runtime.capabilities import describe_capabilities
+    captured = {}
+
+    class _LLM:
+        def invoke(self, prompt):
+            captured["prompt"] = prompt
+            return SimpleNamespaceContent("**Finding things**\nI can search the platform.")
+
+    class SimpleNamespaceContent:
+        def __init__(self, content):
+            self.content = content
+
+    out = describe_capabilities(llm=_LLM())
+    assert out == "**Finding things**\nI can search the platform."
+    p = captured["prompt"]
+    assert "Tool inventory" in p and "keyword_search" in p        # live inventory in the prompt
+    assert "Do NOT name internal tools" in p                      # style constraint enforced
+
+
+def test_mechanical_fallback_when_no_model_answers():
+    """If the model is unreachable the answer still comes from the registry, not a hand-written
+    blurb."""
+    from agent_runtime.capabilities import describe_capabilities
+
+    def broken_llm(prompt):
+        raise RuntimeError("llm down")
+    text = describe_capabilities(llm=broken_llm)
+    assert "Available capabilities:" in text
+    assert "keyword_search" in text          # mechanical listing derived from the inventory
 
 
 def test_graph_routes_capability_question_deterministically(monkeypatch):
@@ -77,8 +111,13 @@ def test_graph_routes_capability_question_deterministically(monkeypatch):
         raise AssertionError("orchestrate strategy must not run for a capability question")
     monkeypatch.setattr(strat, "get_orchestration_strategy", explode)
 
-    graph = og.build_orchestrator_graph(llm=object())     # llm never invoked on this route
+    class _LLM:
+        def invoke(self, prompt):
+            assert "Tool inventory" in prompt      # composed from the live inventory
+            class R:
+                content = "I can search the knowledge base and run analyses."
+            return R()
+
+    graph = og.build_orchestrator_graph(llm=_LLM())
     state = graph.invoke({"query": "what tools do you have", "chat_history": [], "thread_id": None})
-    answer = state.get("final_answer") or ""
-    assert "Here is what I can help with" in answer
-    assert "knowledge base by keyword and by meaning" in answer
+    assert state.get("final_answer") == "I can search the knowledge base and run analyses."

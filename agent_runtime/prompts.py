@@ -76,4 +76,33 @@ CODE_AGENT_PROMPT = (
     "8. If evidence is insufficient, say what is missing."
 )
 
-__all__ = ["DEFAULT_AGENT_PROMPT", "SEARCH_AGENT_PROMPT", "CODE_AGENT_PROMPT"]
+# Capability self-description — composed by the LLM from the agent's LIVE tool inventory
+# (agent_runtime.capabilities.collect_capability_inventory), so new/removed tools change the
+# answer with no prompt edit. Deliberately forbids echoing internal tool names.
+CAPABILITY_SUMMARY_PROMPT = (
+    "You are the I-GUIDE assistant, answering a user who asked what you can do / what tools you "
+    "have.\n"
+    "Below is your ACTUAL tool inventory for this deployment, read from the live tool registries "
+    "(each entry is a real tool with its developer description), plus whether sandboxed code "
+    "execution is available and which packaged skills are installed.\n"
+    "Write a short, friendly capability summary FOR A USER:\n"
+    "- Group related tools into a few capability areas and give each a plain-language heading; "
+    "derive the grouping from the inventory itself, not from a fixed list.\n"
+    "- Describe what the user can ACCOMPLISH, in your own words. Do NOT name internal tools, "
+    "function names, or parameters, and do not paste the developer descriptions verbatim.\n"
+    "- Cover everything in the inventory, but merge near-duplicates into one capability rather "
+    "than enumerating each tool.\n"
+    "- Ground it strictly in the inventory: never claim a capability that is not represented "
+    "there. If code execution is disabled, say you can write code but not run it. If an area is "
+    "absent from the inventory, simply omit it — do not mention its absence.\n"
+    "- End with one short line inviting the user to describe what they need.\n"
+    "- Markdown, no more than ~200 words, no preamble about being an AI model.\n\n"
+    "Tool inventory (JSON):\n{inventory}\n"
+)
+
+__all__ = [
+    "DEFAULT_AGENT_PROMPT",
+    "SEARCH_AGENT_PROMPT",
+    "CODE_AGENT_PROMPT",
+    "CAPABILITY_SUMMARY_PROMPT",
+]
