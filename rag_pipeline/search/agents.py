@@ -305,6 +305,12 @@ def _node_to_hit(
     props, node_labels, ref_id = _node_props_labels_ref(node, fallback_id)
     if not props:
         return None
+    # Unlisted elements (visibility private / legacy 1) must never surface in search results —
+    # this also guards Text2Cypher-generated queries, which carry no visibility predicate.
+    from rag_pipeline.search.neo4j_graph_tools import is_public_visibility
+
+    if not is_public_visibility(props.get("visibility")):
+        return None
     source = _normalize_source_fields(props, ref_id)
     doc_id = str(source.get("doc_id") or source.get("id") or ref_id)
     prefix = _graph_context_prefix(record or {})
@@ -325,6 +331,10 @@ def _rows_to_hits(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             continue
 
         props = {k: v for k, v in record.items() if isinstance(v, (str, int, float, list, dict))}
+        from rag_pipeline.search.neo4j_graph_tools import is_public_visibility
+
+        if not is_public_visibility(props.get("visibility")):
+            continue
         ref_id = props.get("_id") or props.get("doc_id") or props.get("id") or f"row:{idx}"
         source = _normalize_source_fields(props, str(ref_id))
         doc_id = str(source.get("doc_id") or source.get("id") or ref_id)

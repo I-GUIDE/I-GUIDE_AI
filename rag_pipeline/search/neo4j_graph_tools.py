@@ -52,6 +52,19 @@ _PUBLIC_VISIBILITY = "public"
 # NUMERIC 10 on older ones (utils.parseVisibility in the platform backend treats both as
 # PUBLIC). Compare via toString(...) IN list so legacy nodes aren't silently filtered out.
 _PUBLIC_VISIBILITIES = [_PUBLIC_VISIBILITY, "10"]
+
+
+def is_public_visibility(value) -> bool:
+    """True when a node/doc visibility marks it publicly LISTABLE.
+
+    The platform treats visibility 'private' (legacy numeric 1) as UNLISTED: reachable by
+    direct link but excluded from every listing/search. A missing value counts as public
+    (contributor/infra nodes and OpenSearch docs may lack the field); any other value marks
+    the element unlisted and it must NOT be surfaced by search.
+    """
+    if value is None or value == "":
+        return True
+    return str(value).strip().lower() in {v.lower() for v in _PUBLIC_VISIBILITIES}
 _MAX_RELATED_DEPTH = 3
 _DEFAULT_RELATED_DEPTH = 2
 
@@ -85,6 +98,7 @@ _CYPHER_BY_AUTHOR = """
 MATCH (c:Contributor)-[:CONTRIBUTED]->(r)
 WHERE toLower(coalesce(c.display_first_name, '')) CONTAINS toLower($first)
   AND toLower(coalesce(c.display_last_name, ''))  CONTAINS toLower($last)
+  AND toString(r.visibility) IN $public_visibilities
 WITH r, c,
      {SCORE_EXPR} AS score
 RETURN r AS node, score, c.display_first_name + ' ' + c.display_last_name AS matched_author
@@ -97,6 +111,7 @@ _CYPHER_BY_USER_AUTHOR = """
 MATCH (u:User)-[:CONTRIBUTED]->(r)
 WHERE toLower(coalesce(u.display_first_name, '')) CONTAINS toLower($first)
   AND toLower(coalesce(u.display_last_name, ''))  CONTAINS toLower($last)
+  AND toString(r.visibility) IN $public_visibilities
 WITH r, u,
      {SCORE_EXPR} AS score
 RETURN r AS node, score, u.display_first_name + ' ' + u.display_last_name AS matched_author
@@ -106,9 +121,10 @@ LIMIT $limit
 
 _CYPHER_BY_ORGANIZATION = """
 MATCH (c:Contributor)-[:CONTRIBUTED]->(r)
-WHERE toLower(coalesce(c.organization, '')) CONTAINS toLower($org)
+WHERE (toLower(coalesce(c.organization, '')) CONTAINS toLower($org)
    OR toLower(coalesce(c.affiliation, ''))  CONTAINS toLower($org)
-   OR toLower(coalesce(c.institution, ''))  CONTAINS toLower($org)
+   OR toLower(coalesce(c.institution, ''))  CONTAINS toLower($org))
+  AND toString(r.visibility) IN $public_visibilities
 WITH r, c,
      {SCORE_EXPR} AS score
 RETURN r AS node, score, c.organization AS matched_org
@@ -119,6 +135,7 @@ LIMIT $limit
 _CYPHER_BY_TAG = """
 MATCH (r)
 WHERE any(tag IN coalesce(r.tags, []) WHERE toLower(tag) CONTAINS toLower($tag))
+  AND toString(r.visibility) IN $public_visibilities
 WITH r,
      1.5 + {SCORE_EXPR} AS score
 RETURN r AS node, score
@@ -132,6 +149,7 @@ _CYPHER_BY_RESOURCE_TYPE = """
 MATCH (r)
 WHERE any(label IN labels(r) WHERE toLower(label) CONTAINS toLower($rtype))
   AND NOT any(label IN labels(r) WHERE label IN $internal_labels)
+  AND toString(r.visibility) IN $public_visibilities
 WITH r,
      {SCORE_EXPR} AS score
 RETURN r AS node, score
@@ -142,6 +160,7 @@ LIMIT $limit
 _CYPHER_RELATED_TO = """
 MATCH (seed)-[:RELATED]-(r)
 WHERE toLower(coalesce(seed.title, '')) CONTAINS toLower($title)
+  AND toString(r.visibility) IN $public_visibilities
 WITH r, seed,
      {SCORE_EXPR} AS score
 RETURN r AS node, score, seed.title AS seed_title
@@ -152,6 +171,7 @@ LIMIT $limit
 _CYPHER_IN_COLLECTION = """
 MATCH (r)-[:BELONGS_TO]->(col:Collection)
 WHERE toLower(coalesce(col.title, col.name, '')) CONTAINS toLower($collection)
+  AND toString(r.visibility) IN $public_visibilities
 WITH r, col,
      {SCORE_EXPR} AS score
 RETURN r AS node, score, col.title AS collection_name
@@ -165,6 +185,7 @@ _CYPHER_BY_POPULARITY = """
 MATCH (r)
 WHERE ($rtype = '' OR any(label IN labels(r) WHERE toLower(label) CONTAINS toLower($rtype)))
   AND NOT any(label IN labels(r) WHERE label IN $internal_labels)
+  AND toString(r.visibility) IN $public_visibilities
 WITH r, coalesce(toFloat(r.click_count), 0) AS clicks
 WHERE clicks > 0
 RETURN r AS node, clicks AS score
@@ -178,6 +199,7 @@ _CYPHER_BY_POPULARITY = """
 MATCH (r)
 WHERE ($rtype = '' OR any(label IN labels(r) WHERE toLower(label) CONTAINS toLower($rtype)))
   AND NOT any(label IN labels(r) WHERE label IN $internal_labels)
+  AND toString(r.visibility) IN $public_visibilities
 WITH r, coalesce(toFloat(r.click_count), 0) AS clicks
 WHERE clicks > 0
 RETURN r AS node, clicks AS score
@@ -506,7 +528,8 @@ def build_tool_query(
     if not cypher:
         return None
 
-    params: Dict[str, Any] = {"limit": max(1, min(limit, 100))}
+    params: Dict[str, Any] = {"limit": max(1, min(limit, 100)),
+                              "public_visibilities": _PUBLIC_VISIBILITIES}
 
     if pattern_name == "by_author":
         first, last = _split_name(captured.get("name", ""))
@@ -548,7 +571,8 @@ def run_user_author_fallback(
     Uses the same first/last split so middle names don't break matching.
     """
     first, last = _split_name(captured.get("name", ""))
-    params = {"first": first, "last": last, "limit": max(1, min(limit, 100))}
+    params = {"first": first, "last": last, "limit": max(1, min(limit, 100)),
+              "public_visibilities": _PUBLIC_VISIBILITIES}
     try:
         return run_fn(_CYPHER_BY_USER_AUTHOR, params)
     except Exception as exc:

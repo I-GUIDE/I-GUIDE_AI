@@ -69,6 +69,10 @@ def _normalize_hits(hits: List[Dict[str, Any]], source: str) -> List[Dict[str, A
         doc_id = str(hit.get("_id") or doc.get("doc_id") or "")
         if not doc_id:
             continue
+        from rag_pipeline.search.neo4j_graph_tools import is_public_visibility
+
+        if not is_public_visibility(doc.get("visibility")):
+            continue  # unlisted element -> never surfaced
         item: Dict[str, Any] = {
             "doc_id": doc_id,
             "source": source,

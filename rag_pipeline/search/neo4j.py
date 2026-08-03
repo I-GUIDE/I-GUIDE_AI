@@ -110,6 +110,10 @@ def _records_to_hits(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             properties = {k: v for k, v in record.items() if isinstance(v, (str, int, float, list, dict))}
             doc_id = properties.get("doc_id", f"row:{idx}")
 
+        from rag_pipeline.search.neo4j_graph_tools import is_public_visibility
+
+        if not is_public_visibility(properties.get("visibility")):
+            continue  # unlisted element -> never surfaced by search
         source = normalize_source_fields(properties, str(doc_id))
         hits.append(
             {

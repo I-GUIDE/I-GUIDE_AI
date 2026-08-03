@@ -936,13 +936,20 @@ def _direct_search_sweep(query: str, enabled_search_methods: Optional[List[str]]
         return allow is None or name in allow
 
     docs: List[Dict[str, Any]] = []
+
+    def _public(hit: Any) -> bool:
+        from rag_pipeline.search.neo4j_graph_tools import is_public_visibility
+
+        src = hit.get("_source") if isinstance(hit, dict) else None
+        return is_public_visibility((src or {}).get("visibility"))
+
     if permitted("keyword_search"):
         try:
             from rag_pipeline.search.agents import _hit_to_document
             from rag_pipeline.search.keyword import get_keyword_search_results
 
             docs.extend(_hit_to_document(h, source_name="keyword")
-                        for h in (get_keyword_search_results(query, size=k) or []))
+                        for h in (get_keyword_search_results(query, size=k) or []) if _public(h))
         except Exception:
             pass
     if permitted("semantic_search"):
@@ -951,7 +958,7 @@ def _direct_search_sweep(query: str, enabled_search_methods: Optional[List[str]]
             from rag_pipeline.search.semantic import semantic_search
 
             docs.extend(_hit_to_document(h, source_name="semantic")
-                        for h in (semantic_search(query, size=k) or []))
+                        for h in (semantic_search(query, size=k) or []) if _public(h))
         except Exception:
             pass
     return [d for d in docs if isinstance(d, dict)]
