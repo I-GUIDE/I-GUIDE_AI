@@ -95,3 +95,29 @@ def test_collect_download_refs_finds_nested_managed_outputs():
     refs = _collect_download_refs(ar, cr)
     assert refs["file_ids"] == ["file_a", "file_b"]          # incl. JSON-encoded tool output
     assert "https://h/agent/files/file_a/download" in refs["urls"]
+
+
+def test_drops_fabricated_download_offers_on_any_host():
+    """Second live leak: after the S3 host was blocked the model produced
+    [Download buffer GeoJSON](https://example.com/path-to-buffer.geojson) — a placeholder that
+    dodges the agent-file heuristic. A file OFFER (artifact extension or 'download' label) must
+    resolve to a real artifact or evidence URL."""
+    ids = ["file_x"]
+    urls = ["https://h/agent/files/file_x/download",
+            "https://sedac.ciesin.columbia.edu/data/set/grand-v1-dams"]
+
+    def s(t):
+        return sanitize_answer_links(t, allowed_file_ids=ids, allowed_urls=urls)
+
+    assert s("[Download buffer GeoJSON](https://example.com/path-to-buffer.geojson)") == \
+        "Download buffer GeoJSON"
+    assert s("[Download it](https://foo.invalid/x)") == "Download it"
+    assert s("![plot](https://foo.invalid/out.png)") == ""
+    # real artifact + real evidence URLs survive
+    assert s("[Download](https://h/agent/files/file_x/download)") == \
+        "[Download](https://h/agent/files/file_x/download)"
+    assert s("[GRanD](https://sedac.ciesin.columbia.edu/data/set/grand-v1-dams)") == \
+        "[GRanD](https://sedac.ciesin.columbia.edu/data/set/grand-v1-dams)"
+    # ordinary element citation (no file extension, no download label) is untouched
+    assert s("[NID](https://platform.i-guide.io/datasets/abc)") == \
+        "[NID](https://platform.i-guide.io/datasets/abc)"

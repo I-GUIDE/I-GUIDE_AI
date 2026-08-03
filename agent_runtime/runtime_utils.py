@@ -28,6 +28,15 @@ _SERVABLE_PREFIXES = ("http://", "https://", "data:", "mailto:", "#", "/agent/fi
 # (observed live: https://agent-chat-files.s3.amazonaws.com/qgis_jobs/.../rendered_map.png).
 _AGENT_FILE_HINT_RE = re.compile(r"/agent/files/|agent[_-]chat[_-]files|qgis_jobs/|/outputs?/", re.I)
 _FILE_ID_RE = re.compile(r"(file_[0-9a-f]{6,})", re.I)
+# A link that OFFERS A FILE: an artifact-ish extension or a download-y label. These must resolve
+# to something real (a produced artifact or an evidence URL) — otherwise the model can invent a
+# plausible placeholder host that dodges the agent-file heuristic above (observed live:
+# https://example.com/path-to-buffer.geojson).
+_FILE_EXT_RE = re.compile(
+    r"\.(?:png|jpe?g|gif|webp|svg|tif{1,2}|geojson|json|csv|tsv|zip|gpkg|shp|pdf|txt|py|ipynb)"
+    r"(?:[?#].*)?$", re.I,
+)
+_DOWNLOAD_LABEL_RE = re.compile(r"\bdownload\b", re.I)
 
 
 def strip_sandbox_uris(text: Optional[str]) -> str:
@@ -76,6 +85,12 @@ def sanitize_answer_links(
 
         if low.startswith(("data:", "mailto:", "#")):
             return match.group(0)
+        # A file OFFER (artifact-ish extension or a "download" label) must resolve to something
+        # real, whatever host it claims.
+        if verifying and not _is_known_artifact(url) and (
+            _FILE_EXT_RE.search(url) or _DOWNLOAD_LABEL_RE.search(label)
+        ):
+            return drop
         # Anything presenting itself as an agent file must be a real produced artifact.
         if _AGENT_FILE_HINT_RE.search(url):
             if verifying and not _is_known_artifact(url):

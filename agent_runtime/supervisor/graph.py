@@ -1728,8 +1728,13 @@ def build_supervisor_graph(
             from agent_runtime.runtime_utils import sanitize_answer_links
 
             refs = _collect_download_refs(ar, cr)
+            # Evidence URLs are legitimate targets too (platform element pages, external
+            # OpenGeoData landing pages), so citing them is never mistaken for a fabricated file.
+            from agent_runtime.supervisor.evidence_subgraph import _element_url
+
+            evidence_urls = [u for u in (_element_url(d) for d in evidence) if u]
             final = sanitize_answer_links(final, allowed_file_ids=refs["file_ids"],
-                                          allowed_urls=refs["urls"])
+                                          allowed_urls=[*refs["urls"], *evidence_urls])
             if not (final or "").strip():
                 # Never ship an empty answer with a success status.
                 final = ("I wasn't able to produce an answer for this request. Please try "
