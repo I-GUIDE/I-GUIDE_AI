@@ -74,6 +74,17 @@ services:
       # Optional absolute origin for file download_urls (e.g. http://149.165.147.219:3500).
       # Unset = host-relative /agent/files/<id>/download; clients resolve against the API origin.
       - AGENT_PUBLIC_BASE_URL=${AGENT_PUBLIC_BASE_URL:-}
+      # QGIS / PROJ / GDAL data paths for THIS image. Pinned here (compose environment overrides
+      # env_file) so a developer .env carrying host-specific paths — e.g. a macOS
+      # /Applications/QGIS-LTR.app/... prefix — cannot break CRS handling inside the container:
+      # with a wrong PROJ_LIB, QGIS resolves no CRS at all and reprojection silently places
+      # geometry in the wrong location.
+      - QGIS_PREFIX_PATH=/usr
+      - QGIS_PYTHON_BIN=/usr/bin/python3
+      - QGIS_PROCESS_BIN=/usr/bin/qgis_process
+      - PROJ_LIB=/usr/share/proj
+      - PROJ_DATA=/usr/share/proj
+      - GDAL_DATA=/usr/share/gdal
       # Uploaded + generated files otherwise accumulate forever. Opt-in TTL sweep: set
       # AGENT_FILE_RETENTION_DAYS > 0 to delete files older than N days (0/unset = keep forever).
       - AGENT_FILE_RETENTION_DAYS=${AGENT_FILE_RETENTION_DAYS:-0}
