@@ -87,6 +87,12 @@ def test_pyqgis_worker_invocation_is_per_session_and_reads_result(qgis_job_root,
     assert result["name"] == "roads"
     assert result["feature_count"] == 3
     assert "/memory_demo/" in result["job_dir"]
+    # Resolution may probe an interpreter first (importability check), so select the WORKER
+    # invocation rather than assuming it is the first subprocess call.
+    worker_calls = [c for c in calls
+                    if len(c["command"]) > 1 and str(c["command"][1]).endswith("qgis_pyqgis_worker.py")]
+    assert worker_calls, f"no worker invocation among {[c['command'][:2] for c in calls]}"
+    calls = worker_calls
     assert calls[0]["command"][1].endswith("rag_pipeline/qgis_pyqgis_worker.py")
     assert calls[0]["command"][2] == "layer_summary"
 
@@ -447,4 +453,44 @@ def test_pyqgis_available_accepts_a_working_fallback_interpreter(monkeypatch):
         return _Probe(0 if argv[0] == "/usr/bin/python3" else 1)
     monkeypatch.setattr(q.subprocess, "run", fake_run)
     assert q.pyqgis_available() is True          # first candidate fails, second imports qgis
+    q._PYQGIS_PROBE_CACHE.clear()
+
+
+def test_execution_uses_the_resolved_binary_not_the_raw_env(monkeypatch):
+    """The deployed failure: detection fell back to the PATH binary and reported QGIS available,
+    but the buffer tool still launched the configured (nonexistent) macOS path and failed with
+    'qgis_process not found'. Detection and execution must agree."""
+    import rag_pipeline.qgis_headless_tools as q
+    monkeypatch.delenv("AGENT_QGIS_ENABLED", raising=False)
+    monkeypatch.setenv("QGIS_PROCESS_BIN", "/Applications/QGIS-LTR.app/Contents/MacOS/bin/qgis_process")
+    monkeypatch.setattr(q.shutil, "which",
+                        lambda p: "/usr/bin/qgis_process" if p == "qgis_process" else None)
+    assert q.qgis_process_available() is True
+    assert q.qgis_process_bin() == "/usr/bin/qgis_process"
+
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        class R:
+            returncode, stdout, stderr = 0, "", ""
+        return R()
+    monkeypatch.setattr(q.subprocess, "run", fake_run)
+    q.qgis_processing_help_tool("native:buffer")
+    # the executed command must be the RESOLVED binary, never the unusable configured path
+    assert captured["argv"][0] == "/usr/bin/qgis_process"
+
+
+def test_qgis_python_bin_agrees_with_pyqgis_available(monkeypatch):
+    import rag_pipeline.qgis_headless_tools as q
+    q._PYQGIS_PROBE_CACHE.clear()
+    monkeypatch.delenv("AGENT_QGIS_ENABLED", raising=False)
+    monkeypatch.setattr(q, "qgis_python_candidates", lambda: ["/nope/python3", "/usr/bin/python3"])
+
+    class _P:
+        def __init__(self, rc): self.returncode = rc
+    monkeypatch.setattr(q.subprocess, "run",
+                        lambda argv, **kw: _P(0 if argv[0] == "/usr/bin/python3" else 1))
+    assert q.pyqgis_available() is True
+    assert q.qgis_python_bin() == "/usr/bin/python3"     # execution picks the working interpreter
     q._PYQGIS_PROBE_CACHE.clear()

@@ -107,6 +107,25 @@ def pyqgis_available() -> bool:
     return False
 
 
+def qgis_python_bin() -> Optional[str]:
+    """The first candidate interpreter that can import ``qgis``, or None.
+
+    Mirrors :func:`pyqgis_available` so DETECTION and EXECUTION always agree on the interpreter
+    (a configured path that does not exist here must not be used to launch the worker).
+    """
+    for candidate in qgis_python_candidates():
+        if candidate in _PYQGIS_PROBE_CACHE:
+            if _PYQGIS_PROBE_CACHE[candidate]:
+                return candidate
+            continue
+        if pyqgis_available():          # populates the cache for the candidates in order
+            for cached, ok in _PYQGIS_PROBE_CACHE.items():
+                if ok:
+                    return cached
+        return None
+    return None
+
+
 def qgis_available() -> bool:
     """Whether ANY QGIS backend (CLI or PyQGIS) is usable.
 
@@ -338,7 +357,9 @@ def qgis_processing_help_tool(algorithm: str, timeout_sec: int = 60) -> str:
     if not algorithm:
         raise ValueError("algorithm is required, for example 'native:buffer'.")
 
-    qgis_process = os.getenv("QGIS_PROCESS_BIN", DEFAULT_QGIS_PROCESS_BIN)
+    # Resolved (config first, PATH fallback) so a dev .env path that does not exist here
+    # cannot break execution while detection reports QGIS available.
+    qgis_process = qgis_process_bin() or os.getenv("QGIS_PROCESS_BIN", DEFAULT_QGIS_PROCESS_BIN)
     timeout = _bounded_timeout(timeout_sec, default=60, maximum=300)
     command = [qgis_process, "--json", "help", algorithm]
 
@@ -404,7 +425,9 @@ def qgis_processing_run_tool(
         encoding="utf-8",
     )
 
-    qgis_process = os.getenv("QGIS_PROCESS_BIN", DEFAULT_QGIS_PROCESS_BIN)
+    # Resolved (config first, PATH fallback) so a dev .env path that does not exist here
+    # cannot break execution while detection reports QGIS available.
+    qgis_process = qgis_process_bin() or os.getenv("QGIS_PROCESS_BIN", DEFAULT_QGIS_PROCESS_BIN)
     cli_parameters = [f"{key}={_parameter_value_to_cli(value)}" for key, value in effective_parameters.items()]
     command = [qgis_process, "--json", "run", algorithm, "--", *cli_parameters]
 
@@ -477,7 +500,9 @@ def qgis_metric_buffer_tool(
     timeout = _bounded_timeout(timeout_sec, default=DEFAULT_PROCESSING_TIMEOUT_SEC)
     segment_count = _bounded_int(segments, default=12, minimum=1, maximum=96)
     job_id, job_dir = _new_job_dir(session_id)
-    qgis_process = os.getenv("QGIS_PROCESS_BIN", DEFAULT_QGIS_PROCESS_BIN)
+    # Resolved (config first, PATH fallback) so a dev .env path that does not exist here
+    # cannot break execution while detection reports QGIS available.
+    qgis_process = qgis_process_bin() or os.getenv("QGIS_PROCESS_BIN", DEFAULT_QGIS_PROCESS_BIN)
     safe_output_name = Path(output_filename or "buffer.geojson").name
     projected_input = job_dir / "input_projected.gpkg"
     buffered_projected = job_dir / "buffer_projected.gpkg"
@@ -635,7 +660,8 @@ def _run_pyqgis_worker(
     payload["result_path"] = str(result_path)
     spec_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2, default=str), encoding="utf-8")
 
-    python_bin = os.getenv("QGIS_PYTHON_BIN", DEFAULT_QGIS_PYTHON_BIN)
+    # First candidate interpreter that can actually import qgis (config, this python, distro).
+    python_bin = qgis_python_bin() or os.getenv("QGIS_PYTHON_BIN", DEFAULT_QGIS_PYTHON_BIN)
     worker_path = _repo_root() / "rag_pipeline" / "qgis_pyqgis_worker.py"
     command = [python_bin, str(worker_path), operation, str(spec_path)]
     try:
