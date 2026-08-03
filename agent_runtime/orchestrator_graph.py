@@ -47,13 +47,19 @@ FAST_ANSWER_PROMPT = (
 # A query is fast-pathed only when the WHOLE message is a greeting / trivial
 # phrase. Anything with substantive content falls through to the orchestrator.
 _TRIVIAL_RE = re.compile(
-    r"^\s*("
+    # Optional greeting prefix so "Hi who are you" / "hello, what can you do" also fast-path
+    # (previously only a BARE trivial phrase matched, so a greeting + question fell through to
+    # retrieval and came back as a no-evidence refusal).
+    r"^\s*(?:(?:hi|hello|hey|hiya|yo|greetings|good\s+(?:morning|afternoon|evening|day))"
+    r"[\s,!.]+)?("
     r"hi|hello|hey|hiya|yo|greetings|"
     r"good\s+(morning|afternoon|evening|day)|"
     r"thanks|thank\s+you|thx|ty|"
     r"ok|okay|cool|great|nice|"
     r"bye|goodbye|see\s+you|"
-    r"who\s+are\s+you|what\s+are\s+you|"
+    r"who\s+are\s+you|what\s+are\s+you|who\s+made\s+you|who\s+built\s+you|"
+    r"are\s+you\s+(?:an?\s+)?(?:ai|bot|human|llm)|what\s+(?:model|llm)\s+are\s+you|"
+    r"what\s+is\s+(?:i-guide|iguide)|what'?s\s+i-guide|"
     r"what\s+can\s+you\s+do|what\s+do\s+you\s+do|"
     r"help"
     r")\s*[!.?]*\s*$",

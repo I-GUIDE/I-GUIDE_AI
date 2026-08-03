@@ -7,7 +7,56 @@ for observability.  No side effects, no LLM calls, no external I/O.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, List, Optional, Sequence
+
+
+# ---------------------------------------------------------------------------
+# Answer link sanitation
+# ---------------------------------------------------------------------------
+# LLMs sometimes prefix URLs with the "sandbox:" pseudo-scheme they saw in training
+# (e.g. [map](sandbox:/agent/files/<id>/download)) and sometimes cite a tool's INTERNAL
+# filesystem path (e.g. /app/agent_chat_files/qgis_jobs/.../rendered_map.png) instead of the
+# registered download_url. Both render as broken links in any client. The correct link is
+# already appended deterministically (_append_image_embeds), so here we strip the pseudo-scheme
+# and defuse links that point at unreachable local paths.
+_SANDBOX_URI_RE = re.compile(r"\bsandbox:(?=(?:https?:)?/)", re.IGNORECASE)
+_MD_LINK_RE = re.compile(r"(!?)\[([^\]]*)\]\(\s*([^)\s]+)\s*\)")
+_SERVABLE_PREFIXES = ("http://", "https://", "data:", "mailto:", "#", "/agent/files/")
+
+
+def strip_sandbox_uris(text: Optional[str]) -> str:
+    """Remove the LLM 'sandbox:' pseudo-scheme from URLs in *text*."""
+    if not text:
+        return text or ""
+    return _SANDBOX_URI_RE.sub("", text)
+
+
+def sanitize_answer_links(text: Optional[str]) -> str:
+    """Make every markdown link/image in an answer client-renderable.
+
+    * strips the ``sandbox:`` pseudo-scheme (``sandbox:/agent/files/x`` -> ``/agent/files/x``);
+    * defuses links whose target is an internal filesystem path the client cannot fetch — an
+      image is dropped, a text link degrades to its label — so the user never sees a dead link
+      while the deterministically-appended download URL remains.
+
+    Prose mentioning the word "sandbox" and legitimately servable targets (http(s), data:,
+    mailto:, #anchor, /agent/files/...) are left untouched.
+    """
+    if not text:
+        return text or ""
+    out = strip_sandbox_uris(text)
+
+    def _fix(match: "re.Match[str]") -> str:
+        bang, label, url = match.group(1), match.group(2), match.group(3)
+        low = url.lower()
+        if low.startswith(_SERVABLE_PREFIXES):
+            return match.group(0)
+        if low.startswith("file:") or url.startswith("/"):
+            return "" if bang else label      # unreachable local path
+        return match.group(0)
+
+    return _MD_LINK_RE.sub(_fix, out).strip()
 
 
 # ---------------------------------------------------------------------------

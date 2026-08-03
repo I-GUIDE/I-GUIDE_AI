@@ -377,6 +377,27 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
     return {**(audit or {}), "issues": kept}
 
 
+# A request that genuinely needs I-GUIDE evidence: asking for platform content (elements,
+# datasets, notebooks, publications, code, OERs), a specific element/id, or a search/listing.
+# Everything else — general geospatial/technical questions, definitions, how-tos, chit-chat — can
+# be answered from the model's own knowledge, so an empty knowledge base must not produce a
+# refusal for those.
+_RETRIEVAL_REQUEST_RE = re.compile(
+    r"\b(?:find|search|look\s+up|list|show\s+me|any|which|recommend|suggest)\b[^.?!]*"
+    r"\b(?:datasets?|notebooks?|publications?|papers?|oers?|elements?|code|collections?|"
+    r"resources?|maps?|contributors?|authors?)\b"
+    r"|\bknowledge\s+elements?\b|\bon\s+(?:the\s+)?i-?guide\b|\bin\s+(?:the\s+)?(?:platform|kb|"
+    r"knowledge\s+base)\b|\brelated\s+(?:elements?|resources?)\b|\bmost\s+popular\b"
+    r"|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+    re.I,
+)
+
+
+def _needs_kb_evidence(query: str) -> bool:
+    """True when the request is for I-GUIDE platform content (so 'no evidence' is a real answer)."""
+    return bool(_RETRIEVAL_REQUEST_RE.search(query or ""))
+
+
 def _has_grounding(evidence: Any, analysis_results: Any, code_result: Any,
                    artifacts: List[Dict[str, str]]) -> bool:
     """True if the run has ANY real basis for an answer: retrieved evidence, a produced
@@ -1369,6 +1390,36 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
     return fn
 
 
+def _compose_general_answer(llm: Optional[Any], query: str) -> str:
+    """Answer a GENERAL question (no platform evidence needed) from the model's own knowledge.
+
+    Used when nothing was retrieved and the question is not a request for I-GUIDE content, so the
+    assistant is helpful instead of refusing. The prompt forbids inventing citations, element
+    links, or claims about what the platform holds. Returns "" on any failure (caller falls back
+    to the honest no-evidence reply). Never raises.
+    """
+    if not (query or "").strip():
+        return ""
+    from agent_runtime.supervisor.prompts import GENERAL_ANSWER_PROMPT
+
+    try:
+        active = llm
+        if active is None:
+            from agent_runtime.executor_factory import build_default_llm
+
+            active = build_default_llm()
+        prompt = GENERAL_ANSWER_PROMPT.format(question=query)
+        if hasattr(active, "invoke"):
+            text = _content_to_text(active.invoke(prompt))
+        elif callable(active):
+            text = str(active(prompt))
+        else:
+            return ""
+        return (text or "").strip()
+    except Exception:
+        return ""
+
+
 def _compose_insufficiency_reply(llm: Optional[Any], query: str) -> str:
     """LLM-compose a contextual, grounding-SAFE "no supporting evidence" reply.
 
@@ -1580,6 +1631,25 @@ def build_supervisor_graph(
         emit_trace_event("node_started", {"stage": "synthesize", "message": "Composing answer"}, node="synthesize")
         has_grounding = _has_grounding(evidence, ar, cr, artifacts)
         has_history = bool(state.get("chat_history") or [])
+        # A general question (definition, how-to, concept, chit-chat) does not need platform
+        # evidence — answer it from general knowledge instead of refusing. Only a genuine
+        # content/retrieval request gets the "no supporting evidence" reply.
+        if not has_grounding and not has_history and not _needs_kb_evidence(q):
+            emit_trace_event(
+                "node_started",
+                {"stage": "synthesize", "message": "Answering from general knowledge"},
+                node="synthesize",
+            )
+            general = _compose_general_answer(llm, q)
+            if general:
+                merged_g = {**state, "answer": general, "audit": {}}
+                emit_trace_event(
+                    "node_completed",
+                    {"stage": "synthesize", "message": "General answer composed"},
+                    node="synthesize",
+                )
+                return {"answer": general, "final_answer": general, "audit": {},
+                        "distilled": {**_distill(merged_g), "answer": general}}
         if not has_grounding and not has_history:
             # Nothing was retrieved or produced AND there's no conversation to draw on (e.g. a
             # cold first-turn query whose search backend is down or the KB has no match). Compose
@@ -1618,6 +1688,10 @@ def build_supervisor_graph(
             final = _apply_grounding_caveat(answer, audit)
             # Embed produced image artifacts (maps/plots) inline so they render in markdown.
             final = _append_image_embeds(final, artifacts)
+            # Defuse sandbox: pseudo-URLs and internal filesystem paths the client cannot fetch.
+            from agent_runtime.runtime_utils import sanitize_answer_links
+
+            final = sanitize_answer_links(final)
             if not (final or "").strip():
                 # Never ship an empty answer with a success status.
                 final = ("I wasn't able to produce an answer for this request. Please try "

@@ -171,6 +171,25 @@ INSUFFICIENT_EVIDENCE_PROMPT = (
     "User request:\n{question}\n"
 )
 
+# Answers a GENERAL question when no platform evidence was retrieved and none is needed
+# (definitions, concepts, how-tos, self-referential/chit-chat). Keeps the assistant helpful
+# without letting it invent I-GUIDE holdings or citations.
+GENERAL_ANSWER_PROMPT = (
+    "You are the I-GUIDE assistant. I-GUIDE is a geospatial data platform: it helps users "
+    "discover datasets, notebooks, publications and OERs, run spatial analyses, and generate "
+    "code.\n"
+    "The user's question below is a GENERAL one — it does not require looking anything up in the "
+    "I-GUIDE knowledge base, and no platform evidence was retrieved for it.\n"
+    "Answer it directly, helpfully and concisely from your own knowledge (a few sentences; "
+    "markdown only if it genuinely helps).\n"
+    "CONSTRAINTS: do NOT cite or link any I-GUIDE knowledge element, do NOT claim what the "
+    "platform does or does not contain, and do NOT invent sources, statistics, or citations. If "
+    "the question would need platform data to answer properly, say what you can in general terms "
+    "and invite the user to ask for a search. If the question is about you, describe your role "
+    "briefly and offer to help with discovery, analysis, or code.\n\n"
+    "Question:\n{question}\n"
+)
+
 # Deterministic fallback used when the LLM-composed insufficiency reply is unavailable or empty
 # (e.g. the model errored). Env-overridable so operators can customize the wording.
 NO_GROUNDING_FALLBACK = (
@@ -184,6 +203,7 @@ __all__ = [
     "SYNTHESIS_PROMPT",
     "ANALYSIS_WORKFLOW_PROMPT",
     "CODE_PEER_PROMPT",
+    "GENERAL_ANSWER_PROMPT",
     "INSUFFICIENT_EVIDENCE_PROMPT",
     "NO_GROUNDING_FALLBACK",
 ]

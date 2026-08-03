@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from .file_store import get_file_record
 from .graph_runtime import run_agent_query, stream_agent_query_events
+from .runtime_utils import sanitize_answer_links
 from .session_memory import (
     append_session_files,
     append_session_turn,
@@ -288,7 +289,7 @@ def run_agent_chat(
         input_file_ids=effective_file_ids,
     )
 
-    answer = _extract_agent_answer(result)
+    answer = sanitize_answer_links(_extract_agent_answer(result))
     message_id = str(uuid4())
     effective_thread_id = result.get("thread_id") or effective_thread_id
     # Track this turn's uploads in the session so later turns can still use them.
@@ -450,7 +451,7 @@ def stream_agent_chat_events(
             completed_response = dict(event["data"])
         yield event
 
-    answer = _extract_agent_answer(completed_response or {})
+    answer = sanitize_answer_links(_extract_agent_answer(completed_response or {}))
     message_id = str(uuid4())
     effective_thread_id = (completed_response or {}).get("thread_id") or effective_thread_id
     # Track this turn's uploads in the session so later turns can still use them.

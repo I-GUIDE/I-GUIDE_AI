@@ -448,3 +448,15 @@ def test_supervisor_arm_stream_reaches_completed(stub_supervisor):
     assert completed.get("final_answer") == FINAL_ANSWER
     node_stages = {e["data"].get("stage") for e in events if e["event"] in {"node_started", "node_completed"}}
     assert "orchestrate" in node_stages
+
+
+def test_greeting_plus_identity_question_fast_paths():
+    """'Hi who are you' previously fell through to retrieval (a bare trivial phrase was required)
+    and came back as a no-evidence refusal."""
+    from agent_runtime.orchestrator_graph import is_trivial_query
+    for q in ("Hi who are you", "hello, what can you do?", "hey who made you",
+              "who are you", "what is I-GUIDE?", "thanks"):
+        assert is_trivial_query(q), q
+    for q in ("hi, find datasets about floods", "what is a shapefile",
+              "explain the buffer workflow"):
+        assert not is_trivial_query(q), q

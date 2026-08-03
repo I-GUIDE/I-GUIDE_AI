@@ -140,7 +140,9 @@ def test_search_not_repeated_when_it_returns_nothing():
         return []  # knowledge base has nothing for this query
 
     state = run_supervisor(
-        "q", llm=_fake_llm,
+        # a CONTENT request: with nothing retrieved this must refuse honestly rather than
+        # answering from general knowledge (which would fabricate platform holdings).
+        "find datasets about q on I-GUIDE", llm=_fake_llm,
         decide_fn=lambda s, d: "search",   # decider keeps wanting search
         search_fn=search_fn, synthesize_fn=lambda *a: "ans",
         do_rerank=False, do_audit=False,
@@ -808,12 +810,12 @@ def test_conversational_request_answered_from_history_not_refused():
 
 
 def test_cold_query_with_no_evidence_and_no_history_falls_back_to_constant():
-    """The honest no-grounding reply still fires for a true retrieval failure (nothing retrieved
-    AND no conversation). Here the model returns nothing for the insufficiency prompt, so the
-    deterministic NO_GROUNDING_FALLBACK constant is used — and the injected synthesize_fn is
-    never reached (no fabrication)."""
+    """The honest no-grounding reply still fires for a true retrieval failure (a CONTENT request,
+    nothing retrieved, no conversation). Here the model returns nothing for the insufficiency
+    prompt, so the deterministic NO_GROUNDING_FALLBACK constant is used — and the injected
+    synthesize_fn is never reached (no fabrication)."""
     state = run_supervisor(
-        "what is the population of atlantis", llm=_fake_llm,
+        "find datasets about the population of atlantis on I-GUIDE", llm=_fake_llm,
         decide_fn=lambda s, d: "done",
         search_fn=lambda q, s: [],
         synthesize_fn=lambda *a: "should not be used",
@@ -833,7 +835,7 @@ def test_no_grounding_uses_llm_composed_contextual_reply_when_available():
         return "x"
 
     state = run_supervisor(
-        "population of atlantis", llm=llm,
+        "list datasets on the population of atlantis in the knowledge base", llm=llm,
         decide_fn=lambda s, d: "done",
         search_fn=lambda q, s: [],
         synthesize_fn=lambda *a: "unused",
@@ -1231,3 +1233,58 @@ def test_decider_prompt_prefers_analyze_before_code():
     assert "ANALYZE BEFORE CODE" in p
     assert "existing purpose-built tools" in p.lower()
     assert "only when analyze has already run" in p.lower()
+
+
+# --- general questions are answered, not refused --------------------------------
+
+def test_needs_kb_evidence_distinguishes_retrieval_from_general():
+    from agent_runtime.supervisor.graph import _needs_kb_evidence
+    for retrieval in ("find datasets about floods", "list notebooks on I-GUIDE",
+                      "what are the most popular knowledge elements",
+                      "related elements of 86df1948-9726-4d64-901c-66fcfdbca433",
+                      "show me publications about dams"):
+        assert _needs_kb_evidence(retrieval), retrieval
+    for general in ("what is a shapefile", "explain coordinate reference systems",
+                    "how do I compute a buffer in python", "who are you",
+                    "why is my CRS wrong"):
+        assert not _needs_kb_evidence(general), general
+
+
+def test_general_question_answered_from_knowledge_when_nothing_retrieved():
+    """The live failure: a general question with no KB hits returned the no-evidence refusal."""
+    def llm(prompt: str) -> str:
+        low = prompt.lower()
+        if "general one" in low:            # GENERAL_ANSWER_PROMPT
+            return "A shapefile is a vector format made of several sidecar files."
+        if "no supporting evidence was found" in low:
+            return "REFUSAL — should not be used"
+        return "x"
+
+    state = run_supervisor(
+        "what is a shapefile", llm=llm, decide_fn=lambda s, d: "done",
+        search_fn=lambda q, s: [], synthesize_fn=lambda *a: "unused",
+        chat_history=[], do_rerank=False, do_audit=False,
+    )
+    assert "vector format" in state["final_answer"]
+    assert "couldn't find" not in state["final_answer"].lower()
+    assert "REFUSAL" not in state["final_answer"]
+
+
+def test_retrieval_request_with_no_evidence_still_refuses_honestly():
+    """A request for platform CONTENT with nothing retrieved must NOT be answered from general
+    knowledge — that would fabricate holdings."""
+    def llm(prompt: str) -> str:
+        low = prompt.lower()
+        if "general one" in low:
+            return "GENERAL — must not be used for a content request"
+        if "no supporting evidence was found" in low:
+            return ""      # exercise the deterministic fallback
+        return "x"
+
+    state = run_supervisor(
+        "find datasets about flooding on I-GUIDE", llm=llm, decide_fn=lambda s, d: "done",
+        search_fn=lambda q, s: [], synthesize_fn=lambda *a: "unused",
+        chat_history=[], do_rerank=False, do_audit=False,
+    )
+    assert "couldn't find" in state["final_answer"].lower()
+    assert "GENERAL" not in state["final_answer"]
