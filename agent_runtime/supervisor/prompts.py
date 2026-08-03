@@ -30,7 +30,7 @@ SYNTHESIS_PROMPT = (
     "5. If the Evidence or the Analysis/Code results for THIS turn include an image artifact (a "
     "PNG/JPG map, plot, or figure with a download_url, e.g. from plot_vector or execute_code), "
     "embed it inline using markdown image syntax `![short caption](download_url)` with the EXACT "
-    "download_url provided. Do not invent URLs. NEVER embed an image that appears only in the "
+    "download_url provided. Do not invent URLs — NEVER build a link from a filesystem path, a job directory, or a guessed host (no s3/bucket URLs). The ONLY valid file links are the exact download_url values present in the materials; if a result has no download_url, describe the output in words instead of linking it. NEVER embed an image that appears only in the "
     "conversation so far (a figure from an earlier turn) — that image already belongs to its own "
     "turn; re-embedding it here would wrongly repeat it. Only embed images the current turn produced.\n"
     "6. RELATED-ELEMENT requests: when the evidence is split into a CURATED bucket (related "

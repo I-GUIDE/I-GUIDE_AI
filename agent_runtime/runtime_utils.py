@@ -23,6 +23,11 @@ from typing import Any, Dict, List, Optional, Sequence
 _SANDBOX_URI_RE = re.compile(r"\bsandbox:(?=(?:https?:)?/)", re.IGNORECASE)
 _MD_LINK_RE = re.compile(r"(!?)\[([^\]]*)\]\(\s*([^)\s]+)\s*\)")
 _SERVABLE_PREFIXES = ("http://", "https://", "data:", "mailto:", "#", "/agent/files/")
+# A URL that claims to be an agent file/artifact. Any such target must match a file the run
+# actually produced — models otherwise invent plausible hosts/paths for a real internal path
+# (observed live: https://agent-chat-files.s3.amazonaws.com/qgis_jobs/.../rendered_map.png).
+_AGENT_FILE_HINT_RE = re.compile(r"/agent/files/|agent[_-]chat[_-]files|qgis_jobs/|/outputs?/", re.I)
+_FILE_ID_RE = re.compile(r"(file_[0-9a-f]{6,})", re.I)
 
 
 def strip_sandbox_uris(text: Optional[str]) -> str:
@@ -32,28 +37,59 @@ def strip_sandbox_uris(text: Optional[str]) -> str:
     return _SANDBOX_URI_RE.sub("", text)
 
 
-def sanitize_answer_links(text: Optional[str]) -> str:
-    """Make every markdown link/image in an answer client-renderable.
+def sanitize_answer_links(
+    text: Optional[str],
+    *,
+    allowed_file_ids: Optional[Sequence[str]] = None,
+    allowed_urls: Optional[Sequence[str]] = None,
+) -> str:
+    """Make every markdown link/image in an answer client-renderable and REAL.
 
     * strips the ``sandbox:`` pseudo-scheme (``sandbox:/agent/files/x`` -> ``/agent/files/x``);
-    * defuses links whose target is an internal filesystem path the client cannot fetch — an
-      image is dropped, a text link degrades to its label — so the user never sees a dead link
-      while the deterministically-appended download URL remains.
+    * defuses targets the client cannot fetch — an internal filesystem path, or a URL that claims
+      to be an agent file but does not match an artifact this run produced (models invent hosts,
+      e.g. an ``…s3.amazonaws.com/qgis_jobs/…`` URL built from a real internal path);
+    * IMAGES must resolve to a produced artifact (or be a ``data:`` URI) — an unverifiable image
+      is dropped rather than rendered as a broken thumbnail; a text link degrades to its label.
 
-    Prose mentioning the word "sandbox" and legitimately servable targets (http(s), data:,
-    mailto:, #anchor, /agent/files/...) are left untouched.
+    ``allowed_file_ids`` / ``allowed_urls`` come from the artifacts the run actually registered.
+    When neither is supplied, only the path/scheme checks apply (no artifact verification).
+    Prose mentioning "sandbox" and ordinary citation links (http(s), mailto:, #anchor) are kept.
     """
     if not text:
         return text or ""
     out = strip_sandbox_uris(text)
+    ids = {str(i).lower() for i in (allowed_file_ids or []) if i}
+    urls = {str(u) for u in (allowed_urls or []) if u}
+    verifying = bool(ids or urls)
+
+    def _is_known_artifact(url: str) -> bool:
+        if url in urls:
+            return True
+        match = _FILE_ID_RE.search(url)
+        return bool(match and match.group(1).lower() in ids)
 
     def _fix(match: "re.Match[str]") -> str:
         bang, label, url = match.group(1), match.group(2), match.group(3)
         low = url.lower()
-        if low.startswith(_SERVABLE_PREFIXES):
+        drop = "" if bang else label
+
+        if low.startswith(("data:", "mailto:", "#")):
             return match.group(0)
+        # Anything presenting itself as an agent file must be a real produced artifact.
+        if _AGENT_FILE_HINT_RE.search(url):
+            if verifying and not _is_known_artifact(url):
+                return drop
+            if low.startswith(("http://", "https://", "/agent/files/")):
+                return match.group(0)
+            return drop                              # internal path form
         if low.startswith("file:") or url.startswith("/"):
-            return "" if bang else label      # unreachable local path
+            return drop                              # unreachable local path
+        if bang and low.startswith(("http://", "https://")):
+            # An image we cannot tie to a produced artifact would render as a broken thumbnail.
+            return match.group(0) if (not verifying or _is_known_artifact(url)) else ""
+        if low.startswith(("http://", "https://")):
+            return match.group(0)                    # ordinary citation link
         return match.group(0)
 
     return _MD_LINK_RE.sub(_fix, out).strip()

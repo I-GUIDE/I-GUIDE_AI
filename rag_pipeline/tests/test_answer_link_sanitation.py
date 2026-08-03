@@ -50,3 +50,48 @@ def test_applied_at_the_service_boundary(monkeypatch):
     ans = acs.run_agent_chat(user_input="map it", thread_id="s", use_persistent_memory=False)["answer"]
     assert "sandbox:" not in ans and "/app/agent_chat_files" not in ans
     assert "![real](https://h/agent/files/file_9/download)" in ans
+
+
+# --- artifact verification: only files the run produced may be linked ------------
+
+_IDS = ["file_58a9ca3c73d1"]
+_URLS = ["https://h/agent/files/file_58a9ca3c73d1/download"]
+
+
+def _s(text):
+    return sanitize_answer_links(text, allowed_file_ids=_IDS, allowed_urls=_URLS)
+
+
+def test_drops_fabricated_artifact_hosts():
+    """The live failure: the model invented an S3 host from the internal job path, producing a
+    broken <img> in the client."""
+    assert _s("![m](https://agent-chat-files.s3.amazonaws.com/qgis_jobs/x/rendered_map.png)") == ""
+    assert _s("[dl](https://agent-chat-files.s3.amazonaws.com/outputs/buffer.geojson)") == "dl"
+    # an /agent/files/ URL for a file this run did NOT produce is equally unverifiable
+    assert _s("![m](https://h/agent/files/file_deadbeef99/download)") == ""
+
+
+def test_keeps_real_artifacts_and_ordinary_citations():
+    assert _s("![ok](https://h/agent/files/file_58a9ca3c73d1/download)") == \
+        "![ok](https://h/agent/files/file_58a9ca3c73d1/download)"
+    for keep in ("[NID](https://platform.i-guide.io/datasets/abc)",
+                 "[GRanD](https://sedac.ciesin.columbia.edu/data/set/x)",
+                 "[mail](mailto:a@b.c)", "![inline](data:image/png;base64,AAA)"):
+        assert _s(keep) == keep
+
+
+def test_verification_is_opt_in():
+    """Without an artifact set only the path/scheme rules apply (no false drops)."""
+    txt = "![m](https://some.host/img.png)"
+    assert sanitize_answer_links(txt) == txt
+
+
+def test_collect_download_refs_finds_nested_managed_outputs():
+    from agent_runtime.supervisor.graph import _collect_download_refs
+    ar = {"steps": [{"result": {"managed_output": {
+        "file_id": "file_a", "filename": "buffer.geojson",
+        "download_url": "https://h/agent/files/file_a/download"}}}]}
+    cr = '{"artifacts": [{"file_id": "file_b", "download_url": "/agent/files/file_b/download"}]}'
+    refs = _collect_download_refs(ar, cr)
+    assert refs["file_ids"] == ["file_a", "file_b"]          # incl. JSON-encoded tool output
+    assert "https://h/agent/files/file_a/download" in refs["urls"]

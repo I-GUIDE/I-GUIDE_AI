@@ -490,6 +490,41 @@ def _drop_previously_shown(images: List[Dict[str, str]], chat_history: Optional[
     return kept
 
 
+def _collect_download_refs(*sources: Any) -> Dict[str, List[str]]:
+    """Every artifact this run registered: ``{"file_ids": [...], "urls": [...]}``.
+
+    Unlike :func:`_collect_image_artifacts` this is not limited to images — a GeoJSON/CSV the
+    answer offers for download must be verifiable too. Used to reject links that merely LOOK
+    like agent files (fabricated hosts, internal paths).
+    """
+    ids: List[str] = []
+    urls: List[str] = []
+
+    def walk(v: Any) -> None:
+        if isinstance(v, dict):
+            url, fid = v.get("download_url"), v.get("file_id")
+            if url:
+                urls.append(str(url))
+            if fid:
+                ids.append(str(fid))
+            for child in v.values():
+                walk(child)
+        elif isinstance(v, (list, tuple)):
+            for child in v:
+                walk(child)
+        elif isinstance(v, str):
+            t = v.strip()
+            if t[:1] in ("{", "["):
+                try:
+                    walk(json.loads(t))
+                except Exception:
+                    pass
+
+    for src in sources:
+        walk(src)
+    return {"file_ids": list(dict.fromkeys(ids)), "urls": list(dict.fromkeys(urls))}
+
+
 def _append_image_embeds(answer: str, images: List[Dict[str, str]]) -> str:
     """Append markdown image embeds for produced images not already referenced in *answer*.
 
@@ -1688,10 +1723,13 @@ def build_supervisor_graph(
             final = _apply_grounding_caveat(answer, audit)
             # Embed produced image artifacts (maps/plots) inline so they render in markdown.
             final = _append_image_embeds(final, artifacts)
-            # Defuse sandbox: pseudo-URLs and internal filesystem paths the client cannot fetch.
+            # Defuse sandbox: pseudo-URLs, internal filesystem paths, and any link that merely
+            # LOOKS like an agent file (fabricated host) but is not an artifact this run produced.
             from agent_runtime.runtime_utils import sanitize_answer_links
 
-            final = sanitize_answer_links(final)
+            refs = _collect_download_refs(ar, cr)
+            final = sanitize_answer_links(final, allowed_file_ids=refs["file_ids"],
+                                          allowed_urls=refs["urls"])
             if not (final or "").strip():
                 # Never ship an empty answer with a success status.
                 final = ("I wasn't able to produce an answer for this request. Please try "
