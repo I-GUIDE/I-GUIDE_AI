@@ -36,6 +36,16 @@ _EXTERNAL_TOOLS = {"opengeodata_search"}
 _GEOCODE_TOOLS = {"geocode_places"}
 
 
+def mcp_tools_enabled_default() -> bool:
+    """The server's MCP default (AGENT_INCLUDE_MCP_TOOLS) when a request doesn't specify."""
+    try:
+        from agent_runtime.langchain_mcp_tools import mcp_tools_enabled
+
+        return bool(mcp_tools_enabled())
+    except Exception:
+        return False
+
+
 def is_capability_query(query: str) -> bool:
     """True when *query* asks about the assistant's own tools/capabilities/skills."""
     return bool(_CAPABILITY_RE.search(query or ""))
@@ -53,7 +63,7 @@ def _line(tool: Any) -> str:
 def describe_capabilities(
     *,
     enabled_search_methods: Optional[List[str]] = None,
-    include_mcp_tools: bool = False,
+    include_mcp_tools: Optional[bool] = None,
     mcp_modules: Optional[List[str]] = None,
     code_exec: Optional[bool] = None,
     skill_roots: Optional[List[str]] = None,
@@ -87,6 +97,32 @@ def describe_capabilities(
     except Exception:
         pass
 
+    # --- analysis-peer registries (not part of the granular toolset) ---
+    groups["geo"] = []
+    groups["mcp"] = []
+    groups["kbflows"] = []
+    try:
+        from agent_runtime.langchain_geo_tools import make_langchain_geo_tools
+
+        groups["geo"].extend(_line(t) for t in make_langchain_geo_tools(default_input_file_ids=None))
+    except Exception:
+        pass
+    mcp_on = mcp_tools_enabled_default() if include_mcp_tools is None else bool(include_mcp_tools)
+    if mcp_on:
+        try:
+            from agent_runtime.langchain_mcp_tools import make_langchain_mcp_tools
+
+            groups["mcp"].extend(_line(t) for t in make_langchain_mcp_tools(
+                include_modules=mcp_modules or ["spatial_analysis_tools"]))
+        except Exception:
+            pass
+    try:
+        from extractors.geo_handles import make_geo_analysis_tools
+
+        groups["kbflows"].extend(_line(t) for t in make_geo_analysis_tools())
+    except Exception:
+        pass
+
     exec_enabled = None
     try:
         from agent_runtime.code_execution import get_code_executor, is_code_exec_enabled
@@ -111,11 +147,14 @@ def describe_capabilities(
         parts.append("\n**External open-data discovery**\n" + "\n".join(groups["external"]))
     if groups["qgis"]:
         parts.append("\n**Geospatial analysis (QGIS, headless)**\n" + "\n".join(groups["qgis"]))
-    parts.append(
-        "\n**Geospatial file handling**\nUploaded vector data (shapefiles, GeoJSON, TIGER zips) can be "
-        "inspected, plotted, reprojected, and exported (inspect_vector, plot_vector, "
-        "reproject_vector, vector_to_geojson); extracted shapefile components are auto-discovered."
-    )
+    if groups["geo"]:
+        parts.append("\n**Geospatial file handling (uploaded shapefiles / GeoJSON / TIGER zips)**\n"
+                     + "\n".join(groups["geo"])
+                     + "\nExtracted shapefile components (.shp/.shx/.dbf) are auto-discovered from any one part.")
+    if groups["mcp"]:
+        parts.append("\n**Spatial-analysis tools (MCP)**\n" + "\n".join(groups["mcp"]))
+    if groups["kbflows"]:
+        parts.append("\n**Runnable knowledge-base workflows**\n" + "\n".join(groups["kbflows"]))
     if groups["geocode"]:
         parts.append("\n**Geocoding**\n" + "\n".join(groups["geocode"]))
     if exec_enabled is not None:
@@ -127,9 +166,6 @@ def describe_capabilities(
         )
     if groups["files"]:
         parts.append("\n**Files & outputs**\n" + "\n".join(groups["files"]))
-    if include_mcp_tools:
-        mods = ", ".join(mcp_modules or ["spatial_analysis_tools"])
-        parts.append(f"\n**MCP tools**\nAdditional analysis tools from MCP modules: {mods}.")
     if skills:
         parts.append("\n**Skills**\n" + "\n".join(f"- {s}" for s in skills))
     parts.append(

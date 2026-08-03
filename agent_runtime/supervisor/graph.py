@@ -533,10 +533,18 @@ def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
             "Choose the SINGLE next action. Capabilities are peers you can use in any "
             "order and repeat as needed:\n"
             "- search: retrieve evidence (datasets, publications, notebooks)\n"
-            "- analyze: run a GIS/data analysis workflow (spatial ops, statistics) over the evidence\n"
-            "- code: produce runnable code / implementation\n"
+            "- analyze: run a GIS/data analysis workflow with EXISTING purpose-built tools "
+            "(QGIS/PyQGIS, spatial ops, statistics, vector inspect/plot/reproject) over the "
+            "evidence or uploaded files\n"
+            "- code: produce and run NEW code for work no existing tool covers\n"
             "- done: stop; a grounded final answer is composed automatically from the "
             "conversation + evidence + analysis results + code\n\n"
+            "ANALYZE BEFORE CODE: for any analysis/GIS/mapping task, pick 'analyze' FIRST — it "
+            "owns the purpose-built tools and is more reliable than writing fresh code. Choose "
+            "'code' only when analyze has already run and could not do it (has_analysis is true "
+            "but the task is unmet, or analyze reported a missing capability), or when the user "
+            "explicitly asks for code/a script. Do not start with 'code' for a task an existing "
+            "tool plausibly covers.\n"
             "Use the conversation so far for context. If the request refers to something "
             "ALREADY produced earlier in the conversation (e.g. 'show me the code', 'explain "
             "that', 'what did you find'), do NOT search again — choose 'done' so the answer is "
@@ -1164,6 +1172,15 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         try:
             from agent_runtime.langchain_granular_tools import make_langchain_geocode_tools
             tools.extend(make_langchain_geocode_tools())
+        except Exception:
+            pass
+        # QGIS tools run in the AGENT environment (where QGIS is installed) — the code sandbox
+        # image has no `qgis` package, so without these the peer could only attempt an
+        # `import qgis` that always fails. Registered only when a backend is actually present.
+        try:
+            from agent_runtime.langchain_granular_tools import make_langchain_qgis_tools
+            tools.extend(make_langchain_qgis_tools(
+                session_id=child_thread_id(state.get("thread_id"), "code_qgis")))
         except Exception:
             pass
         # When files are attached, give the code peer the vector/shapefile tools too, so it

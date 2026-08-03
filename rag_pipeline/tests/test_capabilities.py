@@ -44,6 +44,23 @@ def test_describe_capabilities_reflects_live_registries():
     assert "execute_code" in text                         # code exec section present
 
 
+def test_describe_capabilities_includes_analysis_peer_registries():
+    """The analysis peer's own tools live in separate registries (geo tools, MCP spatial-analysis,
+    runnable KB workflows) — they were missing from the self-description."""
+    text = describe_capabilities(include_mcp_tools=True)
+    # geo tools (analysis/code peers, for uploaded vector data)
+    assert "inspect_vector" in text and "plot_vector" in text
+    assert "Geospatial file handling" in text
+    # MCP spatial-analysis module tools are enumerated by name (not just mentioned)
+    assert "Spatial-analysis tools (MCP)" in text
+    assert text.count("- **mcp_") >= 1 or "spatial" in text.lower()
+
+
+def test_describe_capabilities_mcp_off_hides_section():
+    text = describe_capabilities(include_mcp_tools=False)
+    assert "Spatial-analysis tools (MCP)" not in text
+
+
 def test_describe_capabilities_honors_request_config():
     text = describe_capabilities(enabled_search_methods=["keyword_search"], code_exec=False)
     assert "keyword_search" in text

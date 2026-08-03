@@ -1187,3 +1187,47 @@ def test_default_top_k_env_tunable(monkeypatch):
     assert _default_top_k() == 12
     monkeypatch.setenv("AGENT_SUPERVISOR_TOP_K", "bogus")
     assert _default_top_k() == 8
+
+
+# --- QGIS availability + analyze-before-code routing --------------------------
+
+def test_code_peer_has_qgis_tools(monkeypatch):
+    """The code peer must expose the QGIS tools: they run in the AGENT env, while the code
+    sandbox image has no `qgis` package — previously the peer could only try an `import qgis`
+    inside execute_code, which always fails (the reported failure)."""
+    from types import SimpleNamespace
+    import agent_runtime.executor_factory as ef
+    import agent_runtime.langchain_granular_tools as gt
+    import agent_runtime.supervisor_graph as sg
+
+    monkeypatch.setattr(gt, "make_langchain_qgis_tools",
+                        lambda **k: [SimpleNamespace(name="qgis_metric_buffer"),
+                                     SimpleNamespace(name="pyqgis_render_map")])
+    captured = {}
+
+    def fake_build(**kwargs):
+        captured["tools"] = [getattr(t, "name", "") for t in (kwargs.get("preloaded_tools") or [])]
+        return object()
+    monkeypatch.setattr(ef, "build_agent_executor", fake_build)
+    monkeypatch.setattr(ef, "invoke_agent_with_payload_fallback", lambda *a, **k: {"messages": []})
+
+    sg.default_code_fn()("buffer these points with qgis", [], {"thread_id": None})
+    assert "qgis_metric_buffer" in captured["tools"]
+    assert "pyqgis_render_map" in captured["tools"]
+
+
+def test_decider_prompt_prefers_analyze_before_code():
+    """The supervisor must try the tool-owning analyze peer before writing fresh code."""
+    captured = {}
+
+    def llm(prompt):
+        captured["prompt"] = prompt
+        return json.dumps({"next": "analyze", "reason": "existing tools cover it"})
+
+    from agent_runtime.supervisor.graph import default_decide_fn
+    nxt = default_decide_fn(llm=llm)({"query": "buffer these cities"}, {"has_evidence": True})
+    assert nxt == "analyze"
+    p = captured["prompt"]
+    assert "ANALYZE BEFORE CODE" in p
+    assert "existing purpose-built tools" in p.lower()
+    assert "only when analyze has already run" in p.lower()
