@@ -522,10 +522,13 @@ function unwrapToolContent(raw){
   // `content='...` prefix in place, which is why unwrapping appeared not to work.
   const tail=s.lastIndexOf(quote+" name=");
   if(tail!==-1) s=s.slice(0,tail);
-  // Python's repr wrapped the JSON in SINGLE quotes, so an apostrophe inside it comes back as \'
-  // — not a legal JSON escape, so "exceeds 'open river' conditions" alone would break JSON.parse
-  // and leak visible backslashes into the titles shown in the log.
-  return quote==="'" ? s.replace(/\\'/g,"'") : s;
+  // Undo the repr's own escaping, in ONE left-to-right pass so neither escape mangles the other:
+  //   \'  -> '   an apostrophe inside the single-quoted wrapper ("exceeds 'open river' conditions")
+  //             is not a legal JSON escape and alone breaks JSON.parse;
+  //   \\  -> \   the payload is dumped with ensure_ascii, so a title's em dash is already \u2014
+  //             and repr escapes THAT backslash. Left doubled, the title renders as a literal
+  //             "\u2014" no matter how the value is decoded afterwards.
+  return quote==="'" ? s.replace(/\\(['\\])/g,"$1") : s;
 }
 
 /* tool_call args arrive as a PYTHON dict repr string — {'query': 'dams in Illinois', 'limit': 8} */
@@ -540,16 +543,23 @@ function parseToolArgs(raw){
   return s;
 }
 
+/* Values scraped by regex come from INSIDE a JSON string literal, so they still carry its escapes
+   (—, \n, \"). Re-parsing them as a JSON string decodes those; without it a title renders as
+   "Home — SIGSPATIAL Conference". */
+function decodeJsonEscapes(s){
+  try{ return JSON.parse('"'+String(s)+'"'); }catch(_){ return String(s); }
+}
+
 function looseJson(text){
   const s=String(text||"");
   try{ return JSON.parse(s); }catch(_){}
   // Truncated payload: pull out what we can without a parser.
   const num=(k)=>{ const m=s.match(new RegExp('"'+k+'"\\s*:\\s*(-?\\d+)')); return m?Number(m[1]):null; };
-  const str=(k)=>{ const m=s.match(new RegExp('"'+k+'"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"')); return m?m[1]:null; };
+  const str=(k)=>{ const m=s.match(new RegExp('"'+k+'"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"')); return m?decodeJsonEscapes(m[1]):null; };
   const titles=[]; const re=/"title"\s*:\s*"((?:[^"\\]|\\.)*)"/g; let m;
-  while((m=re.exec(s))&&titles.length<40) titles.push(m[1]);
+  while((m=re.exec(s))&&titles.length<40) titles.push(decodeJsonEscapes(m[1]));
   const urls=[]; const ru=/"url"\s*:\s*"(https?:(?:[^"\\]|\\.)*)"/g;
-  while((m=ru.exec(s))&&urls.length<40) urls.push(m[1].replace(/\\\//g,"/"));
+  while((m=ru.exec(s))&&urls.length<40) urls.push(decodeJsonEscapes(m[1]));
   return {__partial:true, count:num("count"), chars:num("chars"), status:num("status"),
     candidates_found:num("candidates_found"), filtered_out:num("filtered_out"),
     paragraphs_kept:num("paragraphs_kept"), paragraphs_total:num("paragraphs_total"),
@@ -602,8 +612,8 @@ function reportToolResult(ui,name,content){
     const host=(()=>{ try{ return new URL(obj.url).hostname; }catch(_){ return obj.url||"page"; } })();
     const kept=(obj.paragraphs_kept!=null&&obj.paragraphs_total!=null)
       ? (" · kept "+obj.paragraphs_kept+"/"+obj.paragraphs_total+" paragraphs") : "";
-    pushLine(ui,"read "+host+" — "+(obj.chars!=null?obj.chars:"?")+" chars"+kept
-      +(obj.cached?" · from cache":""),"hit");
+    const size=(obj.chars!=null)?(" — "+obj.chars+" chars"):"";   // absent when the log cut it off
+    pushLine(ui,"read "+host+size+kept+(obj.cached?" · from cache":""),"hit");
     if(obj.title) pushDocLine(ui,obj.title,obj.url);
     return tally;
   }
