@@ -66,6 +66,15 @@ _QUERY_STOPWORDS = {
     "geographical", "gis", "map", "maps", "mapping", "layer", "layers", "file", "files",
     "information", "info", "open", "public", "find", "search", "show", "list", "give", "get",
     "please", "want", "need", "any", "all", "some", "related", "available", "using", "use",
+    # Interrogatives, auxiliaries and demonstratives. None is ever the SUBJECT of a request, but
+    # left in they behave like topical terms: "What resolution does NHDPlus HR use?" yielded
+    # ["what", "resolution", "does", "nhdplus"], and when those terms select passages from a
+    # fetched page, "what" and "does" match almost every paragraph — diluting the selection back
+    # towards the whole document. (Words under 3 characters are already dropped by _MIN_TERM_LEN.)
+    "what", "which", "who", "whom", "whose", "when", "where", "why", "how",
+    "does", "did", "are", "was", "were", "been", "being", "have", "has", "had",
+    "can", "could", "should", "would", "will", "shall", "may", "might", "must",
+    "this", "that", "these", "those", "there", "here", "its", "not", "but", "than", "then",
 }
 _MIN_TERM_LEN = 3
 

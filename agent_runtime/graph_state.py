@@ -50,6 +50,11 @@ RAG_COMPONENT_TOOL_NAMES: set[str] = {
     "neo4j_explore_related_nodes",
     "spatial_search",
     "opengeodata_search",
+    # Open-web tools. Omitting them here does not merely skip a nicety: tool_policy filters the
+    # agent's toolset against these sets, so a name absent from here is stripped for EVERY intent
+    # on the smart-routing path — the tool would be registered, documented and unreachable.
+    "web_search",
+    "web_fetch",
     "agent_kb_search",
     "get_kb_block",
 }

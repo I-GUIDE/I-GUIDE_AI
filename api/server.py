@@ -913,11 +913,12 @@ def agent_chat():
                   - spatial_search
                   - opengeodata_search
                   - web_search
+                  - web_fetch
                   - agent_kb_search
                   - get_kb_block
               nullable: true
               description: >-
-                Optional retrieval tool allowlist used with the granular strategy. May be an array or a comma-separated string. Omit it (or send an empty list) to use ALL methods. Names are case-insensitive and common short forms are accepted (`keyword`, `semantic`, `neo4j`, `spatial`, `opengeodata`, `web`); an UNRECOGNIZED name is rejected with HTTP 400 rather than silently disabling retrieval. When `neo4j_search` is enabled, the companion Neo4j id and related-node tools are also available.
+                Optional retrieval tool allowlist used with the granular strategy. May be an array or a comma-separated string. Omit it (or send an empty list) to use ALL methods. Names are case-insensitive and common short forms are accepted (`keyword`, `semantic`, `neo4j`, `spatial`, `opengeodata`, `web`, `webfetch`); an UNRECOGNIZED name is rejected with HTTP 400 rather than silently disabling retrieval. When `neo4j_search` is enabled, the companion Neo4j id and related-node tools are also available.
               example: ["keyword_search", "semantic_search", "opengeodata_search"]
             enabled_search_methods:
               type: array
@@ -1385,6 +1386,14 @@ def agent_chat_stream():
       runs as part of the deterministic multi-method sweep, and can be turned off for the whole
       deployment with `AGENT_WEB_ENABLED=false`. Only URLs a search actually returned may appear as
       download links in the answer; others are stripped.
+    - `web_fetch` is the second step: it READS one page found by `web_search` and returns only the
+      passages bearing on the question (boilerplate stripped, `AGENT_WEB_FETCH_MAX_CHARS`, default
+      6000). Capped separately (`AGENT_WEB_MAX_FETCHES_PER_TURN`, default 3) and enabled
+      automatically whenever `web_search` is — asking for `web_search` alone would otherwise let
+      the agent find pages it cannot read. Only http/https on standard web ports
+      (`AGENT_WEB_ALLOWED_PORTS`, default `80,443`) can be fetched; loopback, private addresses,
+      this deployment's own service hosts, and every redirect hop are checked, so it cannot be
+      steered into the internal network. Page text is returned to the model as untrusted evidence.
     - `includeMcpTools`: server default `AGENT_INCLUDE_MCP_TOOLS` (ON); send `false` to disable.
     - `mcpModules`: null = all MCP modules (when MCP tools are on).
     - `smartToolRouting`: `true`.
@@ -1554,11 +1563,12 @@ def agent_chat_stream():
                   - spatial_search
                   - opengeodata_search
                   - web_search
+                  - web_fetch
                   - agent_kb_search
                   - get_kb_block
               nullable: true
               description: >-
-                Optional retrieval tool allowlist used with the granular strategy. May be an array or a comma-separated string. Omit it (or send an empty list) to use ALL methods. Names are case-insensitive and common short forms are accepted (`keyword`, `semantic`, `neo4j`, `spatial`, `opengeodata`, `web`); an UNRECOGNIZED name is rejected with HTTP 400 rather than silently disabling retrieval. When `neo4j_search` is enabled, the companion Neo4j id and related-node tools are also available.
+                Optional retrieval tool allowlist used with the granular strategy. May be an array or a comma-separated string. Omit it (or send an empty list) to use ALL methods. Names are case-insensitive and common short forms are accepted (`keyword`, `semantic`, `neo4j`, `spatial`, `opengeodata`, `web`, `webfetch`); an UNRECOGNIZED name is rejected with HTTP 400 rather than silently disabling retrieval. When `neo4j_search` is enabled, the companion Neo4j id and related-node tools are also available.
               example: ["keyword_search", "semantic_search", "opengeodata_search"]
             enabled_search_methods:
               type: array

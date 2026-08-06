@@ -32,6 +32,7 @@ KNOWN_SEARCH_METHODS: tuple = (
     "spatial_search",
     "opengeodata_search",
     "web_search",
+    "web_fetch",
     "agent_kb_search",
     "get_kb_block",
 )
@@ -60,6 +61,9 @@ _ALIASES = {
     "websearch": "web_search",
     "internet": "web_search",
     "openweb": "web_search",
+    "webfetch": "web_fetch",
+    "fetch": "web_fetch",
+    "webpage": "web_fetch",
     "agentkb": "agent_kb_search",
     "agent_kb": "agent_kb_search",
     "agentkbsearch": "agent_kb_search",

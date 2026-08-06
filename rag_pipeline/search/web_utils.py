@@ -77,6 +77,20 @@ def web_timeout() -> int:
     return _env_int("AGENT_WEB_TIMEOUT", 12, minimum=1)
 
 
+def fetch_max_bytes() -> int:
+    """Socket-level cap: how much of a response body is read at all.
+
+    Enforced while streaming, so an enormous or hostile response is abandoned mid-download rather
+    than buffered and then measured.
+    """
+    return _env_int("AGENT_WEB_MAX_BYTES", 2_000_000, minimum=10_000)
+
+
+def fetch_max_chars() -> int:
+    """Cap on extracted, on-topic text handed to the model — the real token-cost ceiling."""
+    return _env_int("AGENT_WEB_FETCH_MAX_CHARS", 6000, minimum=500)
+
+
 # --- the hit envelope ----------------------------------------------------------
 
 
@@ -252,6 +266,8 @@ __all__ = [
     "canonical_url",
     "charge_fetch",
     "charge_search",
+    "fetch_max_bytes",
+    "fetch_max_chars",
     "max_fetches_per_turn",
     "max_searches_per_turn",
     "record_urls",
