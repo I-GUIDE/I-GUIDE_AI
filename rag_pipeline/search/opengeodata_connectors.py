@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 import os
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Tuple
@@ -375,8 +377,11 @@ def search_datacite(
     logger.info(f"DataCite search called with: q='{q}', bbox={bbox}, limit={limit}")
     if not (q or "").strip():
         return []
+    # Match TITLES and SUBJECTS rather than all metadata: DataCite indexes every discipline, so a
+    # full-text query for "dams" also returns biomedical records that merely mention the token.
+    escaped = re.sub(r'([+\-!(){}\[\]^"~*?:\\/]|&&|\|\|)', r" ", str(q)).strip()
     params: Dict[str, Any] = {
-        "query": q,
+        "query": f"titles.title:({escaped}) OR subjects.subject:({escaped})" if escaped else q,
         "page[size]": min(max(limit, 1), 50),
         "affiliation": "false",
     }

@@ -231,15 +231,28 @@ def score(
     bbox: Optional[Tuple[float, float, float, float]] = None,
     time_range: Optional[Tuple[Optional[str], Optional[str]]] = None,
 ) -> float:
-    text = " ".join(
-        [
-            asset.title or "",
-            asset.abstract or "",
-            " ".join(asset.keywords or []),
-        ]
-    ).lower()
-    text_score = sum(1.0 for term in query_terms if term and term.lower() in text)
+    # Weighted, word-boundary term matching. Flat substring counting let an incidental mention
+    # outrank a dataset whose TITLE is the topic (a pharmacology record scored above "Major Dams
+    # in the United States"), and matched inside unrelated words.
+    title = (asset.title or "").lower()
+    abstract = (asset.abstract or "").lower()
+    keywords = " ".join(asset.keywords or []).lower()
+    text_score = 0.0
+    for term in query_terms:
+        if not term:
+            continue
+        if _term_hit(term, title):
+            text_score += 2.0
+        elif _term_hit(term, abstract):
+            text_score += 1.0
+        elif _term_hit(term, keywords):
+            text_score += 0.5
     spatiotemporal_score = 0.0
+    # A place-scoped question favours records that are actually georeferenced: a flat bonus for
+    # declaring an intersecting extent, on top of the overlap ratio (which is tiny for a global
+    # dataset against one state). Records with no extent are not penalised — many good ones omit it.
+    if bbox and asset.bbox and not bbox_conflicts(asset.bbox, bbox):
+        spatiotemporal_score += 0.75
     if bbox and asset.bbox:
         ax1, ay1, ax2, ay2 = asset.bbox
         bx1, by1, bx2, by2 = bbox
