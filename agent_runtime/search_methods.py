@@ -31,6 +31,7 @@ KNOWN_SEARCH_METHODS: tuple = (
     "neo4j_explore_related_nodes",
     "spatial_search",
     "opengeodata_search",
+    "web_search",
     "agent_kb_search",
     "get_kb_block",
 )
@@ -55,6 +56,10 @@ _ALIASES = {
     "opengeodatasearch": "opengeodata_search",
     "open_geo_data": "opengeodata_search",
     "external": "opengeodata_search",
+    "web": "web_search",
+    "websearch": "web_search",
+    "internet": "web_search",
+    "openweb": "web_search",
     "agentkb": "agent_kb_search",
     "agent_kb": "agent_kb_search",
     "agentkbsearch": "agent_kb_search",

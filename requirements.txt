@@ -24,6 +24,12 @@ opensearch-py
 neo4j
 ddgs
 
+# Open-web page extraction (web_fetch): boilerplate removal + HTML -> markdown.
+# Present in dev environments already; unpinned they are absent from the Docker image.
+beautifulsoup4
+lxml
+markdownify
+
 # Embeddings / ML
 sentence-transformers
 transformers

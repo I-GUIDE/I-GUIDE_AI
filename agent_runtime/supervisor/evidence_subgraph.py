@@ -70,14 +70,16 @@ def _element_url(doc: Any) -> str:
 
     * Internal knowledge element -> ``{FRONTEND_DOMAIN}/{element_type-plural}/{doc_id}``
       (plural, except ``code`` stays ``code``) — same scheme as the smart-search frontend.
-    * External (OpenGeoData) -> its own landing ``url`` surfaced in the search payload.
+    * External (OpenGeoData catalog record, open-web page) -> its own landing ``url`` from the
+      search payload. Pluralizing those element types would fabricate a platform page that does
+      not exist (``/webs/web-1a2b…``).
     Returns "" when no link can be formed (the synthesizer then cites the title in bold).
     """
     src = doc.get("document") if isinstance(doc, dict) and isinstance(doc.get("document"), dict) else doc
     if not isinstance(src, dict):
         return ""
     etype = str(src.get("element_type") or src.get("resource-type") or "").strip().lower()
-    if etype == "opengeodata":
+    if etype in {"opengeodata", "web"}:
         return str(src.get("url") or "")
     doc_id = str(src.get("doc_id") or src.get("id") or src.get("_id") or "")
     if not doc_id:

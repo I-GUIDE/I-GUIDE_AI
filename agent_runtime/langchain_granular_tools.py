@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .langchain_file_tools import make_langchain_file_tools
 from rag_pipeline.search.opengeodata import get_opengeodata_results
+from rag_pipeline.search.web import results_to_hits, run_web_search
 from rag_pipeline.search.keyword import get_keyword_search_results
 from rag_pipeline.search.utils import snippet_chars
 from rag_pipeline.search.agents import (
@@ -91,7 +92,8 @@ def _normalize_hits(hits: List[Dict[str, Any]], source: str) -> List[Dict[str, A
         # Preserve the structured geospatial metadata carried by external (OpenGeoData) hits so the
         # final response can surface them as rich JSON objects (map bbox, provider, license, ...).
         # These keys are absent on internal KB hits, so this is a no-op there.
-        for field in ("bbox", "datetime", "provider", "license", "links", "keywords", "source_system"):
+        for field in ("bbox", "datetime", "provider", "license", "links", "keywords",
+                      "source_system", "published"):
             value = doc.get(field)
             if value is not None:
                 item[field] = value
@@ -166,6 +168,24 @@ def opengeodata_search_tool(query: str, limit: int = 8, session_context_json: Op
             session_ctx = None
     hits = get_opengeodata_results(query, limit=_safe_int(limit), session_ctx=session_ctx)
     return _build_payload(hits, source="opengeodata")
+
+
+def web_search_tool(query: str, limit: int = 6, recency_days: Optional[int] = None) -> str:
+    """Open-web search: METADATA ONLY (title, url, snippet). Reading a page is a separate step."""
+    result = run_web_search(
+        query,
+        limit=_safe_int(limit, default=6, maximum=10),
+        recency_days=recency_days,
+    )
+    payload = json.loads(_build_payload(results_to_hits(result), source="web"))
+    # Carry the refusal/observability fields through. Without ``error``, an exhausted budget or a
+    # provider outage would read to the model as "the web has nothing", and it would answer as if
+    # that were a finding.
+    for key in ("error", "search_query", "provider", "candidates_found", "filtered_out", "budget"):
+        value = result.get(key)
+        if value is not None:
+            payload[key] = value
+    return json.dumps(payload, ensure_ascii=True, default=str)
 
 
 _GEOCODE_MAX_PLACES = 40  # Nominatim is ~1 req/s (cached per process); bound a tool call's runtime
@@ -462,6 +482,24 @@ def make_langchain_granular_tools(
             metadata={"category": "retrieval_external"},
         ),
         StructuredTool.from_function(
+            func=web_search_tool,
+            name="web_search",
+            description=(
+                "Search the OPEN WEB (live internet) and get back METADATA ONLY: title, url and a "
+                "short engine snippet for each result. USE FOR: current events and recent "
+                "developments, documentation and tool/API references, methods and standards, "
+                "organizations and news, or anything neither in the I-GUIDE knowledge base nor in "
+                "the open-data catalogs. Prefer opengeodata_search when the user wants DATASETS to "
+                "download, and the internal searches for questions about I-GUIDE content. "
+                "The snippets are for JUDGING which sources are worth citing — they are not full "
+                "documents, so do not state detailed facts a snippet does not actually contain. "
+                "Optional recency_days limits results to the recent past (e.g. 7 for the last week). "
+                "Budgeted per turn: reformulate deliberately rather than searching repeatedly. "
+                "Returns JSON with doc_ids, titles, urls and snippets."
+            ),
+            metadata={"category": "retrieval_external"},
+        ),
+        StructuredTool.from_function(
             func=agent_kb_search_tool,
             name="agent_kb_search",
             description=(
@@ -507,6 +545,7 @@ __all__ = [
     "neo4j_explore_related_nodes_tool",
     "spatial_search_tool",
     "opengeodata_search_tool",
+    "web_search_tool",
     "pyqgis_layer_summary_tool",
     "pyqgis_render_map_tool",
     "qgis_metric_buffer_tool",

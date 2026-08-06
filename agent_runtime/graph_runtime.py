@@ -39,6 +39,7 @@ from agent_runtime.orchestrator_graph import (
 )
 from agent_runtime.skills import SkillRegistry
 from agent_runtime.streaming_trace import is_agent_dev, trace_context
+from rag_pipeline.search import web_utils
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +85,7 @@ def run_agent_query(
         code_exec=code_exec,
         input_file_ids=input_file_ids,
     )
+    web_utils.begin_turn()  # reset the per-turn open-web budget (see note in the streaming path)
     final_state = graph.invoke(
         {
             "query": query,
@@ -183,6 +185,11 @@ def stream_agent_query_events(
 
     def _worker() -> None:
         try:
+            # The open-web budget lives in a ContextVar, and a new thread starts with a FRESH
+            # context -- so resetting it in the caller would be invisible here. It has to happen on
+            # this thread, and it has to happen at all: a gunicorn sync worker reuses its thread
+            # across requests, so without a reset the previous turn's spend would starve this one.
+            web_utils.begin_turn()
             with trace_context(_enqueue, agent_role="orchestrator_agent", agent_dev=agent_dev):
                 graph = build_orchestrator_graph(
                     llm=llm,

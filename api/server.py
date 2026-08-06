@@ -912,11 +912,12 @@ def agent_chat():
                   - neo4j_explore_related_nodes
                   - spatial_search
                   - opengeodata_search
+                  - web_search
                   - agent_kb_search
                   - get_kb_block
               nullable: true
               description: >-
-                Optional retrieval tool allowlist used with the granular strategy. May be an array or a comma-separated string. Omit it (or send an empty list) to use ALL methods. Names are case-insensitive and common short forms are accepted (`keyword`, `semantic`, `neo4j`, `spatial`, `opengeodata`); an UNRECOGNIZED name is rejected with HTTP 400 rather than silently disabling retrieval. When `neo4j_search` is enabled, the companion Neo4j id and related-node tools are also available.
+                Optional retrieval tool allowlist used with the granular strategy. May be an array or a comma-separated string. Omit it (or send an empty list) to use ALL methods. Names are case-insensitive and common short forms are accepted (`keyword`, `semantic`, `neo4j`, `spatial`, `opengeodata`, `web`); an UNRECOGNIZED name is rejected with HTTP 400 rather than silently disabling retrieval. When `neo4j_search` is enabled, the companion Neo4j id and related-node tools are also available.
               example: ["keyword_search", "semantic_search", "opengeodata_search"]
             enabled_search_methods:
               type: array
@@ -1376,9 +1377,14 @@ def agent_chat_stream():
     - `enabledSearchMethods`: null = ALL granular retrieval tools — `keyword_search`,
       `semantic_search`, `neo4j_search` (+ its `neo4j_get_element_by_id` /
       `neo4j_explore_related_nodes` companions), `spatial_search`, `opengeodata_search`,
-      `agent_kb_search`, `get_kb_block`. Supplying a list restricts to those names (the neo4j
-      companions are kept whenever `neo4j_search` is listed; `agent_kb_search`/`get_kb_block` are
-      dropped unless explicitly named).
+      `web_search`, `agent_kb_search`, `get_kb_block`. Supplying a list restricts to those names
+      (the neo4j companions are kept whenever `neo4j_search` is listed;
+      `agent_kb_search`/`get_kb_block` are dropped unless explicitly named).
+    - `web_search` queries the LIVE open web and returns metadata only (title, url, snippet) — no
+      page content. It is capped per turn (`AGENT_WEB_MAX_SEARCHES_PER_TURN`, default 3), never
+      runs as part of the deterministic multi-method sweep, and can be turned off for the whole
+      deployment with `AGENT_WEB_ENABLED=false`. Only URLs a search actually returned may appear as
+      download links in the answer; others are stripped.
     - `includeMcpTools`: server default `AGENT_INCLUDE_MCP_TOOLS` (ON); send `false` to disable.
     - `mcpModules`: null = all MCP modules (when MCP tools are on).
     - `smartToolRouting`: `true`.
@@ -1547,11 +1553,12 @@ def agent_chat_stream():
                   - neo4j_explore_related_nodes
                   - spatial_search
                   - opengeodata_search
+                  - web_search
                   - agent_kb_search
                   - get_kb_block
               nullable: true
               description: >-
-                Optional retrieval tool allowlist used with the granular strategy. May be an array or a comma-separated string. Omit it (or send an empty list) to use ALL methods. Names are case-insensitive and common short forms are accepted (`keyword`, `semantic`, `neo4j`, `spatial`, `opengeodata`); an UNRECOGNIZED name is rejected with HTTP 400 rather than silently disabling retrieval. When `neo4j_search` is enabled, the companion Neo4j id and related-node tools are also available.
+                Optional retrieval tool allowlist used with the granular strategy. May be an array or a comma-separated string. Omit it (or send an empty list) to use ALL methods. Names are case-insensitive and common short forms are accepted (`keyword`, `semantic`, `neo4j`, `spatial`, `opengeodata`, `web`); an UNRECOGNIZED name is rejected with HTTP 400 rather than silently disabling retrieval. When `neo4j_search` is enabled, the companion Neo4j id and related-node tools are also available.
               example: ["keyword_search", "semantic_search", "opengeodata_search"]
             enabled_search_methods:
               type: array
