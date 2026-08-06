@@ -40,6 +40,7 @@ from .neo4j_graph_tools import (
     run_user_author_fallback,
     _get_internal_labels,
 )
+from .utils import snippet_chars
 from ..state import EvidenceEntry, ensure_state_shapes, get_query_text, merge_retrieval
 
 # ---------------------------------------------------------------------------
@@ -364,7 +365,7 @@ def _hit_to_document(hit: Dict[str, Any], source_name: str = "neo4j") -> Dict[st
         "score": hit.get("_score", 0.0),
         "title": doc.get("title") or "Untitled",
         "element_type": doc.get("element_type") or doc.get("resource-type") or "resource",
-        "contents": (doc.get("contents") or "")[:800],
+        "contents": (doc.get("contents") or "")[:snippet_chars()],
         "authors": _as_list(doc.get("authors")),
         "tags": _as_list(doc.get("tags")),
     }

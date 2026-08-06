@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 from .langchain_file_tools import make_langchain_file_tools
 from rag_pipeline.search.opengeodata import get_opengeodata_results
 from rag_pipeline.search.keyword import get_keyword_search_results
+from rag_pipeline.search.utils import snippet_chars
 from rag_pipeline.search.agents import (
     explore_neo4j_related_nodes,
     get_neo4j_agent_results,
@@ -79,9 +80,14 @@ def _normalize_hits(hits: List[Dict[str, Any]], source: str) -> List[Dict[str, A
             "score": hit.get("_score", 0.0),
             "title": doc.get("title") or "Untitled",
             "element_type": doc.get("element_type") or doc.get("resource-type") or "resource",
-            "contents": (doc.get("contents") or "")[:800],
+            "contents": (doc.get("contents") or "")[:snippet_chars()],
             "url": _landing_url(doc),  # external landing url (OpenGeoData); "" for internal
         }
+        # External (OpenGeoData) descriptions are user-facing: keep the FULL abstract alongside
+        # the (capped) contents so the structured results a client renders are never cut short.
+        full_text = str(doc.get("contents") or "")
+        if full_text and str(item["element_type"]).lower() == "opengeodata":
+            item["abstract"] = full_text
         # Preserve the structured geospatial metadata carried by external (OpenGeoData) hits so the
         # final response can surface them as rich JSON objects (map bbox, provider, license, ...).
         # These keys are absent on internal KB hits, so this is a no-op there.

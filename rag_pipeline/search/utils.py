@@ -52,3 +52,17 @@ __all__ = [
     "normalize_source_fields",
     "safe_score",
 ]
+
+
+def snippet_chars(default: int = 4000) -> int:
+    """Max characters kept per document snippet in normalized search hits.
+
+    The old hard-coded 800 truncated most real abstracts (OpenGeoData descriptions routinely run
+    1-3k characters), so citations and the structured results shown to users were cut mid-sentence.
+    Prompt cost stays bounded downstream, where the synthesizer caps each evidence block anyway.
+    Tune with AGENT_SEARCH_SNIPPET_CHARS.
+    """
+    try:
+        return max(200, int(os.getenv("AGENT_SEARCH_SNIPPET_CHARS", str(default))))
+    except (TypeError, ValueError):
+        return default
