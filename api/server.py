@@ -437,13 +437,14 @@ def _parse_mcp_modules(value):
 
 
 def _parse_enabled_search_methods(value):
-    if value is None:
-        return None
-    if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
-    if isinstance(value, str):
-        return [item.strip() for item in value.split(",") if item.strip()]
-    raise ValueError("enabled_search_methods must be a list of strings or a comma-separated string")
+    """Validate + normalize the retrieval allowlist (unknown name -> ValueError -> HTTP 400).
+
+    An unrecognized method used to be dropped silently, leaving the agent with no retrieval tools
+    and an unexplained "no evidence" answer; see agent_runtime.search_methods.
+    """
+    from agent_runtime.search_methods import normalize_search_methods
+
+    return normalize_search_methods(value)
 
 
 def _sse_event(name, data):
@@ -907,10 +908,15 @@ def agent_chat():
                   - keyword_search
                   - semantic_search
                   - neo4j_search
+                  - neo4j_get_element_by_id
+                  - neo4j_explore_related_nodes
                   - spatial_search
                   - opengeodata_search
+                  - agent_kb_search
+                  - get_kb_block
               nullable: true
-              description: Optional retrieval tool allowlist used with the granular strategy. May be an array or a comma-separated string. When `neo4j_search` is enabled, the companion Neo4j id and related-node tools are also available.
+              description: >-
+                Optional retrieval tool allowlist used with the granular strategy. May be an array or a comma-separated string. Omit it (or send an empty list) to use ALL methods. Names are case-insensitive and common short forms are accepted (`keyword`, `semantic`, `neo4j`, `spatial`, `opengeodata`); an UNRECOGNIZED name is rejected with HTTP 400 rather than silently disabling retrieval. When `neo4j_search` is enabled, the companion Neo4j id and related-node tools are also available.
               example: ["keyword_search", "semantic_search", "opengeodata_search"]
             enabled_search_methods:
               type: array
@@ -1537,10 +1543,15 @@ def agent_chat_stream():
                   - keyword_search
                   - semantic_search
                   - neo4j_search
+                  - neo4j_get_element_by_id
+                  - neo4j_explore_related_nodes
                   - spatial_search
                   - opengeodata_search
+                  - agent_kb_search
+                  - get_kb_block
               nullable: true
-              description: Optional retrieval tool allowlist used with the granular strategy. May be an array or a comma-separated string. When `neo4j_search` is enabled, the companion Neo4j id and related-node tools are also available.
+              description: >-
+                Optional retrieval tool allowlist used with the granular strategy. May be an array or a comma-separated string. Omit it (or send an empty list) to use ALL methods. Names are case-insensitive and common short forms are accepted (`keyword`, `semantic`, `neo4j`, `spatial`, `opengeodata`); an UNRECOGNIZED name is rejected with HTTP 400 rather than silently disabling retrieval. When `neo4j_search` is enabled, the companion Neo4j id and related-node tools are also available.
               example: ["keyword_search", "semantic_search", "opengeodata_search"]
             enabled_search_methods:
               type: array

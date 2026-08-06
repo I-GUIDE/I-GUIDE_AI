@@ -188,12 +188,16 @@ def _augment_user_input_with_file_ids(user_input: str, file_ids: Sequence[str]) 
 
 
 def _normalize_enabled_search_methods(enabled_search_methods: Optional[Sequence[Any]]) -> Optional[List[str]]:
-    if enabled_search_methods is None:
-        return None
-    if isinstance(enabled_search_methods, (str, bytes)):
-        enabled_search_methods = [item.strip() for item in str(enabled_search_methods).split(",")]
-    normalized = [str(item).strip() for item in enabled_search_methods if str(item).strip()]
-    return normalized or []
+    """Canonical retrieval allowlist, or None for 'all methods'.
+
+    Shares agent_runtime.search_methods with the API layer so a name is validated the same way on
+    every entry point; an unknown name raises ValueError rather than silently disabling retrieval.
+    """
+    from agent_runtime.search_methods import normalize_search_methods
+
+    return normalize_search_methods(enabled_search_methods)
+
+
 
 
 def _normalize_skill_roots(skill_roots: Optional[Sequence[Any]]) -> Optional[List[str]]:
