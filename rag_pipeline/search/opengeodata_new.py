@@ -48,6 +48,104 @@ def hydrate_api_credentials_from_env_files() -> None:
 
 hydrate_api_credentials_from_env_files()
 
+# --- query hygiene + relevance gating -------------------------------------------
+# Catalog keyword search always returns SOMETHING, and the pipeline only sorted by score without
+# ever discarding non-matching hits, so unrelated records surfaced for any query (e.g. "Kansas
+# City Crime" for "institutions knowledge elements"). Two causes are addressed here:
+#   * medium/artifact words ("geospatial", "datasets", "map") match nearly every record in a
+#     geospatial catalog, so they must not act as search or relevance terms;
+#   * results with no meaningful overlap must be DROPPED, not merely ranked last.
+_QUERY_STOPWORDS = {
+    "a", "an", "and", "the", "of", "for", "about", "with", "in", "on", "to", "from", "by",
+    "data", "dataset", "datasets", "database", "databases", "geospatial", "spatial", "geographic",
+    "geographical", "gis", "map", "maps", "mapping", "layer", "layers", "file", "files",
+    "information", "info", "open", "public", "find", "search", "show", "list", "give", "get",
+    "please", "want", "need", "any", "all", "some", "related", "available", "using", "use",
+}
+_MIN_TERM_LEN = 3
+
+
+def meaningful_terms(query: Optional[str]) -> List[str]:
+    """Subject terms from a query: lowercase, punctuation-stripped, stopwords removed.
+
+    Used both to clean what is SENT to the catalogs and to judge relevance of what comes back,
+    so a query of pure filler cannot masquerade as a topical match.
+    """
+    tokens = re.findall(r"[a-z0-9][a-z0-9\-']*", str(query or "").lower())
+    return [t for t in tokens if len(t) >= _MIN_TERM_LEN and t not in _QUERY_STOPWORDS]
+
+
+def focus_query(query: Optional[str]) -> str:
+    """The query with filler/medium words removed; falls back to the original when that empties it."""
+    terms = meaningful_terms(query)
+    return " ".join(terms) if terms else str(query or "").strip()
+
+
+def _stem(term: str) -> str:
+    """Crude singular stem so a query term matches either number form ("dams" <-> "dam")."""
+    low = term.lower()
+    if len(low) > 4 and low.endswith("es"):
+        return low[:-2]
+    if len(low) > 3 and low.endswith("s") and not low.endswith("ss"):
+        return low[:-1]
+    return low
+
+
+def _term_hit(term: str, text: str) -> bool:
+    """Word-boundary match on the term's stem, tolerating simple plural/verb suffixes.
+
+    Substring matching produced incidental hits ("dams" inside "damsel"), which is part of why
+    unrelated records looked relevant; anchoring on word boundaries fixes that while still
+    matching "Dam Safety" for a query about dams.
+    """
+    pattern = r"(?<![a-z0-9])" + re.escape(_stem(term)) + r"(?:s|es|ing|ed)?(?![a-z])"
+    return re.search(pattern, text) is not None
+
+
+def is_relevant(asset: GeoAsset, terms: Sequence[str]) -> bool:
+    """Whether an asset plausibly answers the query, by term evidence.
+
+    The more subject terms a query has, the more evidence is demanded — one incidental word in a
+    long abstract is not relevance:
+
+    * single-term query -> the term must appear in the TITLE or the ABSTRACT;
+    * multi-term query  -> a TITLE match, or at least two DISTINCT terms anywhere
+      (title/abstract/keywords).
+
+    Keyword-list-only matches never suffice on their own: catalog tag vocabularies contain
+    generic words, which previously let filler terms pass as topical matches. With no meaningful
+    terms at all, nothing is filtered (better the catalogs' own ranking than an empty set).
+    """
+    if not terms:
+        return True
+    title = (asset.title or "").lower()
+    abstract = (asset.abstract or "").lower()
+    keywords = " ".join(asset.keywords or []).lower()
+    title_hits = [t for t in terms if _term_hit(t, title)]
+    if title_hits:
+        return True
+    if len(terms) == 1:
+        return _term_hit(terms[0], abstract)
+    distinct = {t for t in terms if _term_hit(t, abstract) or _term_hit(t, keywords)}
+    return len(distinct) >= 2
+
+
+def bbox_conflicts(asset_bbox: Any, query_bbox: Any) -> bool:
+    """True when BOTH extents are known and they do not intersect.
+
+    Only records that declare their own extent can be excluded this way, so global/national
+    datasets (which usually declare none) are never dropped for a place-scoped query.
+    """
+    if not asset_bbox or not query_bbox:
+        return False
+    try:
+        ax1, ay1, ax2, ay2 = (float(v) for v in asset_bbox[:4])
+        qx1, qy1, qx2, qy2 = (float(v) for v in query_bbox[:4])
+    except (TypeError, ValueError):
+        return False
+    return not (ax1 <= qx2 and ax2 >= qx1 and ay1 <= qy2 and ay2 >= qy1)
+
+
 def discover(
     query: str = "",
     bbox: Optional[Tuple[float, float, float, float]] = None,
@@ -258,14 +356,18 @@ def get_q_bbox_timer_openai(
 
         Given a user query, extract:
         - q: compact keyword query (no locations, no dates) for catalog search, not a natural-language phrase.
-            Remove filler words like "of", "for", "about", "show", "find", "risk of".
-            Keep only the core dataset/search terms.
+            Give ONLY THE SUBJECT MATTER. Remove filler words ("of", "for", "about", "show",
+            "find", "risk of") AND words describing the artifact or medium rather than the topic
+            ("data", "dataset(s)", "geospatial", "spatial", "GIS", "map", "layer", "file",
+            "information", "open", "public") — in a geospatial data catalog those match almost
+            everything and bury the real topic.
             Prefer 1-3 important keywords.
         - place: a human-readable place name if a location is mentioned (e.g. "Chicago, IL", "Illinois"), else null
         - timer: [start_date, end_date] if time mentioned, else [null, null]
         
         Examples:
         - "risk of aging dams in Chicago" → {{"q": "dams risk", "place": "Chicago, IL", "timer": [null, null]}}
+        - "Find open geospatial datasets about dams in Illinois" → {{"q": "dams", "place": "Illinois", "timer": [null, null]}}
         - "how do crime rates differ across Illinois" → {{"q": "crime rates", "place": "Illinois", "timer": [null, null]}}
         - "air quality monitoring datasets in Chicago" → {{"q": "air quality monitoring", "place": "Chicago, IL", "timer": [null, null]}}
         - "recent wildfire datasets in California after 2020" → {{"q": "wildfire", "place": "California", "timer": ["2020-01-01", null]}}
@@ -359,13 +461,30 @@ def run_opengeodata(
             tt: Optional[Tuple[Optional[str], Optional[str]]] = None
             if timer and len(timer) >= 2:
                 tt = (iso_date(timer[0]), iso_date(timer[1]))
-        assets = discover(q, bb, tt, limit=limit, providers=providers)
-        assets = sorted(assets, key=lambda a: -score(a, q.lower().split(), bb, tt))[:limit]
+        # Search the catalogs with the SUBJECT of the request: medium words like "geospatial
+        # datasets" match almost every record and drown out the actual topic.
+        search_q = focus_query(q)
+        terms = meaningful_terms(q)
+        assets = discover(search_q, bb, tt, limit=limit, providers=providers)
+        found = len(assets)
+        # Relevance gate: drop records with no meaningful term overlap, and records whose own
+        # extent does not intersect a requested area. Returning nothing is a valid, honest answer.
+        kept = [a for a in assets if is_relevant(a, terms) and not bbox_conflicts(a.bbox, bb)]
+        dropped = found - len(kept)
+        if dropped:
+            logger.info(
+                "OpenGeoData relevance gate: kept %d/%d assets for terms=%s (bbox=%s)",
+                len(kept), found, terms, bool(bb),
+            )
+        assets = sorted(kept, key=lambda a: -score(a, terms, bb, tt))[:limit]
         result = {
             "query": q,
+            "search_query": search_q,
             "bbox": list(bb) if bb else None,
             "timer": [tt[0], tt[1]] if tt else [None, None],
             "count": len(assets),
+            "candidates_found": found,
+            "filtered_out": dropped,
             "assets": [asset_to_dict(asset) for asset in assets],
         }
         return result
