@@ -8,6 +8,8 @@ the KB returned anything at all, when the request excluded web_search, or when w
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 import agent_runtime.supervisor.graph as G
@@ -259,3 +261,76 @@ def test_the_reported_query_reaches_the_web(monkeypatch):
     assert G._asks_about_platform_holdings(q) is False
     assert G._platform_evidence_is_unhelpful(_offtopic(), q) is True
     assert len(G._web_fallback_evidence(q, None)) == 2 and calls["search"] == 1
+
+
+# --- trace visibility --------------------------------------------------------------
+# The fallback is deterministic, so nothing in the LangChain callback chain reports it: it used to
+# appear as a single node line, leaving the query it sent and the results it got invisible.
+
+
+def _captured_events(monkeypatch):
+    """Collect trace events emitted during a fallback run."""
+    events = []
+    import agent_runtime.supervisor.graph as GG
+
+    monkeypatch.setattr(GG, "emit_trace_event",
+                        lambda name, data=None, **kw: events.append((name, data or {})))
+    return events
+
+
+def test_the_fallback_traces_the_query_it_sent(monkeypatch):
+    _stub_web(monkeypatch)
+    events = _captured_events(monkeypatch)
+    G._web_fallback_evidence("who regulates dam safety in Illinois", None)
+
+    calls = [d for n, d in events if n == "tool_call" and d.get("name") == "web_search"]
+    assert len(calls) == 1
+    assert calls[0]["args"]["query"] == "who regulates dam safety in Illinois"
+    assert calls[0]["automatic"] is True          # no model chose this
+    # Same event NAME and payload keys the LLM-elected path uses, so clients need no changes.
+    assert calls[0]["tool_calls"][0]["name"] == "web_search"
+
+
+def test_the_fallback_traces_the_results_it_got(monkeypatch):
+    _stub_web(monkeypatch, results=3)
+    events = _captured_events(monkeypatch)
+    G._web_fallback_evidence("q", None)
+
+    results = [d for n, d in events if n == "tool_result" and d.get("tool_name") == "web_search"]
+    assert len(results) == 1
+    body = json.loads(results[0]["content"])
+    assert body["count"] == 3
+    assert [r["url"] for r in body["documents"]] == [f"https://example.com/p{i}" for i in range(3)]
+    assert all("title" in r for r in body["documents"])
+    # Page bodies must NOT be in the trace — titles and urls only.
+    assert "contents" not in body["documents"][0]
+
+
+def test_the_fallback_traces_the_page_it_read(monkeypatch):
+    _stub_web(monkeypatch)
+    events = _captured_events(monkeypatch)
+    G._web_fallback_evidence("q", None)
+
+    fetch_calls = [d for n, d in events if n == "tool_call" and d.get("name") == "web_fetch"]
+    fetch_results = [d for n, d in events if n == "tool_result" and d.get("tool_name") == "web_fetch"]
+    assert fetch_calls and fetch_calls[0]["args"]["url"] == "https://example.com/p0"
+    assert fetch_results
+    body = json.loads(fetch_results[0]["content"])
+    assert body["url"] == "https://example.com/p0" and body["chars"] == 27
+
+
+def test_a_provider_failure_is_traced_too(monkeypatch):
+    """A silent failure would read as 'the web had nothing' — the error must reach the trace."""
+    _stub_web(monkeypatch, error="web search provider unavailable: boom")
+    events = _captured_events(monkeypatch)
+    G._web_fallback_evidence("q", None)
+
+    results = [d for n, d in events if n == "tool_result"]
+    assert results and "provider unavailable" in json.loads(results[0]["content"])["error"]
+
+
+def test_nothing_is_traced_when_the_fallback_is_skipped(monkeypatch):
+    _stub_web(monkeypatch)
+    events = _captured_events(monkeypatch)
+    G._web_fallback_evidence("what does I-GUIDE have about dams", None)   # platform question
+    assert [n for n, _ in events if n in ("tool_call", "tool_result")] == []

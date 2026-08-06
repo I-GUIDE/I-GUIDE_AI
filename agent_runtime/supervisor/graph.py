@@ -1306,6 +1306,36 @@ def _web_fallback_enabled() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
+def _emit_web_tool_call(name: str, args: Dict[str, Any]) -> None:
+    """Trace a fallback web call in the SAME shape the LLM-elected path emits.
+
+    This path is deterministic, so nothing in the LangChain callback chain reports it: before this,
+    a fallback showed up as a single node line and the query it actually sent — and the results it
+    got — were invisible to every client. Reusing the ``tool_call``/``tool_result`` event names means
+    existing UIs render it with no changes; ``automatic`` marks that no model chose it.
+    """
+    emit_trace_event(
+        "tool_call",
+        {"kind": "llm_tool_decision", "label": f"Tool started (automatic) {name}",
+         "name": name, "args": args, "automatic": True,
+         "tool_calls": [{"name": name, "args": args}],
+         "message": f"{name}({json.dumps(args, ensure_ascii=True, default=str)})"},
+        node="search",
+    )
+
+
+def _emit_web_tool_result(name: str, payload: Dict[str, Any]) -> None:
+    """Trace the RESULT of a fallback web call: what came back, titles and urls only."""
+    clean = {k: v for k, v in payload.items() if v is not None}
+    body = json.dumps(clean, ensure_ascii=True, default=str)
+    emit_trace_event(
+        "tool_result",
+        {"kind": "tool_result", "label": f"Tool result {name}", "tool_name": name, "name": name,
+         "automatic": True, "content": body, "message": body},
+        node="search",
+    )
+
+
 def _web_fallback_evidence(query: str, enabled_search_methods: Optional[List[str]],
                            *, k: int = 6) -> List[Dict[str, Any]]:
     """Open-web evidence for a query the I-GUIDE platform could not answer at all.
@@ -1340,10 +1370,25 @@ def _web_fallback_evidence(query: str, enabled_search_methods: Optional[List[str
         from agent_runtime.langchain_granular_tools import _normalize_hits
         from rag_pipeline.search.web import results_to_hits, run_web_search
 
+        _emit_web_tool_call("web_search", {"query": query, "limit": k})
         result = run_web_search(query, limit=k)
         if result.get("error") or not result.get("count"):
+            _emit_web_tool_result("web_search", {
+                "source": "web", "count": result.get("count") or 0,
+                "error": result.get("error"), "search_query": result.get("search_query"),
+            })
             return []
         docs = _normalize_hits(results_to_hits(result), source="web")
+        _emit_web_tool_result("web_search", {
+            "source": "web",
+            "count": result.get("count") or len(docs),
+            "provider": result.get("provider"),
+            "search_query": result.get("search_query") or query,
+            "candidates_found": result.get("candidates_found"),
+            "filtered_out": result.get("filtered_out"),
+            # Titles and urls only — the trace shows WHAT was found, not the page bodies.
+            "documents": [{"title": d.get("title"), "url": d.get("url")} for d in docs],
+        })
     except Exception:
         return []
 
@@ -1353,8 +1398,20 @@ def _web_fallback_evidence(query: str, enabled_search_methods: Optional[List[str
 
         top = next((d.get("url") for d in docs if d.get("url")), "")
         if top:
+            _emit_web_tool_call("web_fetch", {"url": top, "focus": query})
             page = fetch_and_extract(top, focus=query)
             text = (page.get("text") or "").strip()
+            _emit_web_tool_result("web_fetch", {
+                "url": page.get("url") or top,
+                "title": page.get("title"),
+                "status": page.get("status"),
+                "chars": page.get("chars"),
+                "paragraphs_kept": page.get("paragraphs_kept"),
+                "paragraphs_total": page.get("paragraphs_total"),
+                "cached": page.get("cached"),
+                "error": page.get("error"),
+                "blocked": page.get("blocked"),
+            })
             if text and not page.get("error"):
                 for doc in docs:
                     if doc.get("url") == top:

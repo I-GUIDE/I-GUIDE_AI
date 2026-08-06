@@ -55,6 +55,7 @@ def _fresh(monkeypatch):
         "example.com": "93.184.216.34",
         "www.example.com": "93.184.216.34",
     }
+    _synthetic: dict = {}
 
     def fake_getaddrinfo(host, port, *args, **kwargs):
         name = str(host).lower().rstrip(".")
@@ -76,10 +77,14 @@ def _fresh(monkeypatch):
             return [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", (name, port))]
         except ValueError:
             pass
-        # Any other name gets its own stable public address in TEST-NET-3's neighbourhood, so two
-        # unrelated hostnames never collide.
-        h = abs(hash(name)) % 250 + 1
-        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (f"198.51.200.{h}", port))]
+        # Any other name gets its own public address, assigned sequentially. NOT derived from
+        # hash(): that is randomized per process, so two unrelated hostnames could collide onto one
+        # address — and once the guard began resolving its deny-listed names, a collision made an
+        # unrelated host look like one of this deployment's services. It failed only in full-suite
+        # runs, and only for some seeds.
+        if name not in _synthetic:
+            _synthetic[name] = f"198.51.200.{len(_synthetic) + 1}"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (_synthetic[name], port))]
 
     monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
     WF._CACHE.clear()
