@@ -509,6 +509,37 @@ const RETRIEVAL_TOOLS=new Set(["keyword_search","semantic_search","neo4j_search"
   "opengeodata_search","web_search","agent_kb_search","neo4j_get_element_by_id",
   "neo4j_explore_related_nodes","get_kb_block"]);
 
+/* A tool_result's `content` is the repr of a LangChain ToolMessage, not bare JSON:
+   content='{"source": "keyword", ...}' name='keyword_search' tool_call_id='call_x'
+   Unwrap it, or every payload would fail JSON.parse and be reported as truncated. */
+function unwrapToolContent(raw){
+  let s=String(raw==null?"":raw);
+  if(!/^content=['"]/.test(s)) return s;
+  const quote=s.charAt(8);              // content=' -> the quote is at index 8
+  s=s.slice(9);
+  // In a FULL repr the JSON ends at the last `<quote> name=`. A payload cut at the trace's
+  // 1200-char limit has no tail at all — anchoring the match on it silently left the whole
+  // `content='...` prefix in place, which is why unwrapping appeared not to work.
+  const tail=s.lastIndexOf(quote+" name=");
+  if(tail!==-1) s=s.slice(0,tail);
+  // Python's repr wrapped the JSON in SINGLE quotes, so an apostrophe inside it comes back as \'
+  // — not a legal JSON escape, so "exceeds 'open river' conditions" alone would break JSON.parse
+  // and leak visible backslashes into the titles shown in the log.
+  return quote==="'" ? s.replace(/\\'/g,"'") : s;
+}
+
+/* tool_call args arrive as a PYTHON dict repr string — {'query': 'dams in Illinois', 'limit': 8} */
+function parseToolArgs(raw){
+  if(raw==null) return null;
+  if(typeof raw==="object") return raw;
+  const s=String(raw).trim();
+  try{ return JSON.parse(s); }catch(_){}
+  if(/^\{[\s\S]*\}$/.test(s)){
+    try{ return JSON.parse(s.replace(/'/g,'"')); }catch(_){}   // fails on an apostrophe; falls through
+  }
+  return s;
+}
+
 function looseJson(text){
   const s=String(text||"");
   try{ return JSON.parse(s); }catch(_){}
@@ -715,6 +746,11 @@ function reasoningLine(eventName,p){
     return (s in map)?map[s]:String(s).replace(/_/g," ");
   }
   if(eventName==="grounding_audit") return "Grounding check: "+(p.message||p.severity||"done");
+  if(eventName==="search"||eventName==="analysis"){
+    // The category copy of a tool_call/tool_result carries no message of its own — agent_trace is
+    // where that detail lives, so reporting this too would duplicate every line.
+    if(p.type==="tool_call"||p.type==="tool_result"||p.type==="tool_error") return null;
+  }
   if(eventName==="search") return p.message || "Searching the knowledge base";
   if(eventName==="tool_error") return null;   // handled with its own styling in handleBlock
   if(eventName==="analysis") return p.message || null;
@@ -757,6 +793,17 @@ function handleBlock(block, ui, downloads, state){
   let p={}; const raw=data.join("\n");
   if(raw){ try{ p=JSON.parse(raw); }catch(_){ p={raw}; } }
 
+  // WIRE FORMAT: the HTTP endpoint does not emit `tool_call`/`tool_result` as event NAMES. It wraps
+  // them as `event: agent_trace` with the real type in data.type and the payload in data.detail —
+  // and separately re-emits the same thing under a category name ("search"/"analysis"). Unwrap
+  // agent_trace and treat it as the canonical copy; the category copy is suppressed below so a
+  // single tool call is not reported twice.
+  if(eventName==="agent_trace" && p && p.type){
+    const det=(p.detail && typeof p.detail==="object")?p.detail:{};
+    eventName=p.type;
+    p=Object.assign({}, det, {agent:p.agent, node:p.node});
+  }
+
   collectDownloads(p, downloads);
 
   // capture thread/memory ids from any detail/payload
@@ -772,7 +819,7 @@ function handleBlock(block, ui, downloads, state){
   if(eventName==="error"){ state.error=p.error||p.message||"Request failed"; }
   // The terminal "response" event carries the whole run, including the evidence the answer was
   // grounded in — that is what the Sources block is built from.
-  if(eventName==="response"){ state.response=p; }
+  if(eventName==="response"||eventName==="result"){ state.response=p; }
 
   // --- search activity -----------------------------------------------------------
   // These events were previously dropped on the floor (reasoningLine returned null), so the log
@@ -780,7 +827,7 @@ function handleBlock(block, ui, downloads, state){
   // what came back.
   if(eventName==="tool_call"){
     const name=p.name||(p.tool_calls&&p.tool_calls[0]&&p.tool_calls[0].name)||"tool";
-    const args=p.args!==undefined?p.args:(p.tool_calls&&p.tool_calls[0]&&p.tool_calls[0].args);
+    const args=parseToolArgs(p.args!==undefined?p.args:(p.tool_calls&&p.tool_calls[0]&&p.tool_calls[0].args));
     if(RETRIEVAL_TOOLS.has(name)||name==="web_fetch"){
       const a=toolArgSummary(name,args);
       pushLine(ui,name+"("+a+")","tool");
@@ -790,7 +837,7 @@ function handleBlock(block, ui, downloads, state){
   if(eventName==="tool_result"){
     const name=p.tool_name||p.name||"tool";
     if(RETRIEVAL_TOOLS.has(name)||name==="web_fetch"){
-      const d=reportToolResult(ui,name,p.content!==undefined?p.content:p.message);
+      const d=reportToolResult(ui,name,unwrapToolContent(p.content!==undefined?p.content:p.message));
       state.tally.searches+=d.searches; state.tally.hits+=d.hits; state.tally.fetches+=d.fetches;
       updateTally(ui,state);
     }
