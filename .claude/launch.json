@@ -4,7 +4,7 @@
     {
       "name": "iguide-chat-preview",
       "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "http.server", "8131", "--directory", "/tmp/iguide_preview"],
+      "runtimeArgs": ["-m", "http.server", "8131", "--directory", "examples"],
       "port": 8131
     }
   ]

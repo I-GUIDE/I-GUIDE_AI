@@ -72,6 +72,38 @@
   .reason .body{padding:4px 18px 16px;border-top:1px solid var(--line)}
   .reason .body .ln{color:#5b6168;font-size:14.5px;padding:3px 0}
   .reason .body .ln::before{content:"– ";color:#b7bcc2}
+  /* search activity in the reasoning log: the call, what it returned, and refusals */
+  .reason .body .ln.tool{color:#3b4046;font-weight:600}
+  .reason .body .ln.tool::before{content:"→ ";color:#7a8b3a}
+  .reason .body .ln.hit{color:#5b6168;padding-left:16px;font-size:14px}
+  .reason .body .ln.hit::before{content:"✓ ";color:#7a8b3a}
+  .reason .body .ln.miss{color:#8a6d3b;padding-left:16px;font-size:14px}
+  .reason .body .ln.miss::before{content:"∅ ";color:#c9a227}
+  .reason .body .ln.warn{color:#a4453a;padding-left:16px;font-size:14px}
+  .reason .body .ln.warn::before{content:"! ";color:#a4453a}
+  .reason .body .ln.doc{color:#6b7178;padding-left:34px;font-size:13.5px}
+  .reason .body .ln.doc::before{content:"· ";color:#b7bcc2}
+  .reason .body .ln.doc a{color:#4a6a8a}
+  .reason .body .ln.retry{color:#7a5c9e;font-weight:600}
+  .reason .body .ln.retry::before{content:"↻ ";color:#7a5c9e}
+  .reason .tally{margin-left:8px;font-weight:500;color:#8a9099;font-size:13px}
+
+  /* sources block under the answer */
+  .srcs{margin-top:18px;border-top:1px solid var(--line);padding-top:14px}
+  .srcs h4{margin:0 0 4px;font-size:13px;letter-spacing:.05em;text-transform:uppercase;color:#9aa0a6}
+  .srcs .grp{margin-top:12px}
+  .srcs .grp>.hd{font-size:13px;font-weight:700;color:#5b6168;display:flex;align-items:center;gap:8px;margin-bottom:6px}
+  .srcs .grp>.hd .n{font-weight:500;color:#9aa0a6}
+  .srcs .it{padding:7px 0;border-top:1px dashed var(--line)}
+  .srcs .it:first-of-type{border-top:0}
+  .srcs .it .t{font-size:14.5px;font-weight:600;color:#2f3437;word-break:break-word}
+  .srcs .it .t a{color:#3f6591;text-decoration:none}
+  .srcs .it .t a:hover{text-decoration:underline}
+  .srcs .it .sn{font-size:13.5px;color:#6b7178;margin-top:2px;line-height:1.45}
+  .srcs .it .meta{font-size:12px;color:#9aa0a6;margin-top:3px;display:flex;flex-wrap:wrap;gap:8px}
+  .srcs .it .meta .b{background:#f1f2f3;border-radius:999px;padding:1px 8px}
+  .srcs .it .meta .b.web{background:#eef4ea;color:#5d7238}
+  .srcs .it .meta .b.ext{background:#eef1f6;color:#41577a}
   .spin{width:16px;height:16px;border-radius:50%;border:2px solid #cdd3da;border-top-color:var(--brand);animation:sp .8s linear infinite;flex:0 0 auto}
   .spin.hidden{display:none}
   @keyframes sp{to{transform:rotate(360deg)}}
@@ -214,7 +246,8 @@ const CONFIG = {
   // Socrata) for open-geodata discovery — it complements the KB (see SearchAgent rule 9), it does
   // not replace it. NOTE: send the method names, NOT `[]` — server-side a non-null empty list means
   // "none match" and strips ALL search tools; `null`/omit means "all".
-  enabled_search_methods: ["keyword_search", "semantic_search", "neo4j_search", "spatial_search", "opengeodata_search"],
+  // `web_search` brings its `web_fetch` companion along automatically (server-side rule).
+  enabled_search_methods: ["keyword_search", "semantic_search", "neo4j_search", "spatial_search", "opengeodata_search", "web_search"],
   recent_k: 8,
 };
 function newSessionId(){
@@ -382,13 +415,26 @@ function addAiTurn(){
   return {turn,reason,spin,title,body,card,ans,images,files};
 }
 
-function pushLine(ui,text){
+function pushLine(ui,text,kind){
   if(!text) return;
   const last=ui.body.lastChild;
   if(last && last.textContent===text) return;       // dedupe consecutive
-  ui.body.appendChild(el("div","ln",null)).textContent=text;
-  ui.title.textContent=text.length>70?text.slice(0,70)+"…":text;
+  ui.body.appendChild(el("div","ln"+(kind?(" "+kind):""),null)).textContent=text;
+  // A per-document line is detail, not the current step — don't let it take over the header.
+  if(kind!=="doc") ui.title.textContent=text.length>70?text.slice(0,70)+"…":text;
   scrollDown();
+}
+
+/* A clickable document line (title -> its landing url) inside the reasoning log. */
+function pushDocLine(ui,title,url){
+  const ln=el("div","ln doc",null);
+  if(url && /^https?:\/\//i.test(url)){
+    const a=el("a",null,null); a.href=url; a.target="_blank"; a.rel="noopener noreferrer";
+    a.textContent=title||url; ln.appendChild(a);
+  }else{
+    ln.textContent=title||"(untitled)";
+  }
+  ui.body.appendChild(ln); scrollDown();
 }
 
 function addFeedback(col){
@@ -453,6 +499,211 @@ function renderFiles(ui,map){
   }
 }
 
+/* ===================== search activity in the reasoning log =====================
+   Tool payloads reach us through the trace's _short_text(), which collapses whitespace and cuts
+   at AGENT_TRACE_TEXT_LIMIT (1200 chars). A retrieval result carrying 8 documents with real
+   abstracts is well past that, so JSON.parse FAILS on most search results. Every reader below
+   therefore falls back to scraping the fields out of the truncated text — which is also why the
+   Sources block under the answer is built from the final evidence instead of from these lines. */
+const RETRIEVAL_TOOLS=new Set(["keyword_search","semantic_search","neo4j_search","spatial_search",
+  "opengeodata_search","web_search","agent_kb_search","neo4j_get_element_by_id",
+  "neo4j_explore_related_nodes","get_kb_block"]);
+
+function looseJson(text){
+  const s=String(text||"");
+  try{ return JSON.parse(s); }catch(_){}
+  // Truncated payload: pull out what we can without a parser.
+  const num=(k)=>{ const m=s.match(new RegExp('"'+k+'"\\s*:\\s*(-?\\d+)')); return m?Number(m[1]):null; };
+  const str=(k)=>{ const m=s.match(new RegExp('"'+k+'"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"')); return m?m[1]:null; };
+  const titles=[]; const re=/"title"\s*:\s*"((?:[^"\\]|\\.)*)"/g; let m;
+  while((m=re.exec(s))&&titles.length<40) titles.push(m[1]);
+  const urls=[]; const ru=/"url"\s*:\s*"(https?:(?:[^"\\]|\\.)*)"/g;
+  while((m=ru.exec(s))&&urls.length<40) urls.push(m[1].replace(/\\\//g,"/"));
+  return {__partial:true, count:num("count"), chars:num("chars"), status:num("status"),
+    candidates_found:num("candidates_found"), filtered_out:num("filtered_out"),
+    paragraphs_kept:num("paragraphs_kept"), paragraphs_total:num("paragraphs_total"),
+    source:str("source"), provider:str("provider"), error:str("error"), title:str("title"),
+    url:str("url"), search_query:str("search_query"), __titles:titles, __urls:urls};
+}
+
+/* The interesting argument of a search/fetch call, for the "→ tool(...)" line. */
+function toolArgSummary(name,args){
+  if(args==null) return "";
+  if(typeof args==="string") return args.length>90?args.slice(0,90)+"…":args;
+  if(typeof args!=="object") return String(args);
+  const pick=["query","url","element_id","doc_id","focus","recency_days","limit","depth"];
+  const parts=[];
+  for(const k of pick){
+    if(args[k]===undefined||args[k]===null||args[k]==="") continue;
+    let v=String(args[k]);
+    if(v.length>80) v=v.slice(0,80)+"…";
+    parts.push(k==="query"||k==="url"?'"'+v+'"':k+"="+v);
+  }
+  return parts.join(", ");
+}
+
+/* Documents/results carried by a tool payload, normalized to {title,url}. */
+function payloadItems(obj){
+  const rows=[];
+  const push=(d)=>{ if(!d) return; const t=d.title||d.name||d.doc_id||d.id; if(t||d.url) rows.push({title:t,url:d.url}); };
+  if(Array.isArray(obj.documents)) obj.documents.forEach(push);
+  if(Array.isArray(obj.results)) obj.results.forEach(push);
+  if(!rows.length && Array.isArray(obj.__titles)){
+    obj.__titles.forEach((t,i)=>rows.push({title:t,url:(obj.__urls||[])[i]}));
+  }
+  return rows;
+}
+
+/* Render one tool_result as a summary line (+ up to 3 document lines). Returns a tally delta. */
+function reportToolResult(ui,name,content){
+  const obj=looseJson(content);
+  const tally={searches:0,hits:0,fetches:0};
+  const partial=obj.__partial?" (log truncated)":"";
+
+  if(obj.error){
+    const blocked=obj.blocked?"refused":"error";
+    pushLine(ui,name+" "+blocked+": "+obj.error,"warn");
+    return tally;
+  }
+
+  if(name==="web_fetch"){
+    tally.fetches=1;
+    const host=(()=>{ try{ return new URL(obj.url).hostname; }catch(_){ return obj.url||"page"; } })();
+    const kept=(obj.paragraphs_kept!=null&&obj.paragraphs_total!=null)
+      ? (" · kept "+obj.paragraphs_kept+"/"+obj.paragraphs_total+" paragraphs") : "";
+    pushLine(ui,"read "+host+" — "+(obj.chars!=null?obj.chars:"?")+" chars"+kept
+      +(obj.cached?" · from cache":""),"hit");
+    if(obj.title) pushDocLine(ui,obj.title,obj.url);
+    return tally;
+  }
+
+  if(RETRIEVAL_TOOLS.has(name)){
+    tally.searches=1;
+    const items=payloadItems(obj);
+    const n=(obj.count!=null?obj.count:items.length);
+    tally.hits=n||0;
+    if(!n){
+      pushLine(ui,name+" → no results"+partial,"miss");
+      return tally;
+    }
+    const extra=[];
+    if(obj.provider) extra.push(obj.provider);
+    if(obj.candidates_found!=null&&obj.filtered_out) extra.push(obj.candidates_found+" found, "+obj.filtered_out+" filtered out");
+    if(obj.search_query) extra.push('searched "'+obj.search_query+'"');
+    pushLine(ui,name+" → "+n+" result"+(n===1?"":"s")+(extra.length?" ("+extra.join("; ")+")":"")+partial,"hit");
+    items.slice(0,3).forEach(it=>pushDocLine(ui,it.title,it.url));
+    if(items.length>3) pushLine(ui,"+"+(items.length-3)+" more","doc");
+    return tally;
+  }
+  return tally;
+}
+
+/* Live count beside the "Reasoning" header, so the folded accordion still says what happened. */
+function updateTally(ui,state){
+  const t=state.tally, bits=[];
+  if(t.searches) bits.push(t.searches+" search"+(t.searches===1?"":"es"));
+  if(t.hits) bits.push(t.hits+" result"+(t.hits===1?"":"s"));
+  if(t.fetches) bits.push(t.fetches+" page"+(t.fetches===1?"":"s")+" read");
+  if(!bits.length) return;
+  if(!ui.tally){ ui.tally=el("span","tally",null); ui.title.parentNode.insertBefore(ui.tally,ui.title.nextSibling); }
+  ui.tally.textContent="· "+bits.join(" · ");
+}
+
+/* ===================== sources under the answer =====================
+   Built from the run's EVIDENCE (what actually grounded the answer), not from the reasoning log,
+   whose payloads are truncated. Internal KB hits carry no url client-side — the platform link is
+   composed server-side from FRONTEND_DOMAIN — so those are listed without a link rather than with
+   a guessed one. */
+function evidenceDocs(response){
+  const out=[];
+  const seen=new Set();
+  const add=(d)=>{
+    if(!d||typeof d!=="object") return;
+    const src=(d.document&&typeof d.document==="object")?d.document:d;
+    const id=String(src.doc_id||src.id||src.url||src.title||"");
+    if(!id||seen.has(id)) return;
+    seen.add(id); out.push(src);
+  };
+  const ar=response&&response.agent_result;
+  const orch=ar&&ar.orchestration_result;
+  if(orch&&Array.isArray(orch.evidence)) orch.evidence.forEach(add);
+  // opengeodata_results is a server-side projection that (deliberately) covers only the catalogs;
+  // union it in so nothing is lost if the evidence shape changes.
+  if(Array.isArray(response&&response.opengeodata_results)) response.opengeodata_results.forEach(add);
+  return out;
+}
+
+function sourceGroup(src){
+  const et=String(src.element_type||src["resource-type"]||"").toLowerCase();
+  const sn=String(src.source||src.source_system||"").toLowerCase();
+  if(et==="web"||sn==="web") return "web";
+  if(et==="opengeodata"||sn==="opengeodata") return "external";
+  return "internal";
+}
+
+function renderSources(ui,response){
+  const docs=evidenceDocs(response);
+  if(!docs.length) return;
+  const groups={internal:[],external:[],web:[]};
+  docs.forEach(d=>groups[sourceGroup(d)].push(d));
+
+  const box=el("div","srcs");
+  box.appendChild(el("h4",null,"Sources used"));
+  const LABEL={internal:"I-GUIDE knowledge base",external:"External open-data catalogs",web:"Open web"};
+  const ORDER=["internal","external","web"];
+  let any=false;
+
+  for(const key of ORDER){
+    const rows=groups[key];
+    if(!rows.length) continue;
+    any=true;
+    const grp=el("div","grp");
+    const hd=el("div","hd",null);
+    hd.appendChild(document.createTextNode(LABEL[key]));
+    hd.appendChild(el("span","n",null)).textContent=rows.length+" item"+(rows.length===1?"":"s");
+    grp.appendChild(hd);
+
+    for(const src of rows.slice(0,12)){
+      const it=el("div","it");
+      const t=el("div","t",null);
+      const title=String(src.title||src.doc_id||"(untitled)");
+      const url=String(src.url||"");
+      if(/^https?:\/\//i.test(url)){
+        const a=el("a",null,null); a.href=url; a.target="_blank"; a.rel="noopener noreferrer";
+        a.textContent=title; t.appendChild(a);
+      }else{
+        t.textContent=title;
+      }
+      it.appendChild(t);
+
+      const snip=String(src.abstract||src.snippet||src.contents||"").trim();
+      if(snip){
+        const sn=el("div","sn",null);
+        sn.textContent=snip.length>260?snip.slice(0,260)+"…":snip;
+        it.appendChild(sn);
+      }
+
+      const meta=el("div","meta",null);
+      const badge=(txt,cls)=>{ if(!txt) return; meta.appendChild(el("span","b"+(cls?" "+cls:""),null)).textContent=txt; };
+      if(key==="web"){
+        let host=""; try{ host=new URL(url).hostname; }catch(_){}
+        badge(host||"web","web");
+      }else if(key==="external"){
+        badge(String(src.provider||src.source_system||"catalog"),"ext");
+        if(src.license) badge(String(src.license));
+      }else{
+        badge(String(src.element_type||"element"));
+      }
+      if(Array.isArray(src.bbox)&&src.bbox.length===4) badge("georeferenced");
+      if(meta.childNodes.length) it.appendChild(meta);
+      grp.appendChild(it);
+    }
+    if(rows.length>12) grp.appendChild(el("div","sn",null)).textContent="+"+(rows.length-12)+" more not shown";
+    box.appendChild(grp);
+  }
+  if(any) ui.card.insertBefore(box,ui.images);
+}
+
 /* ===================== event -> reasoning line ===================== */
 function reasoningLine(eventName,p){
   if(eventName==="node") return p.message || (p.stage?("Node: "+p.stage):null);
@@ -465,6 +716,7 @@ function reasoningLine(eventName,p){
   }
   if(eventName==="grounding_audit") return "Grounding check: "+(p.message||p.severity||"done");
   if(eventName==="search") return p.message || "Searching the knowledge base";
+  if(eventName==="tool_error") return null;   // handled with its own styling in handleBlock
   if(eventName==="analysis") return p.message || null;
   if(eventName==="file") return null;
   if(eventName==="error") return "Error: "+(p.message||p.error||"failed");
@@ -518,15 +770,48 @@ function handleBlock(block, ui, downloads, state){
     if(t){ state.answer=t; }
   }
   if(eventName==="error"){ state.error=p.error||p.message||"Request failed"; }
+  // The terminal "response" event carries the whole run, including the evidence the answer was
+  // grounded in — that is what the Sources block is built from.
+  if(eventName==="response"){ state.response=p; }
+
+  // --- search activity -----------------------------------------------------------
+  // These events were previously dropped on the floor (reasoningLine returned null), so the log
+  // said only "Searching" and "N docs in evidence" — never WHICH method ran, with what query, or
+  // what came back.
+  if(eventName==="tool_call"){
+    const name=p.name||(p.tool_calls&&p.tool_calls[0]&&p.tool_calls[0].name)||"tool";
+    const args=p.args!==undefined?p.args:(p.tool_calls&&p.tool_calls[0]&&p.tool_calls[0].args);
+    if(RETRIEVAL_TOOLS.has(name)||name==="web_fetch"){
+      const a=toolArgSummary(name,args);
+      pushLine(ui,name+"("+a+")","tool");
+      state.tools.push(name);
+    }
+  }
+  if(eventName==="tool_result"){
+    const name=p.tool_name||p.name||"tool";
+    if(RETRIEVAL_TOOLS.has(name)||name==="web_fetch"){
+      const d=reportToolResult(ui,name,p.content!==undefined?p.content:p.message);
+      state.tally.searches+=d.searches; state.tally.hits+=d.hits; state.tally.fetches+=d.fetches;
+      updateTally(ui,state);
+    }
+  }
+  if(eventName==="tool_error"){
+    const name=p.tool_name||p.name||"tool";
+    pushLine(ui,name+" failed: "+(p.message||"unknown error"),"warn");
+  }
 
   const ln=reasoningLine(eventName,p);
-  if(ln) pushLine(ui,ln);
+  if(ln){
+    // A refined-query retry is a distinct event in the search loop; make it read like one.
+    pushLine(ui,ln,/^Retrying with a refined query/i.test(ln)?"retry":null);
+  }
   if(Object.keys(downloads).length) renderFiles(ui,downloads);
 }
 
 async function streamTurn(text, ui, fileIds){
   aborter=new AbortController();
-  const downloads=new Map(); const state={answer:"",error:"",thread:null,memory:null};
+  const downloads=new Map();
+  const state={answer:"",error:"",thread:null,memory:null,response:null,tools:[],tally:{searches:0,hits:0,fetches:0}};
   const url=reqUrl("endpoint","/agent/chat/stream");
   pushLine(ui,"Sending request");
   const resp=await fetch(url,{method:"POST",headers:authHeaders(true),body:JSON.stringify(buildPayload(text, fileIds)),signal:aborter.signal});
@@ -576,6 +861,7 @@ async function submit(){
       ui.title.textContent="Reasoning"; ui.reason.open=false;
       ui.card.style.display="";
       ui.ans.innerHTML=renderMarkdown(state.answer || "_No answer returned._");
+      renderSources(ui,state.response);
       renderFiles(ui,downloads);
       addFeedback(ui.card.parentElement);
     }
