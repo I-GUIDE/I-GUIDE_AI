@@ -61,6 +61,8 @@ DEFAULT_PROVIDERS: Dict[str, Any] = {
     "cmr": True,
     "socrata": True,
     "datagov": True,
+    # DOI-registered datasets worldwide (Zenodo, PANGAEA, USGS, NERC, Dryad, ...) — keyless.
+    "datacite": True,
 }
 DEFAULT_NL_MODEL = "Qwen/Qwen3.5-9B"
 

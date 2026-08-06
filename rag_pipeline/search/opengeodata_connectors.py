@@ -266,3 +266,178 @@ def search_datagov_catalog(
             )
         )
     return assets
+
+DATACITE_API = "https://api.datacite.org/dois"
+
+
+def _datacite_bbox(geo_locations: Any) -> Optional[Tuple[float, float, float, float]]:
+    """First usable extent from DataCite ``geoLocations``.
+
+    Prefers an explicit ``geoLocationBox``; falls back to a ``geoLocationPoint`` expressed as a
+    degenerate box so point-located records still carry coordinates. ``geoLocationPlace`` (a bare
+    place name) yields nothing — geocoding names here would invent precision the record lacks.
+    """
+    if not isinstance(geo_locations, list):
+        return None
+    for entry in geo_locations:
+        if not isinstance(entry, dict):
+            continue
+        box = entry.get("geoLocationBox")
+        if isinstance(box, dict):
+            try:
+                west = float(box["westBoundLongitude"]); east = float(box["eastBoundLongitude"])
+                south = float(box["southBoundLatitude"]); north = float(box["northBoundLatitude"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if -180 <= west <= 180 and -180 <= east <= 180 and -90 <= south <= 90 and -90 <= north <= 90:
+                return (min(west, east), min(south, north), max(west, east), max(south, north))
+        point = entry.get("geoLocationPoint")
+        if isinstance(point, dict):
+            try:
+                lon = float(point["pointLongitude"]); lat = float(point["pointLatitude"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if -180 <= lon <= 180 and -90 <= lat <= 90:
+                return (lon, lat, lon, lat)
+    return None
+
+
+def _datacite_dates(attributes: Mapping[str, Any]) -> Optional[Tuple[Optional[str], Optional[str]]]:
+    """(start, end) from DataCite ``dates`` — a Collected/Created range when present, else the
+    publication year as a single point in time."""
+    dates = attributes.get("dates")
+    start = end = None
+    if isinstance(dates, list):
+        for item in dates:
+            if not isinstance(item, dict):
+                continue
+            value = str(item.get("date") or "").strip()
+            if not value:
+                continue
+            if str(item.get("dateType") or "").lower() in ("collected", "created", "coverage"):
+                if "/" in value:                      # ISO interval "2001-01-01/2010-12-31"
+                    left, _, right = value.partition("/")
+                    start, end = start or left.strip() or None, end or right.strip() or None
+                else:
+                    start = start or value
+            elif not start:
+                start = value
+    if not start:
+        year = attributes.get("publicationYear")
+        if year:
+            start = f"{year}-01-01"
+    return (start, end) if (start or end) else None
+
+
+def _datacite_license(attributes: Mapping[str, Any]) -> Optional[str]:
+    rights = attributes.get("rightsList")
+    if isinstance(rights, list):
+        for item in rights:
+            if isinstance(item, dict):
+                label = item.get("rightsIdentifier") or item.get("rights") or item.get("rightsUri")
+                if label:
+                    return str(label)
+    return None
+
+
+def _datacite_text(entries: Any, *, prefer: str = "Abstract") -> Optional[str]:
+    """Longest description, preferring the Abstract type."""
+    if not isinstance(entries, list):
+        return None
+    preferred, others = [], []
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("description") or "").strip()
+        if not text:
+            continue
+        (preferred if str(item.get("descriptionType") or "") == prefer else others).append(text)
+    pool = preferred or others
+    return max(pool, key=len) if pool else None
+
+
+def search_datacite(
+    q: Optional[str] = None,
+    bbox: Optional[Tuple[float, float, float, float]] = None,
+    time_range: Optional[Tuple[Optional[str], Optional[str]]] = None,
+    limit: int = 10,
+    resource_type: str = "dataset",
+) -> List[GeoAsset]:
+    """Free-text search across DOI-registered datasets via DataCite (keyless, global).
+
+    Broadens discovery far beyond the hard-coded portals — DataCite indexes millions of datasets
+    from Zenodo, PANGAEA, USGS, NERC, Dryad and thousands of other repositories — and maps 1:1
+    onto ``GeoAsset``: DOI as a stable id, full abstract, subjects as keywords, ``geoLocationBox``
+    as the extent, ``rightsList`` as the license, publisher as the provider. Note that many
+    records (Zenodo especially) declare no geolocation, so ``bbox`` is often None; it is used here
+    only as a relevance hint, since the API offers no reliable bbox filter.
+    """
+    logger.info(f"DataCite search called with: q='{q}', bbox={bbox}, limit={limit}")
+    if not (q or "").strip():
+        return []
+    params: Dict[str, Any] = {
+        "query": q,
+        "page[size]": min(max(limit, 1), 50),
+        "affiliation": "false",
+    }
+    if resource_type:
+        params["resource-type-id"] = resource_type
+    if time_range and time_range[0]:
+        year = str(time_range[0])[:4]
+        if year.isdigit():
+            params["query"] = f"{q} AND publicationYear:[{year} TO *]"
+
+    response = session().get(DATACITE_API, params=params, headers={"Accept": "application/json"})
+    response.raise_for_status()
+    records = (response.json() or {}).get("data") or []
+
+    assets: List[GeoAsset] = []
+    # Repositories mint a DOI per VERSION (Zenodo especially), so the same dataset can occupy
+    # several result slots. Keep the first (best-ranked) of each title+publisher pair.
+    seen: set = set()
+    for record in records:
+        if len(assets) >= limit:
+            break
+        attributes = (record or {}).get("attributes") or {}
+        doi = str(attributes.get("doi") or record.get("id") or "").strip()
+        titles = attributes.get("titles")
+        title = ""
+        if isinstance(titles, list) and titles:
+            first = titles[0]
+            title = str(first.get("title") if isinstance(first, dict) else first or "").strip()
+        dedupe_key = (title.strip().lower(), str(attributes.get("publisher") or "").strip().lower())
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        subjects = attributes.get("subjects")
+        keywords = [
+            str(item.get("subject") if isinstance(item, dict) else item).strip()
+            for item in (subjects if isinstance(subjects, list) else [])
+            if (item.get("subject") if isinstance(item, dict) else item)
+        ]
+        landing = str(attributes.get("url") or (f"https://doi.org/{doi}" if doi else "")).strip()
+        links: Dict[str, str] = {}
+        if landing:
+            links["Landing Page"] = landing
+        content_url = attributes.get("contentUrl")
+        if isinstance(content_url, list) and content_url:
+            links["Content"] = str(content_url[0])
+        elif isinstance(content_url, str) and content_url:
+            links["Content"] = content_url
+
+        assets.append(
+            GeoAsset(
+                id=doi or landing or f"datacite-{len(assets)}",
+                title=title or "Untitled dataset",
+                abstract=_datacite_text(attributes.get("descriptions")),
+                keywords=keywords,
+                bbox=_datacite_bbox(attributes.get("geoLocations")),
+                datetime=_datacite_dates(attributes),
+                license=_datacite_license(attributes),
+                links=links,
+                source="datacite",
+                provider=str(attributes.get("publisher") or "") or None,
+            )
+        )
+    logger.info(f"DataCite returned {len(assets)} assets")
+    return assets

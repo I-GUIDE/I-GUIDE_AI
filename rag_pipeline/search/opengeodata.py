@@ -771,6 +771,47 @@ def _normalize_assets(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
     return hits
 
 
+# --- discovery-intent gate -------------------------------------------------------
+# External catalog search only makes sense when the user wants to FIND DATA. Running it for
+# platform questions ("what are the related elements of X", "how to build the smart search") or
+# for operations on an uploaded file produced confident-looking but unrelated datasets, because
+# the catalogs match on incidental words. Relevance scoring alone cannot fix those: the terms do
+# genuinely appear. So skip the search entirely unless the request looks like data discovery.
+_EXTERNAL_DATA_INTENT_RE = re.compile(
+    r"\bopen\s+data\b|\bexternal\s+(?:data|datasets?|sources?)\b|\bpublic\s+data\b"
+    r"|\b(?:find|search|look\s+for|locate|discover|any|which|recommend|suggest|list|show)\b[^.?!]{0,60}"
+    r"\b(?:datasets?|data|imagery|rasters?|satellite|layers?|catalogs?)\b"
+    r"|\bdatasets?\s+(?:about|on|for|of|related\s+to|covering)\b"
+    r"|\bdata\s+(?:about|on|for|sources?|availability)\b"
+    r"|\bdata\.gov\b|\bsocrata\b|\bnasa\b|\bcmr\b|\bdatacite\b|\bzenodo\b|\bstac\b",
+    re.I,
+)
+_PLATFORM_OR_TASK_RE = re.compile(
+    r"\bknowledge\s+elements?\b|\brelated\s+elements?\b|\bmost\s+popular\b|\bsmart\s+search\b"
+    r"|\bi-?guide\b|\bthis\s+(?:file|csv|dataset|geojson|shapefile|upload)\b|\buploaded\b"
+    r"|\bhow\s+(?:to|do|can)\b|\bexplain\b|\bwhat\s+is\b|\bwho\s+(?:are|made)\b"
+    r"|\bwrite\s+(?:code|a\s+script)\b|\bbuild\b|\bimplement\b|\bdebug\b"
+    r"|\bbuffer\b|\bchoropleth\b|\bheat\s?map\b|\bplot\b|\brender\b|\bvisuali[sz]e\b"
+    r"|\b(?:produce|draw|create|generate|make)\b[^.?!]{0,40}\b(?:map|chart|graph|figure|plot)\b"
+    r"|\bcartographic\b|\bbubble\s+map\b|\bbasemap\b"
+    r"|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+    re.I,
+)
+
+
+def wants_external_data(query: str) -> bool:
+    """Whether *query* is a request to DISCOVER external data (so catalog search is warranted).
+
+    An explicit external-data cue always wins — "find open datasets about dams in Illinois" is
+    discovery even though it also says "in". Otherwise a platform/task request (knowledge
+    elements, how-to, code, an operation on an uploaded file, an element UUID) skips the search.
+    """
+    text = str(query or "")
+    if _EXTERNAL_DATA_INTENT_RE.search(text):
+        return True
+    return not _PLATFORM_OR_TASK_RE.search(text)
+
+
 def get_opengeodata_results(
     query: str,
     *,
@@ -780,6 +821,9 @@ def get_opengeodata_results(
     query = (query or "").strip()
     if not query:
         logger.info("OpenGeoData get_opengeodata_results: empty query, returning empty list")
+        return []
+    if not wants_external_data(query):
+        logger.info("OpenGeoData skipped: %r is not an external-data discovery request", query[:80])
         return []
 
     payload = _payload_from_context(query, limit=limit, session_ctx=session_ctx)

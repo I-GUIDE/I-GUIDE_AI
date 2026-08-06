@@ -16,7 +16,12 @@ except Exception:  # pragma: no cover
     dotenv_values = None  # type: ignore
 
 from .opengeodata_utils import *
-from .opengeodata_connectors import search_cmr_collections, search_datagov_catalog, search_socrata
+from .opengeodata_connectors import (
+    search_cmr_collections,
+    search_datacite,
+    search_datagov_catalog,
+    search_socrata,
+)
 
 
 def hydrate_api_credentials_from_env_files() -> None:
@@ -198,12 +203,23 @@ def discover(
             logger.exception("Socrata search failed")
 
     
-    logger.info(f"OpenGeoData discover() completed: total results={len(results)} (CMR:{cmr_count}) (Data.gov: {datagov_count}) (Socrata: {socrata_count})")
+    datacite_count = 0
+    if providers.get("datacite"):
+        try:
+            datacite_results = search_datacite(q=query, bbox=bbox, time_range=time_range, limit=limit)
+            datacite_count = len(datacite_results)
+            results += datacite_results
+            logger.info(f"OpenGeoData DataCite provider returned {datacite_count} results")
+        except Exception:
+            logger.exception("DataCite search failed")
+
+    logger.info(f"OpenGeoData discover() completed: total results={len(results)} (CMR:{cmr_count}) (Data.gov: {datagov_count}) (Socrata: {socrata_count}) (DataCite: {datacite_count})")
 
     max_results = limit * (
         int(bool(providers.get("cmr")))
         + int(bool(providers.get("datagov")))
         + int(bool(providers.get("socrata")))
+        + int(bool(providers.get("datacite")))
     )
 
     return results[: max(1, max_results)]
