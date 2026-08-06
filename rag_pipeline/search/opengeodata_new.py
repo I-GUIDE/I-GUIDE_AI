@@ -320,6 +320,30 @@ NOMINATIM_USER_AGENT = "opengeodata-prototype (contact: help@i-guide.io)"
 geocode_cache: Dict[str, Optional[Tuple[float, float, float, float]]] = {}
 last_geocode_call = 0.0
 
+# Named physical/administrative features that are inherently large. A "basin" or "watershed" that
+# geocodes to a few hundred metres is a name collision, not the feature.
+_LARGE_FEATURE_WORDS = (
+    "basin", "watershed", "river", "delta", "estuary", "valley", "range", "mountains", "gulf",
+    "bay", "sound", "strait", "lake", "sea", "ocean", "reef", "desert", "forest", "plains",
+    "plateau", "peninsula", "aquifer", "glacier", "prairie", "wetlands", "coast", "region",
+)
+# ~0.05 degrees is roughly 5 km of latitude. Any of the features above spans far more than that.
+_MIN_FEATURE_SPAN_DEG = 0.05
+
+
+def _implausibly_small_for(place: str, bbox: Tuple[float, float, float, float]) -> bool:
+    """Whether *bbox* is too small to be the named feature in *place*."""
+    words = set(re.findall(r"[a-z]+", str(place or "").lower()))
+    if not words.intersection(_LARGE_FEATURE_WORDS):
+        return False          # an ordinary place name may legitimately be small
+    try:
+        min_lon, min_lat, max_lon, max_lat = bbox
+    except (TypeError, ValueError):
+        return False
+    return (abs(max_lon - min_lon) < _MIN_FEATURE_SPAN_DEG
+            and abs(max_lat - min_lat) < _MIN_FEATURE_SPAN_DEG)
+
+
 def geocode_place(place: str) -> Optional[Tuple[float, float, float, float]]:
     """Resolve a place name (e.g. 'Chicago, IL', 'Illinois') to an approximate
     (minlon, minlat, maxlon, maxlat) bbox via OpenStreetMap's Nominatim search.
@@ -357,6 +381,18 @@ def geocode_place(place: str) -> Optional[Tuple[float, float, float, float]]:
             return None
         south, north, west, east = map(float, raw_bbox)
         bbox = valid_bbox([west, south, east, north])
+        if bbox and _implausibly_small_for(place, bbox):
+            # Nominatim answers a physical-feature query with whatever POI or street shares the
+            # name, and it answers CONFIDENTLY: "Amazon basin" returns a 0.002-degree box in
+            # Florida, "Mississippi River basin" one in Jackson, Mississippi. Using those to filter
+            # a search is worse than not filtering at all — it silently scopes results to a random
+            # few hundred metres, so a wrong match is discarded rather than trusted.
+            logger.warning(
+                "Geocoding for place=%r returned an implausibly small bbox %s for a named feature; "
+                "discarding it rather than filtering on the wrong area", place, bbox,
+            )
+            geocode_cache[place] = None
+            return None
         geocode_cache[place] = bbox
         logger.info(f"Geocoded place={place!r} -> bbox={bbox}")
         return bbox

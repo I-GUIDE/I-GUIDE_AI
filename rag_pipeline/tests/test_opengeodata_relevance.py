@@ -98,3 +98,61 @@ def test_gate_can_return_zero_results(monkeypatch):
                         lambda *a, **k: [_asset(title="Procurement Contracts", abstract="smart")])
     res = ND.run_opengeodata(query="I-GUIDE Smart Search", call_llm=0, limit=5)
     assert res["count"] == 0 and res["assets"] == [] and res["filtered_out"] == 1
+
+
+# --- geocoding sanity: a confident wrong answer is worse than none -----------------
+# Nominatim answers a physical-feature query with whatever POI or street shares the name, and it
+# answers confidently. Measured live: "Amazon basin" -> a 0.002-degree box in FLORIDA,
+# "Mississippi River basin" -> one in Jackson, Mississippi, "Chesapeake Bay watershed" -> a point in
+# Pennsylvania. Filtering a catalog search on one of those silently scopes it to a few hundred
+# metres of the wrong continent, discarding every genuine match.
+
+
+@pytest.mark.parametrize("place,bbox", [
+    ("Amazon basin",             (-82.425099, 28.1617196, -82.4227537, 28.1637803)),
+    ("Mississippi River basin",  (-90.3192432, 32.3029268, -90.3108162, 32.3085086)),
+    ("Chesapeake Bay watershed", (-75.8521836, 41.0541541, -75.8520836, 41.0542541)),
+])
+def test_a_named_feature_geocoded_to_a_tiny_box_is_rejected(place, bbox):
+    assert ND._implausibly_small_for(place, bbox) is True
+
+
+@pytest.mark.parametrize("place,bbox", [
+    ("Illinois",     (-91.513, 36.970, -87.020, 42.508)),
+    ("Chicago",      (-87.940, 41.644, -87.524, 42.023)),
+    ("Amazon Basin", (-73.0, -10.0, -50.0, 5.0)),      # the REAL feature, correctly resolved
+    ("Lake Michigan", (-88.0, 41.6, -84.7, 46.1)),
+])
+def test_plausible_extents_are_kept(place, bbox):
+    assert ND._implausibly_small_for(place, bbox) is False
+
+
+def test_an_ordinary_place_may_legitimately_be_tiny():
+    """The guard applies only to names containing a large-feature word, so a street address — which
+    really is a few metres across — is not second-guessed."""
+    assert ND._implausibly_small_for("221B Baker Street",
+                                     (-0.1585, 51.5237, -0.1583, 51.5239)) is False
+
+
+def test_the_rejection_is_cached_as_a_miss(monkeypatch):
+    """A discarded geocode must not be retried on every query that mentions the place."""
+    class _Resp:
+        def raise_for_status(self): pass
+        def json(self):
+            return [{"boundingbox": ["28.1617196", "28.1637803", "-82.425099", "-82.4227537"]}]
+
+    class _S:
+        def __init__(self): self.calls = 0
+        def get(self, *a, **k):
+            self.calls += 1
+            return _Resp()
+
+    sess = _S()
+    monkeypatch.setattr(ND, "session", lambda *a, **k: sess)
+    ND.geocode_cache.pop("Amazon basin", None)
+    monkeypatch.setattr(ND, "last_geocode_call", 0.0)
+
+    assert ND.geocode_place("Amazon basin") is None
+    assert ND.geocode_place("Amazon basin") is None
+    assert sess.calls == 1                      # second call served from the negative cache
+    ND.geocode_cache.pop("Amazon basin", None)

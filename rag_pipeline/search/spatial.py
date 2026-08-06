@@ -198,12 +198,101 @@ def spatial_search_endpoint():
         return jsonify({"error": str(exc)}), 500
 
 
+# Physical-geography nouns. A named feature is only geocodable WITH its feature word: spaCy tags
+# "Amazon" in "the Amazon basin" as LOC and stops there, and Google returns no result for a bare
+# "Amazon" (it is hopelessly ambiguous), so the whole spatial search silently produced nothing for
+# the vocabulary geospatial users actually type.
+_FEATURE_WORDS = (
+    "basin", "watershed", "river", "delta", "estuary", "valley", "range", "mountains", "mountain",
+    "gulf", "bay", "sound", "strait", "lake", "lakes", "sea", "ocean", "reef", "desert", "forest",
+    "plain", "plains", "plateau", "peninsula", "island", "islands", "aquifer", "canyon", "glacier",
+    "prairie", "wetland", "wetlands", "coast", "county", "parish", "province", "region",
+)
+
+# Capitalized technical tokens that are never places. Candidate phrases are validated by the
+# geocoder, so this only saves wasted lookups on the terms we know will fail.
+_NOT_PLACES = {
+    # coordinate systems / formats / tooling
+    "utm", "epsg", "crs", "srs", "wgs", "nad", "dem", "dtm", "dsm", "gis", "api", "rest",
+    "csv", "tsv", "json", "geojson", "cog", "tiff", "geotiff", "netcdf", "hdf", "zarr", "las",
+    "laz", "shp", "shapefile", "gpkg", "wkt", "wkb",
+    "gdal", "ogr", "proj", "pdal", "postgis", "qgis", "arcgis", "grass", "saga", "whitebox",
+    "python", "r", "sql", "geopandas", "rasterio", "xarray", "numpy", "pandas",
+    # standards bodies and mission/sensor names, which are organizations not places
+    "stac", "ogc", "iso", "inspire", "nasa", "usgs", "noaa", "fema", "epa", "esa", "eumetsat",
+    "modis", "landsat", "sentinel", "viirs", "srtm", "aster", "naip", "nhd", "nhdplus", "nlcd",
+    "i-guide", "iguide", "cyberGIS".lower(), "hydroshare",
+    # sentence filler that survives capitalization at the start of a query
+    "part", "zone", "what", "which", "how", "where", "the", "a", "an", "and", "or", "for",
+}
+
+
+def _feature_phrase(doc, ent) -> Optional[str]:
+    """``ent`` plus a following feature word, when there is one ("Amazon" -> "Amazon basin")."""
+    tail = doc[ent.end] if ent.end < len(doc) else None
+    if tail is not None and tail.text.lower() in _FEATURE_WORDS:
+        return f"{ent.text} {tail.text}"
+    return None
+
+
+def _capitalized_candidates(user_query: str, limit: int = 3) -> List[str]:
+    """Fallback place candidates from capitalization, for when NER finds nothing.
+
+    The retrieval peer rewrites questions into keyword form ("UTM zone Champaign Illinois"), which
+    strips the determiners and prepositions spaCy's NER leans on — it returned NO entities for that
+    string while extracting both places from the original sentence. Candidates here are deliberately
+    liberal because the geocoder is the arbiter: a non-place simply fails to resolve.
+    """
+    import re
+
+    runs: List[str] = []
+    for match in re.finditer(r"\b([A-Z][A-Za-z.'-]*(?:\s+[A-Z][A-Za-z.'-]*){0,2})\b", user_query):
+        phrase = match.group(1).strip()
+        words = [w for w in phrase.split() if w.lower() not in _NOT_PLACES]
+        if not words:
+            continue
+        candidate = " ".join(words)
+        if len(candidate) < 3:
+            continue
+        # A lowercase feature word right after the capitalized run belongs to the place name:
+        # "Amazon basin" geocodes, "Amazon" does not. Applied here too, so the fallback behaves the
+        # same when spaCy's model is not installed.
+        tail = user_query[match.end():].lstrip()
+        next_word = tail.split()[0].strip(".,;:)!?") if tail else ""
+        if next_word.lower() in _FEATURE_WORDS:
+            longer = f"{candidate} {next_word}"
+            if longer not in runs:
+                runs.append(longer)
+        if candidate not in runs:
+            runs.append(candidate)
+    # Longest first: "Champaign Illinois" is a better geocode than "Illinois" alone.
+    runs.sort(key=lambda s: -len(s))
+    return runs[:limit]
+
+
 def extract_locations_from_query(user_query: str) -> List[str]:
+    """Place names in *user_query*, best candidate first.
+
+    A named entity is emitted WITH its feature word when it has one, because that is the form the
+    geocoder can resolve. When NER yields nothing usable, capitalized phrases are offered instead.
+    """
     if nlp is None:
         logger.debug("Spacy model unavailable; skipping spatial entity extraction.")
-        return []
+        return _capitalized_candidates(user_query)
+
     doc = nlp(user_query)
-    return list({ent.text for ent in doc.ents if ent.label_ in ("GPE", "LOC")})
+    ordered: List[str] = []
+    for ent in doc.ents:
+        if ent.label_ not in ("GPE", "LOC", "FAC"):
+            continue
+        phrase = _feature_phrase(doc, ent)
+        # Prefer the fuller phrase, but keep the bare entity as a fallback candidate after it.
+        for value in ((phrase, ent.text) if phrase else (ent.text,)):
+            if value and value not in ordered:
+                ordered.append(value)
+    if not ordered:
+        return _capitalized_candidates(user_query)
+    return ordered
 
 
 def get_bounding_box(location: str) -> Optional[Dict[str, Any]]:
@@ -252,12 +341,40 @@ def get_bounding_box(location: str) -> Optional[Dict[str, Any]]:
     }
 
 
-def get_spatial_search_results(user_query: str, size: int = 10) -> List[Dict[str, Any]]:
-    locations = extract_locations_from_query(user_query)
-    if not locations:
-        return []
+def resolve_query_bbox(user_query: str) -> Optional[Dict[str, Any]]:
+    """The bounding box for the first candidate place in *user_query* that actually geocodes.
 
-    bounding_box = get_bounding_box(locations[0])
+    Trying only ``locations[0]`` meant one unresolvable candidate ended the whole spatial search:
+    "the Amazon basin" yielded the bare entity "Amazon", Google returned nothing for it, and the
+    method reported no results rather than moving on to a candidate that would have resolved.
+    """
+    for candidate in extract_locations_from_query(user_query):
+        bbox = _cached_bounding_box(candidate)
+        if bbox:
+            logger.info("Spatial search resolved %r -> %s", candidate, "bbox")
+            return bbox
+    return None
+
+
+# Geocoding is a paid, rate-limited third-party call and the same places recur constantly. Failures
+# are cached too, so an unresolvable candidate is not retried on every query that mentions it.
+_BBOX_CACHE: Dict[str, Optional[Dict[str, Any]]] = {}
+
+
+def _cached_bounding_box(location: str) -> Optional[Dict[str, Any]]:
+    key = str(location or "").strip().lower()
+    if not key:
+        return None
+    if key in _BBOX_CACHE:
+        return _BBOX_CACHE[key]
+    bbox = get_bounding_box(location)
+    if len(_BBOX_CACHE) < 512:
+        _BBOX_CACHE[key] = bbox
+    return bbox
+
+
+def get_spatial_search_results(user_query: str, size: int = 10) -> List[Dict[str, Any]]:
+    bounding_box = resolve_query_bbox(user_query)
     if not bounding_box:
         return []
 

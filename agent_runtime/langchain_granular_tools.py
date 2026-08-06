@@ -186,6 +186,16 @@ def web_search_tool(query: str, limit: int = 6, recency_days: Optional[int] = No
         value = result.get(key)
         if value is not None:
             payload[key] = value
+    if payload.get("count") and not payload.get("error"):
+        # Stated HERE, beside the results, not only in a system prompt far above them. A
+        # standards-version question was observed searching the web, receiving results, never
+        # fetching, and concluding the answer "is not explicitly mentioned in the evidence".
+        payload["next_step"] = (
+            "These are POINTERS, not sources: each snippet is ~300 characters chosen by the search "
+            "engine. Before citing any of these urls, or stating a specific fact from one (a "
+            "version, number, date or definition), call web_fetch on the 1-2 most promising urls "
+            "and read the page. Do not answer that the information was not found without fetching."
+        )
     return json.dumps(payload, ensure_ascii=True, default=str)
 
 
