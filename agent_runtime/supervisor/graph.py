@@ -1230,7 +1230,122 @@ def _direct_search_sweep(query: str, enabled_search_methods: Optional[List[str]]
             pass
     # web_search is deliberately NOT part of this sweep. Every other method here is a cheap call to
     # infrastructure we own; the open web is a live third-party network hop, so unioning it in would
-    # put every single turn on the internet. It stays LLM-elected (and budget-capped) instead.
+    # put every single turn on the internet. It stays LLM-elected (and budget-capped) — plus the
+    # last-resort fallback in _web_fallback_evidence, which fires only when the platform found
+    # NOTHING.
+    return [d for d in docs if isinstance(d, dict)]
+
+
+# Sources that are NOT the platform: external catalogs and the open web. Everything else counts as
+# our own evidence — deliberately the wrong way round from "list the platform's sources", because
+# the consequence of a misclassification is asymmetric. Treating an unrecognized document as
+# external would send a turn to the web even though we DID find something (an earlier version of
+# this check keyed on a positive list of source names and did exactly that, firing whenever a
+# document lacked a `source` field). Failing closed only skips the fallback.
+_EXTERNAL_SOURCES = {"web", "opengeodata", "datacite"}
+
+
+def _has_platform_evidence(docs: Any) -> bool:
+    """Whether the run holds any evidence that did NOT come from the open web or a catalog."""
+    for doc in docs or []:
+        if not isinstance(doc, dict):
+            continue
+        src = doc.get("document") if isinstance(doc.get("document"), dict) else doc
+        if not isinstance(src, dict):
+            continue
+        name = str(src.get("source") or src.get("source_system") or "").strip().lower()
+        etype = str(src.get("element_type") or "").strip().lower()
+        if name in _EXTERNAL_SOURCES or etype in _EXTERNAL_SOURCES:
+            continue
+        return True
+    return False
+
+
+# Requests whose subject is I-GUIDE's OWN catalogue. Deliberately narrower than the catalog
+# search's intent gate, which is answering a different question: `wants_external_data` treats "find
+# datasets … on I-GUIDE" as external (the "find datasets" cue wins) and a standards-version question
+# as internal, so neither of its answers is the one needed here.
+_PLATFORM_HOLDINGS_RE = re.compile(
+    r"(?:\bi-?guide\b"
+    r"|\bknowledge element"
+    r"|\brelated element"
+    r"|\bthis platform\b|\bthe platform\b"
+    r"|\bmost (?:popular|viewed|clicked|downloaded)\b|\btrending\b"
+    r"|\b(?:uploaded|attached)\s+(?:file|dataset)\b|\bthis (?:file|csv|spreadsheet)\b"
+    r"|\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b)",
+    re.IGNORECASE,
+)
+
+
+def _asks_about_platform_holdings(query: str) -> bool:
+    """Whether the question is about what I-GUIDE itself contains (so the web cannot answer it)."""
+    return bool(_PLATFORM_HOLDINGS_RE.search(str(query or "")))
+
+
+def _web_fallback_enabled() -> bool:
+    """Whether to consult the open web when the platform yields nothing (default on)."""
+    raw = str(os.getenv("AGENT_WEB_FALLBACK", "")).strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _web_fallback_evidence(query: str, enabled_search_methods: Optional[List[str]],
+                           *, k: int = 6) -> List[Dict[str, Any]]:
+    """Open-web evidence for a query the I-GUIDE platform could not answer at all.
+
+    This is the one place the web is reached deterministically rather than by the LLM electing it.
+    The justification is narrow: when the knowledge base returns nothing, the alternative is telling
+    the user we found nothing while a public answer exists.
+
+    It also FETCHES the top result rather than stopping at snippets. On this path the documents go
+    straight into evidence and the synthesizer never gets a chance to call web_fetch itself, so
+    without the fetch the fallback would supply ~300-character engine snippets as the sole grounding
+    for the whole answer — the exact failure the two-step design exists to avoid.
+    """
+    allow = ({str(m).strip() for m in enabled_search_methods}
+             if enabled_search_methods is not None else None)
+    if allow is not None and "web_search" not in allow:
+        return []
+
+    # A question ABOUT THE PLATFORM's own holdings ("what datasets does I-GUIDE have on X", "the
+    # related elements of <uuid>") cannot be answered by the open web — only I-GUIDE knows what
+    # I-GUIDE contains. For those an empty result IS the answer, and substituting web pages would
+    # dress up a miss as a hit.
+    if _asks_about_platform_holdings(query):
+        return []
+
+    from rag_pipeline.search import web_utils as WU
+
+    if not WU.web_enabled() or not _web_fallback_enabled():
+        return []
+
+    try:
+        from agent_runtime.langchain_granular_tools import _normalize_hits
+        from rag_pipeline.search.web import results_to_hits, run_web_search
+
+        result = run_web_search(query, limit=k)
+        if result.get("error") or not result.get("count"):
+            return []
+        docs = _normalize_hits(results_to_hits(result), source="web")
+    except Exception:
+        return []
+
+    # Read the single most promising page so the answer rests on real content, not a snippet.
+    try:
+        from rag_pipeline.search.web_fetch import fetch_and_extract
+
+        top = next((d.get("url") for d in docs if d.get("url")), "")
+        if top:
+            page = fetch_and_extract(top, focus=query)
+            text = (page.get("text") or "").strip()
+            if text and not page.get("error"):
+                for doc in docs:
+                    if doc.get("url") == top:
+                        # Replace the snippet with the extracted passages for this one document.
+                        doc["contents"] = text
+                        doc["abstract"] = text
+                        break
+    except Exception:
+        pass
     return [d for d in docs if isinstance(d, dict)]
 
 
@@ -1745,6 +1860,9 @@ def build_supervisor_graph(
     top_k: Optional[int] = None,
     do_rerank: bool = True,
     do_audit: bool = True,
+    # Needed by the node itself, not just by the search peer: the last-resort web fallback must
+    # honour a request that deliberately excluded web_search.
+    enabled_search_methods: Optional[List[str]] = None,
 ) -> Any:
     """Compile the supervisor-over-peers graph. Workers default to existing agents."""
     top_k = top_k if top_k is not None else _default_top_k()
@@ -1850,6 +1968,21 @@ def build_supervisor_graph(
                     docs = _merge_dedup(docs, more_docs)
                     if not _results_are_poor(more_docs, refined):
                         break
+        # LAST RESORT: the platform found nothing, even after the refined retry. Consult the open
+        # web rather than reporting no results while a public answer exists. Placed AFTER the
+        # refinement loop on purpose — a bad phrasing should be retried against our own index
+        # before going to a third party — and it cannot fire when the KB returned anything at all.
+        if not _has_platform_evidence(_merge_dedup(state.get("evidence") or [], docs)):
+            web_docs = _web_fallback_evidence(q, enabled_search_methods)
+            if web_docs:
+                emit_trace_event(
+                    "node_started",
+                    {"stage": "search",
+                     "message": f"No I-GUIDE evidence found; searched the open web ({len(web_docs)} results)"},
+                    node="search",
+                )
+                docs = _merge_dedup(docs, web_docs)
+
         # Skip rerank/top_k for a two-bucket related-element result: reranking would interleave
         # and truncate the curated vs content buckets. Their order/grouping is handled downstream.
         has_provenance = any(isinstance(d, dict) and d.get("provenance") in ("seed", "curated", "content") for d in docs)

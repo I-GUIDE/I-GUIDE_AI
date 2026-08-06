@@ -54,6 +54,9 @@ def run_supervisor_orchestration(query: str, chat_history: Optional[List[Any]], 
             llm=cfg.llm, skill_roots=cfg.skill_roots, code_exec=cfg.code_exec,
             input_file_ids=cfg.input_file_ids,
         ),
+        # The search NODE needs the allowlist too, so its no-platform-evidence web fallback
+        # respects a request that excluded web_search.
+        enabled_search_methods=cfg.enabled_search_methods,
     )
     emit_trace_event(
         "node_completed",
