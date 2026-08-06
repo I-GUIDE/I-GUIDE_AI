@@ -171,6 +171,21 @@ INSUFFICIENT_EVIDENCE_PROMPT = (
     "User request:\n{question}\n"
 )
 
+# Reformulates a search query that returned poor results (AGENT_SEARCH_REFINE). The agent
+# otherwise re-runs the IDENTICAL query, which can only return the same documents.
+QUERY_REFINEMENT_PROMPT = (
+    "You are refining a search query for a geospatial knowledge base after the first attempt "
+    "returned poor results.\n"
+    "Original request:\n{query}\n\n"
+    "Already tried (do NOT repeat any of these):\n{tried}\n\n"
+    "What came back (titles):\n{titles}\n\n"
+    "Write ONE better search query. Guidance: keep the subject terms, drop filler and framing "
+    "words, add an obvious synonym or the broader concept if the results were empty, and drop an "
+    "over-narrow qualifier (a place, a year, a format) if the results were off-topic. Keep it "
+    "short — keywords, not a sentence.\n"
+    "Reply with ONLY the query text, or exactly NONE if no better query exists."
+)
+
 # Answers a GENERAL question when no platform evidence was retrieved and none is needed
 # (definitions, concepts, how-tos, self-referential/chit-chat). Keeps the assistant helpful
 # without letting it invent I-GUIDE holdings or citations.
@@ -204,6 +219,7 @@ __all__ = [
     "ANALYSIS_WORKFLOW_PROMPT",
     "CODE_PEER_PROMPT",
     "GENERAL_ANSWER_PROMPT",
+    "QUERY_REFINEMENT_PROMPT",
     "INSUFFICIENT_EVIDENCE_PROMPT",
     "NO_GROUNDING_FALLBACK",
 ]

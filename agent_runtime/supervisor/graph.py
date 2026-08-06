@@ -38,6 +38,16 @@ from agent_runtime.supervisor.evidence_subgraph import (
 )
 from agent_runtime.streaming_trace import emit_trace_event
 
+# Words that carry no retrieval signal — stripped when judging topical coverage and when building
+# a fallback query reformulation.
+_QUERY_FILLER = {
+    "the", "and", "for", "with", "from", "that", "this", "are", "was", "were", "about", "into",
+    "data", "dataset", "datasets", "database", "information", "info", "find", "search", "show",
+    "list", "give", "get", "please", "want", "need", "any", "all", "some", "related", "available",
+    "using", "use", "how", "what", "which", "where", "when", "why", "can", "could", "would",
+    "there", "their", "have", "has", "does", "did", "should", "may", "might", "will",
+}
+
 ALLOWED_ACTIONS = ("search", "analyze", "code", "done")
 DEFAULT_MAX_STEPS = 8
 
@@ -104,6 +114,7 @@ class SupervisorState(TypedDict, total=False):
     distilled: Dict[str, Any]
     search_attempts: int           # how many times the search peer has run
     search_empty_streak: int       # consecutive searches that added NO new evidence
+    searched_queries: List[str]    # every query string actually searched (incl. refinements)
 
 
 def is_supervisor_enabled() -> bool:
@@ -150,26 +161,155 @@ def _merge_dedup(existing: List[Any], new: List[Any]) -> List[Any]:
     return merged
 
 
+def _focus_terms(query: str) -> List[str]:
+    """Subject terms of a query: lowercase, punctuation-stripped, filler removed.
+
+    Used to judge whether retrieved evidence is actually ABOUT the request (and to build a
+    fallback reformulation), so a query made of filler cannot look like a topical match.
+    """
+    tokens = re.findall(r"[a-z0-9][a-z0-9\-']*", str(query or "").lower())
+    return [t for t in tokens if len(t) >= 3 and t not in _QUERY_FILLER]
+
+
+def _term_coverage(docs: List[Any], query: str) -> Optional[float]:
+    """Fraction of documents mentioning at least one subject term of *query*.
+
+    None when there is nothing to judge (no docs, or a query of pure filler). This is the
+    supervisor's cheap, deterministic signal for "did we retrieve the right thing?" — it needs no
+    LLM call and cannot be fooled by a large but off-topic result set.
+    """
+    terms = _focus_terms(query)
+    if not docs or not terms:
+        return None
+    hits = 0
+    for d in docs:
+        text = " ".join([
+            _doc_field(d, "title", "name", default=""),
+            _doc_field(d, "contents", "snippet", "text", "abstract", default="")[:600],
+        ]).lower()
+        if any(t in text for t in terms):
+            hits += 1
+    return round(hits / len(docs), 2)
+
+
+# --- query refinement (opt-in: AGENT_SEARCH_REFINE) --------------------------------
+# Without this the loop can only re-run the IDENTICAL query, so a second search returns the same
+# documents and the exhaustion guard (correctly) stops it. Refinement makes a retry meaningful:
+# the query actually changes before searching again.
+def _refine_enabled() -> bool:
+    """Whether an unproductive search may be retried with a REFORMULATED query (default off)."""
+    return (os.getenv("AGENT_SEARCH_REFINE") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _max_refinements() -> int:
+    try:
+        return max(1, int(os.getenv("AGENT_SEARCH_REFINE_MAX", "1")))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _min_coverage() -> float:
+    """Topical coverage below which a result set counts as off-topic (0..1)."""
+    try:
+        return min(1.0, max(0.0, float(os.getenv("AGENT_SEARCH_MIN_COVERAGE", "0.34"))))
+    except (TypeError, ValueError):
+        return 0.34
+
+
+def _results_are_poor(docs: List[Any], query: str) -> bool:
+    """True when a search returned nothing, or nothing that mentions the request's subject."""
+    if not docs:
+        return True
+    coverage = _term_coverage(docs, query)
+    return coverage is not None and coverage < _min_coverage()
+
+
+def _fallback_refinement(query: str, tried: List[str]) -> Optional[str]:
+    """Deterministic reformulation used when no LLM is available (or it declines).
+
+    Step 1: the subject terms alone (filler removed). Step 2: the two most specific terms
+    (longest), i.e. a broader query. Returns None once both have been tried.
+    """
+    terms = _focus_terms(query)
+    if not terms:
+        return None
+    focused = " ".join(terms)
+    if focused and focused not in tried and focused.lower() != query.strip().lower():
+        return focused
+    broader = " ".join(sorted(terms, key=len, reverse=True)[:2])
+    if broader and broader not in tried:
+        return broader
+    return None
+
+
+def _refine_query(llm: Optional[Any], query: str, docs: List[Any], tried: List[str]) -> Optional[str]:
+    """A better query to try next, or None. LLM-written when available, else deterministic."""
+    try:
+        from agent_runtime.supervisor.prompts import QUERY_REFINEMENT_PROMPT
+
+        if llm is not None:
+            titles = "\n".join(
+                f"- {_doc_field(d, 'title', 'name', default='Untitled')[:90]}" for d in docs[:6]
+            ) or "(nothing was returned)"
+            prompt = QUERY_REFINEMENT_PROMPT.format(
+                query=query, tried="\n".join(f"- {t}" for t in tried), titles=titles)
+            raw = _content_to_text(llm.invoke(prompt)) if hasattr(llm, "invoke") else str(llm(prompt))
+            candidate = " ".join(str(raw or "").strip().splitlines()[:1]).strip().strip('"')
+            if candidate and candidate.upper() != "NONE" and candidate not in tried:
+                return candidate[:200]
+    except Exception:
+        pass
+    return _fallback_refinement(query, tried)
+
+
 def _distill(state: SupervisorState) -> Dict[str, Any]:
-    """Compact progress view for the supervisor (no heavy documents)."""
+    """Compact progress view for the supervisor.
+
+    Deliberately excludes the heavy documents, but DOES include enough about them — titles,
+    per-method counts, topical coverage — for the decider to judge whether the evidence answers
+    the request. Counts alone ("8 documents") cannot distinguish 8 on-topic hits from 8 unrelated
+    ones, which is why an off-topic result set used to end the loop as if it had succeeded.
+    """
     docs = state.get("evidence") or []
     audit = state.get("audit") or {}
     actions = list(state.get("actions") or [])
+    query = state.get("query", "")
+
+    sources: Dict[str, int] = {}
+    for d in docs:
+        key = str(_doc_field(d, "source", default="") or "unknown")
+        sources[key] = sources.get(key, 0) + 1
+
+    titles = [_doc_field(d, "title", "name", default="Untitled")[:90] for d in docs[:6]]
+    scores = [d.get("score") for d in docs if isinstance(d, dict) and isinstance(d.get("score"), (int, float))]
+    artifacts = _collect_image_artifacts(state.get("analysis_results"), state.get("code_result"))
+
+    def _peer_summary(result: Any) -> Optional[str]:
+        if isinstance(result, dict):
+            text = str(result.get("summary") or result.get("answer") or "").strip()
+            return text[:220] or None
+        return None
+
     return {
         "has_evidence": bool(docs),
         "document_count": len(docs),
+        # WHAT was retrieved, not just how much — the decider can now spot off-topic results.
+        "evidence_titles": titles,
+        "evidence_sources": sources,
+        "topical_coverage": _term_coverage(docs, query),
+        "top_score": round(max(scores), 3) if scores else None,
+        "queries_searched": list(state.get("searched_queries") or []),
         "has_analysis": state.get("analysis_results") is not None,
+        "analysis_summary": _peer_summary(state.get("analysis_results")),
         "has_code": state.get("code_result") is not None,
+        "code_summary": _peer_summary(state.get("code_result")),
+        "artifacts_produced": [a.get("filename") for a in artifacts],
         "has_answer": bool((state.get("answer") or "").strip()),
         "audit_severity": audit.get("severity"),
         "pending_needs": [n.get("capability") for n in (state.get("needs") or []) if isinstance(n, dict)],
         "actions_taken": actions,
-        # How many times each peer has already run — so the decider can see (and
-        # avoid) unproductive repetition.
         "action_counts": {c: actions.count(c) for c in ("search", "analyze", "code") if actions.count(c)},
         "search_attempts": state.get("search_attempts", 0),
-        # True once the knowledge base has nothing more to give (cap hit, or the last
-        # search returned no new evidence) — the decider must NOT search again.
         "search_exhausted": _search_exhausted(state),
     }
 
@@ -1088,6 +1228,9 @@ def _direct_search_sweep(query: str, enabled_search_methods: Optional[List[str]]
                                         source="opengeodata"))
         except Exception:
             pass
+    # web_search is deliberately NOT part of this sweep. Every other method here is a cheap call to
+    # infrastructure we own; the open web is a live third-party network hop, so unioning it in would
+    # put every single turn on the internet. It stays LLM-elected (and budget-capped) instead.
     return [d for d in docs if isinstance(d, dict)]
 
 
@@ -1674,6 +1817,39 @@ def build_supervisor_graph(
             _, needs = _extract_needs(raw)
         else:
             docs, needs = raw, []
+
+        # Retry with a REFORMULATED query when the first attempt returned nothing (or nothing on
+        # topic). Re-running the identical query can only return the identical documents, so
+        # without this the loop cannot recover from a bad phrasing.
+        tried: List[str] = list(state.get("searched_queries") or [])
+        if q and q not in tried:
+            tried.append(q)
+        if _refine_enabled():
+            for _ in range(_max_refinements()):
+                if not _results_are_poor(docs, q):
+                    break
+                refined = _refine_query(llm, q, docs, tried)
+                if not refined:
+                    break
+                tried.append(refined)
+                emit_trace_event(
+                    "node_started",
+                    {"stage": "search", "message": f"Retrying with a refined query: {refined}"},
+                    node="search",
+                )
+                more = do_search(refined, state) or []
+                if isinstance(more, dict):
+                    more_docs = more.get("documents") or []
+                    _, more_needs = _extract_needs(more)
+                    needs = [*(needs or []), *(more_needs or [])]
+                else:
+                    more_docs = more
+                if more_docs:
+                    # Judge the merged set against the REFINED query too: a retry that finally
+                    # found on-topic material must be able to end the loop.
+                    docs = _merge_dedup(docs, more_docs)
+                    if not _results_are_poor(more_docs, refined):
+                        break
         # Skip rerank/top_k for a two-bucket related-element result: reranking would interleave
         # and truncate the curated vs content buckets. Their order/grouping is handled downstream.
         has_provenance = any(isinstance(d, dict) and d.get("provenance") in ("seed", "curated", "content") for d in docs)
@@ -1691,6 +1867,7 @@ def build_supervisor_graph(
             "evidence": merged,
             "search_attempts": state.get("search_attempts", 0) + 1,
             "search_empty_streak": 0 if added > 0 else prev_streak + 1,
+            "searched_queries": tried,
         }
         enq = _enqueue_needs(state.get("needs"), needs, "search")
         if enq is not None:
@@ -1796,8 +1973,16 @@ def build_supervisor_graph(
             from agent_runtime.supervisor.evidence_subgraph import _element_url
 
             evidence_urls = [u for u in (_element_url(d) for d in evidence) if u]
-            final = sanitize_answer_links(final, allowed_file_ids=refs["file_ids"],
-                                          allowed_urls=[*refs["urls"], *evidence_urls])
+            # Open-web URLs this turn actually surfaced. A file OFFER pointing at the web ("[Download
+            # the CSV](https://…/x.csv)") is only kept when a search really returned that URL — the
+            # model cannot invent a plausible one.
+            from rag_pipeline.search.web_utils import allowed_urls as web_allowed_urls
+
+            final = sanitize_answer_links(
+                final,
+                allowed_file_ids=refs["file_ids"],
+                allowed_urls=[*refs["urls"], *evidence_urls, *web_allowed_urls()],
+            )
             if not (final or "").strip():
                 # Never ship an empty answer with a success status.
                 final = ("I wasn't able to produce an answer for this request. Please try "
