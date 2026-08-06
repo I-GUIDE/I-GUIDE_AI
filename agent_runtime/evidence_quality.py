@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 LLMLike = Union[Any, Callable[[str], str]]
@@ -246,37 +247,127 @@ def rerank_documents(
 # Grounding / hallucination audit
 # ---------------------------------------------------------------------------
 
+# Audited CLAIM BY CLAIM, with the ledger emitted BEFORE the verdict.
+#
+# The previous prompt did not discriminate at all: measured on a real run it returned "multiple
+# high-severity hallucinations" for a correct, fully grounded answer AND the same verdict for that
+# answer with blatant falsehoods appended (a fabricated journal, date, institution, benchmark score,
+# price and adopter) — naming only the LEGITIMATE claims in both cases and never noticing a single
+# fabrication. A caveat that says "high" either way carries no information.
+#
+# Two structural causes, both measured rather than guessed:
+#  * VERDICT BEFORE PROOF. hallucination_detected and severity were the FIRST keys of the JSON, so
+#    the model committed to a verdict autoregressively and then backfilled rationalisations. The
+#    ledger now comes first and the verdict is read off it.
+#  * NO OBLIGATION TO LOOK. Nothing forced the model to locate supporting text, so it asserted
+#    "not directly supported" about claims stated almost verbatim in the evidence. Each row now
+#    demands a VERBATIM span, and a row without one cannot be "supported".
+#
+# Prose rules alone did NOT work: a "paraphrase is not hallucination" paragraph and an explicit
+# instruction not to flag when its own reason began "the evidence mentions X but..." were both
+# ignored. Four formulations were measured against a fixed bar (a correct answer must clear, an
+# answer with injected falsehoods must still be caught BY NAME) and independently re-verified; two
+# of the four passed the bar but broke under further probing. Keep changes to this prompt measured.
 _AUDIT_PROMPT = (
-    "You are auditing an answer produced by a TOOL-USING agent.\n"
-    "You are given the question, the generated answer, the retrieved evidence, AND the\n"
-    "agent's EXECUTION RECORD (the tools it actually ran and the artifacts it produced).\n"
-    "Decide whether the answer contains hallucinations: claims grounded in NEITHER the\n"
-    "retrieved evidence NOR the execution record.\n"
-    "IMPORTANT: the execution record is FIRST-CLASS grounding. If the agent's tools\n"
-    "actually produced a result or artifact — a generated map/plot/image file, a computed\n"
-    "count, a filtered dataset, a written file_id — then an answer that presents that\n"
-    "result is GROUNDED, even if no retrieved document mentions it. Do NOT flag an answer\n"
-    "for describing outputs the tools genuinely produced or for offering to do so.\n"
-    "PRECISION — avoid false positives: do NOT flag reasonable, non-contentious "
-    "contextualization or domain framing that a reader would accept as a fair description of "
-    "what the evidence/results cover (e.g. noting a heat-exposure dataset is 'useful for public "
-    "health or urban planning'). Flag ONLY: (a) statements that CONTRADICT the evidence or "
-    "execution record, or (b) specific, checkable facts asserted as true — concrete "
-    "numbers/statistics, capabilities, results, dates, names, or citations — that appear in "
-    "NEITHER. Severity: 'high' = a clear factual fabrication or contradiction; 'low' = minor "
-    "over-reach; 'none' = grounded or merely interpretive framing. Reserve 'high' for real "
-    "factual problems, never for reasonable elaboration.\n"
-    "Respond ONLY with JSON: {{\"hallucination_detected\": true|false, "
-    "\"severity\": \"none\"|\"low\"|\"medium\"|\"high\", "
-    "\"issues\": [{{\"claim\": \"...\", \"reason\": \"...\"}}], "
-    "\"summary\": \"one sentence verdict\"}}\n"
-    "Each issue must refer to a specific unsupported sentence.\n\n"
-    "Question:\n{question}\n\nAnswer:\n{answer}\n\n"
-    "Retrieved evidence:\n{evidence}\n\nExecution record:\n{execution}\n"
+    'You are auditing an answer produced by a TOOL-USING agent for HALLUCINATION: claims\n'
+    "grounded in NEITHER the retrieved evidence NOR the agent's execution record (the tools it\n"
+    'actually ran and the artifacts it produced). The execution record is FIRST-CLASS grounding:\n'
+    'a result a tool genuinely produced — a generated map/plot/image, a computed count, a written\n'
+    'file_id — grounds an answer that presents it, even if no document mentions it.\n'
+    '\n'
+    'You must work CLAIM BY CLAIM, and in this order. Do not write a verdict before the ledger\n'
+    'exists; a verdict that is not read off the ledger is a failed audit.\n'
+    '\n'
+    'STEP 1 - BUILD THE CLAIM LEDGER.\n'
+    'Walk the answer from its first sentence to its LAST sentence and list every substantive,\n'
+    'checkable claim: concrete facts, numbers, statistics, dates, names of people / institutions /\n'
+    'journals / organizations / models, benchmark results, prices, capabilities, citations. Cover\n'
+    'the WHOLE answer - the closing paragraph matters as much as the opening one, and a claim\n'
+    'buried in the last sentences must still appear in the ledger. Skip pure framing, transitions,\n'
+    'and offers of further help.\n'
+    'DECOMPOSE SPECIFICS. Every number and every proper name in the answer gets its OWN row. Never\n'
+    'fold a figure, benchmark, dataset, model, institution, venue or price into a sentence-level row:\n'
+    'a sentence reading "improves performance by 41.2 points on GeoBench-Pro" yields a row for "41.2\n'
+    'points" AND a row for "GeoBench-Pro", each needing its own verbatim span. Measured failure this\n'
+    'prevents: an invented figure and benchmark embedded in an otherwise-supported sentence were\n'
+    'summarised into one "supported" row and passed clean 3 times out of 3.\n'
+    'Emit one row per claim:\n'
+    '  {{"claim": "<short quote of the claim>",\n'
+    '    "evidence_quote": "<[doc_id] + a VERBATIM span of 5-25 words copied from the evidence or\n'
+    '      execution record that carries this claim>",\n'
+    '    "status": "supported" | "contradicted" | "absent"}}\n'
+    'How to fill a row:\n'
+    '* You must actually COPY a real span. If you cannot copy one from the text you were given,\n'
+    '  the status is not "supported".\n'
+    '* "supported" - a real span carries the claim IN SUBSTANCE. Paraphrase, condensation,\n'
+    '  rewording, and combining two sentences into one all count as supported; matching wording is\n'
+    '  NOT required, and ONE supporting document is enough even when every other document is\n'
+    '  irrelevant. If the span carries the point but not the exact phrasing, the row is\n'
+    '  "supported".\n'
+    '* "contradicted" - a real span asserts something incompatible with the claim: a different\n'
+    '  number, date, name, venue or outcome. Copy that conflicting span.\n'
+    '* "absent" - you searched the evidence AND the execution record and found NO span on this\n'
+    '  subject at all: the number, name, venue, price or event simply does not occur anywhere.\n'
+    '  Set evidence_quote to "none".\n'
+    '\n'
+    'STEP 2 - VERDICT, DERIVED ONLY FROM THE LEDGER.\n'
+    '* issues = exactly the rows whose status is "contradicted" or "absent", one issue each.\n'
+    '  Never raise an issue for a row you marked "supported".\n'
+    '* hallucination_detected = true if and only if issues is non-empty.\n'
+    '* severity: "high" if any issue is an invented specific (a number, date, journal, institution,\n'
+    '  price, organization, adopter or result found nowhere) or a contradiction; "low" if the only\n'
+    '  issues are minor over-reach; "none" if there are no issues.\n'
+    '* If every row is "supported": hallucination_detected=false, severity "none", issues [].\n'
+    '\n'
+    'Respond ONLY with JSON:\n'
+    '{{"claim_ledger": [{{"claim": "...", "evidence_quote": "...", "status": "..."}}],\n'
+    ' "hallucination_detected": true|false,\n'
+    ' "severity": "none"|"low"|"medium"|"high",\n'
+    ' "issues": [{{"claim": "...", "reason": "..."}}],\n'
+    ' "summary": "one sentence verdict"}}\n'
+    "Each issue's reason must state what a reader could check and find FALSE, quoting the\n"
+    'conflicting span or saying that the evidence never mentions the subject at all.\n'
+    '\n'
+    'Question:\n'
+    '{question}\n'
+    '\n'
+    'Answer:\n'
+    '{answer}\n'
+    '\n'
+    'Retrieved evidence:\n'
+    '{evidence}\n'
+    '\n'
+    'Execution record:\n'
+    '{execution}\n'
+    '\n'
 )
 
 
-def _format_evidence(evidence: Any, *, limit: int = 5, max_chars: int = 600) -> str:
+# The auditor's evidence window MUST match the synthesizer's, which formats 8 documents at 2500
+# characters each (_format_documents in agent_runtime/supervisor/evidence_subgraph.py, which imports
+# from this module — so the constants live here to keep that direction of dependency).
+#
+# They did not match: the audit showed 5 documents at 600 characters, so the auditor was handed
+# strictly LESS evidence than the writer and then asked whether the writer invented things. Measured
+# on a real run, the one document supporting the answer held 5923 characters of a fetched paper and
+# the auditor saw the first 600 — every claim drawn from the rest of it looked unsupported.
+AUDIT_DOC_LIMIT = 8
+AUDIT_DOC_CHARS = 2500
+
+
+def _audit_window() -> tuple:
+    """(doc limit, chars per doc) for the audit, env-tunable for a deployment that needs to trim."""
+    def _int(name: str, default: int) -> int:
+        try:
+            return max(1, int(str(os.getenv(name, "")).strip() or default))
+        except (TypeError, ValueError):
+            return default
+
+    return _int("AGENT_AUDIT_DOC_LIMIT", AUDIT_DOC_LIMIT), _int("AGENT_AUDIT_DOC_CHARS", AUDIT_DOC_CHARS)
+
+
+def _format_evidence(evidence: Any, *, limit: int = AUDIT_DOC_LIMIT,
+                     max_chars: int = AUDIT_DOC_CHARS) -> str:
     if isinstance(evidence, str):
         return evidence[: max_chars * limit].strip() or "(no evidence supplied)"
     if not isinstance(evidence, list) or not evidence:
@@ -326,8 +417,8 @@ def audit_answer_grounding(
     *,
     llm: Optional[LLMLike] = None,
     execution_context: Any = None,
-    evidence_limit: int = 5,
-    snippet_chars: int = 600,
+    evidence_limit: Optional[int] = None,
+    snippet_chars: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Audit whether *answer* is grounded in *evidence* and/or the agent's
     *execution_context* (tool outputs + produced artifacts); returns a verdict dict.
@@ -340,10 +431,13 @@ def audit_answer_grounding(
     if not (question or "").strip() or not (answer or "").strip() or (not evidence and not execution_context):
         return _default_audit_verdict("Insufficient data to evaluate hallucinations.")
 
+    window_limit, window_chars = _audit_window()
     prompt = _AUDIT_PROMPT.format(
         question=question,
         answer=answer,
-        evidence=_format_evidence(evidence, limit=evidence_limit, max_chars=snippet_chars),
+        evidence=_format_evidence(evidence,
+                                  limit=evidence_limit if evidence_limit is not None else window_limit,
+                                  max_chars=snippet_chars if snippet_chars is not None else window_chars),
         execution=_format_execution_context(execution_context),
     )
     try:

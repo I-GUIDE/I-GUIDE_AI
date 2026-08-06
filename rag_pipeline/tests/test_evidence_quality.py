@@ -200,3 +200,84 @@ def test_rrf_tolerates_junk_entries():
 
     docs = ["a bare string", {"doc_id": "x", "source": "web", "score": "not a number"}, None]
     assert len(rrf_order(docs)) == 3          # never raises, never drops
+
+
+# --- the audit must DISCRIMINATE -------------------------------------------------
+# Reported: a correct, fully-grounded answer was flagged "multiple high-severity hallucinations".
+# Measuring it found something worse than a false positive — the same answer with a fabricated
+# journal, date, institution, benchmark score, price and adopter appended got the SAME verdict, and
+# the flagged claims were the LEGITIMATE ones in both cases. A caveat that says "high" either way
+# carries no information. These tests pin the structure that fixed it; the wording itself was chosen
+# by measurement against a correct/fabricated pair and is documented above the prompt.
+
+
+def test_the_ledger_is_emitted_before_the_verdict():
+    """The original schema put hallucination_detected FIRST, so the model committed to a verdict
+    autoregressively and then backfilled rationalisations for it."""
+    from agent_runtime.evidence_quality import _AUDIT_PROMPT
+
+    schema = _AUDIT_PROMPT[_AUDIT_PROMPT.index("Respond ONLY with JSON"):]
+    assert schema.index("claim_ledger") < schema.index("hallucination_detected")
+
+
+def test_the_prompt_demands_a_verbatim_span_per_claim():
+    """Nothing previously forced the model to LOOK for support, so it asserted "not directly
+    supported" about claims stated almost verbatim in the evidence."""
+    from agent_runtime.evidence_quality import _AUDIT_PROMPT
+
+    assert "evidence_quote" in _AUDIT_PROMPT
+    assert "VERBATIM" in _AUDIT_PROMPT
+    assert "paraphrase" in _AUDIT_PROMPT.lower()
+
+
+def test_specifics_must_be_decomposed_into_their_own_rows():
+    """An invented figure inside an otherwise-supported sentence was summarised into one
+    'supported' row and passed clean."""
+    from agent_runtime.evidence_quality import _AUDIT_PROMPT
+
+    assert "DECOMPOSE SPECIFICS" in _AUDIT_PROMPT
+
+
+def test_execution_record_remains_first_class_grounding():
+    """Kept from the previous prompt: a genuinely produced map/file/count grounds an answer even
+    when no retrieved document mentions it, or every QGIS and code answer gets flagged."""
+    from agent_runtime.evidence_quality import _AUDIT_PROMPT
+
+    assert "execution record" in _AUDIT_PROMPT
+    assert "FIRST-CLASS" in _AUDIT_PROMPT
+
+
+def test_the_audit_window_matches_the_synthesizers():
+    """The auditor was shown 5 docs x 600 chars while the synthesizer wrote from 8 x 2500 — strictly
+    less evidence than the writer, then asked whether the writer invented things."""
+    from agent_runtime.evidence_quality import _audit_window
+    from agent_runtime.supervisor.evidence_subgraph import _format_documents
+    import inspect
+
+    sig = inspect.signature(_format_documents)
+    assert _audit_window() == (sig.parameters["limit"].default,
+                               sig.parameters["max_chars"].default)
+
+
+def test_the_audit_window_is_env_tunable(monkeypatch):
+    from agent_runtime.evidence_quality import _audit_window
+
+    monkeypatch.setenv("AGENT_AUDIT_DOC_LIMIT", "3")
+    monkeypatch.setenv("AGENT_AUDIT_DOC_CHARS", "900")
+    assert _audit_window() == (3, 900)
+    monkeypatch.setenv("AGENT_AUDIT_DOC_CHARS", "not-a-number")
+    assert _audit_window()[1] == 2500          # never silently collapses to a tiny window
+
+
+def test_a_ledger_of_all_supported_rows_yields_a_clean_verdict():
+    """The verdict must be readable off the ledger, so a fake LLM returning an all-supported ledger
+    produces severity none — no hidden path back to a flag."""
+    def fake_llm(_prompt):
+        return json.dumps({
+            "claim_ledger": [{"claim": "x", "evidence_quote": "[d1] a real span", "status": "supported"}],
+            "hallucination_detected": False, "severity": "none", "issues": [],
+            "summary": "grounded",
+        })
+
+    v = audit_answer_grounding("q", "an answer", DOCS, llm=fake_llm)
+    assert v["hallucination_detected"] is False and v["severity"] == "none" and v["issues"] == []
