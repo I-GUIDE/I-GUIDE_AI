@@ -58,6 +58,7 @@ _EXTRA_DENY_NETWORKS = (
 
 _MAX_REDIRECTS = 3
 _CHUNK = 8192
+_TITLE_MAX = 300      # <title> is attacker-chosen text; it must not be able to flood the payload
 
 # Real web pages are served on 80/443. Restricting ports is what actually protects this
 # deployment, because a private-address check CANNOT: its own internal services are published on
@@ -74,6 +75,31 @@ _INTERNAL_URL_ENV_VARS = (
     "MCP_SERVER_URL", "NEO4J_CONNECTION_STRING", "NEO4J_URI", "AGENT_PUBLIC_BASE_URL",
     "MINIO_ENDPOINT", "JWT_ISSUER_URL",
 )
+
+
+def _norm_host(value: Any) -> str:
+    """Comparable form of a hostname: lowercased, with the DNS root dot removed.
+
+    The root dot is why this exists. ``storage-dev.i-guide.io.`` and ``storage-dev.i-guide.io`` are
+    the SAME name to DNS and to every HTTP stack, but not to ``in`` — so a single trailing character
+    slipped an internal service past the deny list and reached the object store on :443.
+    """
+    return str(value or "").strip().lower().rstrip(".")
+
+
+def _norm_ip(value: Any) -> str:
+    """Comparable form of an address, folding IPv4-mapped IPv6 to its embedded IPv4.
+
+    ``[::ffff:149.165.155.195]`` and ``149.165.155.195`` are the same host, and the mapped spelling
+    is public, so neither _classify nor a raw string compare against the deny list would stop it.
+    """
+    text = str(value or "").strip().lower()
+    try:
+        ip = ipaddress.ip_address(text)
+    except ValueError:
+        return text
+    mapped = getattr(ip, "ipv4_mapped", None)
+    return str(mapped) if mapped else str(ip)
 
 
 def allowed_ports() -> frozenset:
@@ -110,13 +136,40 @@ def internal_targets() -> Tuple[frozenset, frozenset]:
             continue
         if not host:
             continue
-        host = host.lower()
+        host = _norm_host(host)
         try:
             ipaddress.ip_address(host)
-            ips.add(host)
+            ips.add(_norm_ip(host))
         except ValueError:
             hosts.add(host)
-    return frozenset(hosts), frozenset(ips)
+    # A service configured by NAME is also reachable by its address, or by any DNS alias of it, and
+    # a name comparison sees none of those. Resolve the denied names once and deny their addresses
+    # too, which closes the IP-literal and alias routes in one step.
+    return frozenset(hosts), frozenset(ips) | _resolved_denied_ips(frozenset(hosts))
+
+
+# Resolving the denied names costs DNS, and validate_url runs on every redirect hop, so the result
+# is memoized per host set for the process. A name that cannot be resolved is simply skipped: it
+# still blocks by name, and a hard failure here would break all fetching.
+_DENIED_IP_CACHE: Dict[frozenset, frozenset] = {}
+
+
+def _resolved_denied_ips(hosts: frozenset) -> frozenset:
+    if not hosts:
+        return frozenset()
+    cached = _DENIED_IP_CACHE.get(hosts)
+    if cached is not None:
+        return cached
+    found = set()
+    for host in hosts:
+        try:
+            for info in socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP):
+                found.add(_norm_ip(info[4][0]))
+        except Exception:
+            continue
+    result = frozenset(found)
+    _DENIED_IP_CACHE[hosts] = result
+    return result
 
 _TEXT_TYPES = ("text/html", "application/xhtml", "text/plain", "text/markdown",
                "application/json", "text/xml", "application/xml")
@@ -202,9 +255,16 @@ def validate_url(url: str) -> Tuple[str, List[str]]:
     host = parts.hostname
     if not host:
         raise BlockedURL("url has no host")
-    host = host.lower()
+    host = _norm_host(host)
 
-    port = parts.port or (443 if scheme == "https" else 80)
+    # urlsplit defers port parsing to attribute access, and ValueError there would escape as a raw
+    # exception from a tool documented never to raise ("http://example.com:99999/" is enough).
+    try:
+        explicit_port = parts.port
+    except ValueError as exc:
+        raise BlockedURL(f"malformed port in url: {exc}") from exc
+
+    port = explicit_port or (443 if scheme == "https" else 80)
     permitted = allowed_ports()
     if port not in permitted:
         raise BlockedURL(
@@ -214,14 +274,15 @@ def validate_url(url: str) -> Tuple[str, List[str]]:
         )
 
     denied_hosts, denied_ips = internal_targets()
-    if host in denied_hosts or host in denied_ips:
+    if host in denied_hosts or _norm_ip(host) in denied_ips:
         raise BlockedURL(f"refusing {host!r}: it is one of this deployment's own service hosts")
 
     addresses = resolve_and_validate(host, port)
     # A public IP is not automatically safe here: this deployment's infrastructure is published on
-    # public addresses, so an internal service reached by any name must still be refused.
+    # public addresses, so an internal service reached by any name must still be refused. Compare
+    # NORMALIZED addresses, or the IPv4-mapped spelling of a denied IP walks straight through.
     for addr in addresses:
-        if addr in denied_ips:
+        if _norm_ip(addr) in denied_ips:
             raise BlockedURL(
                 f"refusing {host!r}: it resolves to {addr}, one of this deployment's own services"
             )
@@ -306,6 +367,26 @@ def fetch_session() -> Any:
     return sess
 
 
+def _peer_address(response: Any) -> str:
+    """The address this response's socket is actually connected to, or "" if not discoverable.
+
+    Best-effort by nature: it reaches through requests into urllib3's connection. A miss returns ""
+    and the caller falls back to the pre-connect validation rather than failing the fetch.
+    """
+    try:
+        sock = getattr(getattr(getattr(response, "raw", None), "_connection", None), "sock", None)
+        if sock is None:
+            sock = getattr(getattr(response, "raw", None), "_original_response", None)
+            sock = getattr(getattr(sock, "fp", None), "raw", None)
+            sock = getattr(sock, "_sock", None)
+        if sock is None:
+            return ""
+        peer = sock.getpeername()
+        return str(peer[0]) if isinstance(peer, tuple) and peer else ""
+    except Exception:
+        return ""
+
+
 def _http_get(url: str, session: Any) -> Tuple[Any, str]:
     """GET *url*, following redirects MANUALLY so every hop is re-validated.
 
@@ -327,6 +408,25 @@ def _http_get(url: str, session: Any) -> Tuple[Any, str]:
                 "Accept-Language": "en",
             },
         )
+        # Close the time-of-check/time-of-use window as far as this stack allows. Validation
+        # resolves the name; requests then resolves it AGAIN when it connects, so an attacker
+        # controlling the zone with a ~0 TTL can answer public for our check and private for the
+        # connect. Inspect the socket's ACTUAL peer and refuse the response if it is a forbidden
+        # address. This does not un-send the request — the true fix is pinning the validated address
+        # for the connection, which needs a custom adapter to keep TLS SNI and cert verification
+        # correct against the original hostname — but it stops any internal response body from ever
+        # reaching the model.
+        peer = _peer_address(response)
+        if peer:
+            reason = _classify(ipaddress.ip_address(peer))
+            _, denied_ips = internal_targets()
+            if reason or _norm_ip(peer) in denied_ips:
+                response.close()
+                raise BlockedURL(
+                    f"refusing {current}: the connection actually landed on {peer} "
+                    f"({reason or 'one of this deployment’s own services'}); "
+                    "the name resolved differently at connect time"
+                )
         if response.status_code in (301, 302, 303, 307, 308):
             location = response.headers.get("Location") or ""
             response.close()
@@ -469,23 +569,39 @@ def fetch_and_extract(url: str, *, focus: Optional[str] = None) -> Dict[str, Any
     back as ``{"error": ...}`` so the agent reads it as a tool result and moves on. ``focus``
     (normally the user's question) selects which passages are kept.
     """
+    try:
+        return _fetch_and_extract(url, focus=focus)
+    except Exception as exc:  # pragma: no cover - the contract's last line of defence
+        # Every known raising path is handled below; this exists so an UNKNOWN one degrades to a
+        # tool result instead of failing the turn. A hostile page must never be able to choose
+        # between "answer" and "crash".
+        logger.warning("web fetch failed unexpectedly for %s: %s", url, exc, exc_info=True)
+        return {"url": url, "error": f"could not fetch page: {exc}", "budget": WU.budget_snapshot()}
+
+
+def _fetch_and_extract(url: str, *, focus: Optional[str] = None) -> Dict[str, Any]:
+    # Validate BEFORE consulting the cache. Two different raw URLs can share a canonical key, so a
+    # cache-first order let a URL the guard explicitly refuses (embedded credentials, a denied host
+    # spelled differently) return a hit — and record ITS raw string as citable, which is how a
+    # disguised link would have reached the answer with the sanitizer's approval.
+    try:
+        validate_url(url)
+    except BlockedURL as exc:
+        logger.warning("web fetch blocked: %s", exc)
+        return {"url": url, "error": str(exc), "blocked": True, "budget": WU.budget_snapshot()}
+
     canonical = WU.canonical_url(url)
     cached = _cache_get(canonical) if canonical else None
     if cached is not None:
-        # A cache hit costs no network and no budget, but the URL still becomes citable.
-        WU.record_urls([url], fetched=True)
+        # A cache hit costs no network and no budget. Only the URL actually fetched becomes
+        # citable — never the caller's spelling of it.
+        WU.record_urls([cached.get("url") or canonical], fetched=True)
         return {**cached, "cached": True, "budget": WU.budget_snapshot()}
 
     denied = WU.charge_fetch()
     if denied:
         logger.info("web fetch refused: %s", denied)
         return {"url": url, "error": denied, "budget": WU.budget_snapshot()}
-
-    try:
-        validate_url(url)
-    except BlockedURL as exc:
-        logger.warning("web fetch blocked: %s", exc)
-        return {"url": url, "error": str(exc), "blocked": True, "budget": WU.budget_snapshot()}
 
     try:
         response, final_url = _http_get(url, fetch_session())
@@ -509,20 +625,46 @@ def fetch_and_extract(url: str, *, focus: Optional[str] = None) -> Dict[str, Any
                     "error": (f"unsupported content type {content_type or 'unknown'} — only HTML, "
                               "plain text, XML and JSON can be read"),
                     "budget": WU.budget_snapshot()}
-        body, truncated = _read_capped(response, WU.fetch_max_bytes())
+        # A truncated chunked body, a mid-stream reset or a decompression failure raises HERE,
+        # after the budget is already spent — it must come back as a tool result, not an exception.
+        try:
+            body, truncated = _read_capped(response, WU.fetch_max_bytes())
+        except Exception as exc:
+            logger.warning("web fetch body read failed for %s: %s", final_url, exc)
+            return {"url": final_url, "status": status,
+                    "error": f"could not read page body: {exc}", "budget": WU.budget_snapshot()}
     finally:
         response.close()
 
     raw = _decode(body, content_type)
-    if "json" in content_type:
-        try:
-            title, text = "", json.dumps(json.loads(raw), indent=1)[: WU.fetch_max_chars()]
-        except ValueError:
+    try:
+        if "json" in content_type:
+            # Pretty-printing FIRST and slicing after would materialize the whole expansion: an
+            # indent of 1 turns deeply nested arrays into orders of magnitude more text than the
+            # byte cap allowed in, entirely above the char cap. Cap the input instead, and accept
+            # that the tail of a large document is not reformatted.
+            budget = WU.fetch_max_chars()
+            if len(raw) <= budget:
+                title, text = "", json.dumps(json.loads(raw), indent=1)[:budget]
+            else:
+                title, text = "", raw[:budget]
+        elif "html" in content_type or "xml" in content_type:
+            title, text = html_to_markdown(raw)
+        else:
             title, text = "", raw
-    elif "html" in content_type or "xml" in content_type:
-        title, text = html_to_markdown(raw)
-    else:
-        title, text = "", raw
+    except RecursionError:
+        # json.loads on deeply nested input, or a pathological parse tree: RecursionError is not a
+        # ValueError, so it would have escaped the tool entirely.
+        title, text = "", raw[: WU.fetch_max_chars()]
+    except Exception as exc:
+        logger.warning("web fetch could not extract %s: %s", final_url, exc)
+        return {"url": final_url, "status": status, "content_type": content_type,
+                "error": f"could not extract page content: {exc}", "budget": WU.budget_snapshot()}
+
+    # The page chooses its own <title>, so it is attacker-controlled text entering the payload —
+    # uncapped, a megabyte of it would sit above the content warning and push everything else out
+    # of the model's view.
+    title = str(title or "")[:_TITLE_MAX]
 
     terms = meaningful_terms(focus or "")
     selected, kept, total = select_passages(text, terms, cap=WU.fetch_max_chars())

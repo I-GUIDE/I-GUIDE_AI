@@ -42,12 +42,27 @@ def _fresh(monkeypatch):
     monkeypatch.setenv("FLASK_EMBEDDING_URL", "http://149.165.159.254:5000")
     monkeypatch.setenv("MCP_SERVER_URL", "http://mcp-server:8000/mcp/")
 
+    # Distinct addresses per name. An earlier version of this stub mapped EVERY hostname to one
+    # address, which broke the moment the guard began resolving its deny-listed names too: that
+    # shared address landed on the deny list and every public URL was refused. A resolver that
+    # collapses unrelated names is not a model of DNS.
+    FIXED = {
+        "localhost": "127.0.0.1",
+        "localhost.localdomain": "127.0.0.1",
+        "mcp-server": "172.18.0.3",                     # docker bridge -> private, as in production
+        "storage-dev.i-guide.io": "149.165.172.110",    # MinIO, public address
+        "iguide-agent-dev.cis220065.projects.jetstream-cloud.org": "149.165.147.219",
+        "example.com": "93.184.216.34",
+        "www.example.com": "93.184.216.34",
+    }
+
     def fake_getaddrinfo(host, port, *args, **kwargs):
-        name = str(host).lower()
-        if name in ("localhost", "localhost.localdomain"):
-            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+        name = str(host).lower().rstrip(".")
+        port = port or 0
         if name.endswith(".invalid"):
             raise socket.gaierror("Name or service not known")
+        if name in FIXED:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (FIXED[name], port))]
         # inet_aton mirrors what the platform resolver actually does with numeric forms: verified
         # live, "127.1" and "2130706433" both expand to 127.0.0.1. A stub that mapped them to a
         # public address would make the suite pass while the real guard let them through.
@@ -60,10 +75,15 @@ def _fresh(monkeypatch):
             ipaddress.ip_address(name)                      # IPv6 literal
             return [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", (name, port))]
         except ValueError:
-            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
+            pass
+        # Any other name gets its own stable public address in TEST-NET-3's neighbourhood, so two
+        # unrelated hostnames never collide.
+        h = abs(hash(name)) % 250 + 1
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (f"198.51.200.{h}", port))]
 
     monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
     WF._CACHE.clear()
+    WF._DENIED_IP_CACHE.clear()      # the deny set is env-derived; each test pins its own env
     WU.begin_turn()
 
 
@@ -438,3 +458,163 @@ def test_web_fetch_is_gateable_per_request():
 
     assert normalize_search_methods(["webfetch"]) == ["web_fetch"]
     assert normalize_search_methods("web, fetch") == ["web_search", "web_fetch"]
+
+
+# --- regressions from the adversarial review -------------------------------------
+# Twelve bypasses were confirmed against the first implementation by independent reviewers who
+# reproduced each one against the real module. Each is pinned here.
+
+
+@pytest.mark.parametrize("url", [
+    # The critical one: a single trailing dot is the same name to DNS but not to `in`, and it
+    # reached the real object store on :443 (HTTP 403 came back through the tool).
+    "https://storage-dev.i-guide.io./",
+    "https://iguide-agent-dev.cis220065.projects.jetstream-cloud.org./agent/files/x/download",
+    "HTTPS://STORAGE-DEV.I-GUIDE.IO./",                 # case + dot together
+])
+def test_a_trailing_dot_does_not_evade_the_service_deny_list(monkeypatch, url):
+    monkeypatch.setenv("MINIO_ENDPOINT", "https://storage-dev.i-guide.io")
+    monkeypatch.setenv("AGENT_PUBLIC_BASE_URL",
+                       "https://iguide-agent-dev.cis220065.projects.jetstream-cloud.org")
+    with pytest.raises(WF.BlockedURL, match="own service"):
+        WF.validate_url(url)
+
+
+@pytest.mark.parametrize("url", [
+    "http://[::ffff:149.165.155.195]:80/",     # OpenSearch host, mapped spelling
+    "https://[::ffff:149.165.159.254]/",       # embedding server, mapped spelling
+])
+def test_an_ipv4_mapped_spelling_does_not_evade_the_ip_deny_list(url):
+    """_classify folds mapped addresses, but the deny list compared raw strings — and these are
+    PUBLIC addresses, so nothing else would have stopped them."""
+    with pytest.raises(WF.BlockedURL, match="own service"):
+        WF.validate_url(url)
+
+
+def test_a_name_configured_service_is_also_denied_by_its_address(monkeypatch):
+    """A service configured by NAME is reachable by its IP or any alias; a name compare sees neither."""
+    import socket
+
+    monkeypatch.setenv("MINIO_ENDPOINT", "https://storage.internal.example")
+    WF._DENIED_IP_CACHE.clear()
+
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        if str(host).lower().rstrip(".") == "storage.internal.example":
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("203.0.55.9", port or 0))]
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("203.0.55.9", port or 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    with pytest.raises(WF.BlockedURL, match="own service"):
+        WF.validate_url("https://some-alias.example.com/")
+    WF._DENIED_IP_CACHE.clear()
+
+
+@pytest.mark.parametrize("url", [
+    "http://example.com:99999/",     # out of range
+    "http://example.com:8o/",        # non-numeric
+    "http://example.com:1:2/",       # two ports
+])
+def test_a_malformed_port_is_refused_without_raising(url):
+    """urlsplit defers port parsing to attribute access; ValueError there escaped the tool."""
+    with pytest.raises(WF.BlockedURL, match="malformed port"):
+        WF.validate_url(url)
+    payload = json.loads(__import__("agent_runtime.langchain_granular_tools",
+                                    fromlist=["web_fetch_tool"]).web_fetch_tool(url))
+    assert payload["blocked"] is True          # a tool result, never an exception
+
+
+def test_the_cache_is_consulted_only_after_validation(monkeypatch):
+    """Two raw URLs can share a canonical key. Cache-first let a URL the guard REFUSES return a hit
+    and get its own spelling recorded as citable — a disguised link with the sanitizer's blessing."""
+    body = b"<html><body><p>dam data</p></body></html>"
+    session, _ = _session_returning(_Resp(status=200, headers={"Content-Type": "text/html"}, body=body))
+    monkeypatch.setattr(WF, "fetch_session", lambda: session)
+    first = WF.fetch_and_extract("https://example.com/x.csv", focus="dam")
+    assert first.get("error") is None
+
+    disguised = WF.fetch_and_extract("https://www.usgs.gov:pass@example.com/x.csv", focus="dam")
+    assert disguised.get("blocked") is True
+    assert "credentials" in disguised["error"]
+    assert not any("usgs.gov" in u for u in WU.allowed_urls())
+
+
+def test_a_cache_hit_cites_the_fetched_url_not_the_callers_spelling(monkeypatch):
+    body = b"<html><body><p>dam data</p></body></html>"
+    session, _ = _session_returning(_Resp(status=200, headers={"Content-Type": "text/html"}, body=body))
+    monkeypatch.setattr(WF, "fetch_session", lambda: session)
+    WF.fetch_and_extract("https://example.com/a", focus="dam")
+    WU.begin_turn()                                  # fresh ledger, cache still warm
+    hit = WF.fetch_and_extract("https://example.com/a?utm_source=evil", focus="dam")
+    assert hit["cached"] is True
+    assert all("utm_source" not in u for u in WU.allowed_urls())
+
+
+def test_an_attacker_chosen_title_cannot_flood_the_payload(monkeypatch):
+    body = ("<html><head><title>" + "A" * 400000 + "</title></head><body><p>hi</p></body></html>").encode()
+    session, _ = _session_returning(_Resp(status=200, headers={"Content-Type": "text/html"}, body=body))
+    monkeypatch.setattr(WF, "fetch_session", lambda: session)
+    result = WF.fetch_and_extract("https://example.com/t", focus="hi")
+    assert len(result["title"]) <= WF._TITLE_MAX
+
+
+def test_nested_json_cannot_amplify_past_the_char_cap(monkeypatch):
+    """Pretty-printing before slicing materialized the whole expansion; indent=1 on nested arrays
+    turns a body that fit the BYTE cap into far more text than the CHAR cap allows."""
+    monkeypatch.setenv("AGENT_WEB_FETCH_MAX_CHARS", "4000")
+    body = (b"[" * 60000) + b"0" + (b"]" * 60000)
+    session, _ = _session_returning(_Resp(status=200, headers={"Content-Type": "application/json"}, body=body))
+    monkeypatch.setattr(WF, "fetch_session", lambda: session)
+    result = WF.fetch_and_extract("https://example.com/deep.json")
+    assert result.get("chars", 0) <= 4000
+    assert len(result.get("text") or "") <= 4000
+
+
+def test_recursion_error_on_absurd_json_is_returned_not_raised(monkeypatch):
+    body = (b"[" * 20000) + b"0" + (b"]" * 20000)
+    session, _ = _session_returning(_Resp(status=200, headers={"Content-Type": "application/json"}, body=body))
+    monkeypatch.setattr(WF, "fetch_session", lambda: session)
+    result = WF.fetch_and_extract("https://example.com/rec.json")   # must not raise
+    assert isinstance(result, dict)
+
+
+def test_a_body_read_failure_is_returned_not_raised(monkeypatch):
+    class _Exploding:
+        status_code = 200
+        headers = {"Content-Type": "text/html"}
+
+        def iter_content(self, size):
+            yield b"<html><body><p>start"
+            raise ConnectionError("peer reset mid-chunk")
+
+        def close(self):
+            pass
+
+    session, _ = _session_returning(_Exploding())
+    monkeypatch.setattr(WF, "fetch_session", lambda: session)
+    result = WF.fetch_and_extract("https://example.com/broken")
+    assert "could not read page body" in result["error"]
+
+
+def test_a_connection_landing_on_a_private_peer_is_refused(monkeypatch):
+    """DNS rebinding: validation resolved public, the connect resolved private. The response body
+    must never reach the caller even though the request already went out."""
+    page = _Resp(status=200, headers={"Content-Type": "text/html"},
+                 body=b"<html><body><p>internal secrets</p></body></html>")
+    session, _ = _session_returning(page)
+    monkeypatch.setattr(WF, "fetch_session", lambda: session)
+    monkeypatch.setattr(WF, "_peer_address", lambda resp: "169.254.169.254")
+
+    result = WF.fetch_and_extract("https://rebind.example.com/latest/meta-data/")
+    assert result.get("blocked") is True
+    assert "landed on 169.254.169.254" in result["error"]
+    assert "internal secrets" not in json.dumps(result)
+
+
+def test_a_public_peer_is_accepted(monkeypatch):
+    page = _Resp(status=200, headers={"Content-Type": "text/html"},
+                 body=b"<html><body><p>ordinary page</p></body></html>")
+    session, _ = _session_returning(page)
+    monkeypatch.setattr(WF, "fetch_session", lambda: session)
+    monkeypatch.setattr(WF, "_peer_address", lambda resp: "93.184.216.34")
+    result = WF.fetch_and_extract("https://example.com/", focus="ordinary")
+    assert result.get("error") is None and "ordinary page" in result["text"]
