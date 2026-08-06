@@ -87,6 +87,12 @@
   .reason .body .ln.retry{color:#7a5c9e;font-weight:600}
   .reason .body .ln.retry::before{content:"↻ ";color:#7a5c9e}
   .reason .tally{margin-left:8px;font-weight:500;color:#8a9099;font-size:13px}
+  .reason .body .ln.think{color:#6b6478;font-style:italic;padding-left:16px;font-size:13.5px}
+  .reason .body .ln.think::before{content:"“";color:#b7bcc2;font-style:normal}
+  .reason .body .ln.route{color:#3b4046;font-weight:600}
+  .reason .body .ln.route::before{content:"⇢ ";color:#7a8b3a}
+  .conn .chk{display:flex;align-items:center;gap:7px;font-size:13px;color:#5b6168;font-weight:400;text-transform:none;letter-spacing:0}
+  .conn .chk input{width:14px;height:14px}
 
   /* sources block under the answer */
   .srcs{margin-top:18px;border-top:1px solid var(--line);padding-top:14px}
@@ -224,6 +230,9 @@
           <div><label>Upload endpoint</label><input id="upload_endpoint" value="https://iguide-agent-dev.cis220065.projects.jetstream-cloud.org/agent/files/upload"></div>
           <div><label>API key (optional)</label><input id="api_key" type="password" placeholder="X-API-KEY"></div>
           <div><label>Conversation</label><input id="conversation_name" value="I-GUIDE chat"></div>
+          <div><label>Detailed reasoning log</label>
+            <label class="chk"><input id="agent_dev" type="checkbox" checked> show each search, its query and its results</label>
+          </div>
         </div>
       </details>
       <div class="foot">I-GUIDE Platform <a href="#">Terms of Use</a> apply. Smart Search can make mistakes. Always double-check.</div>
@@ -234,7 +243,12 @@
 /* ===================== config (per spec) ===================== */
 const CONFIG = {
   use_persistent_memory: false,   // OFF
-  agent_dev: false,               // OFF
+  // ON. The server gates the DETAIL tier of the stream on this flag: with it off, only
+  // status/node events are emitted (see _STATUS_TIER_EVENTS in agent_runtime/streaming_trace.py),
+  // so tool_call/tool_result never arrive and the reasoning log can only show "Searching" and
+  // "N docs in evidence" — which method ran, with what query, and what came back are all withheld
+  // by the SERVER, not dropped by this page. Toggle it in the Connection panel.
+  agent_dev: true,
   use_supervisor: true,
   code_exec: true,
   include_mcp_tools: true,
@@ -763,6 +777,23 @@ function reasoningLine(eventName,p){
   }
   if(eventName==="search") return p.message || "Searching the knowledge base";
   if(eventName==="tool_error") return null;   // handled with its own styling in handleBlock
+  // Detail-tier events, available only when the "Detailed reasoning log" toggle is on. llm_start /
+  // llm_end are deliberately ignored: one pair per peer call, carrying nothing a reader can use.
+  if(eventName==="llm_message"){
+    const t=String(p.message||"").trim();
+    return t ? ("thinking: "+(t.length>200?t.slice(0,200)+"…":t)) : null;
+  }
+  if(eventName==="decision"||eventName==="route_decision"||eventName==="supervisor_decision"){
+    const d=p.detail||p;
+    const route=d.route||d.next_action||p.route;
+    const why=d.reason||d.why||d.message;
+    if(route) return "decision: "+route+(why&&why!==route?(" — "+String(why).slice(0,90)):"");
+    return why?("decision: "+String(why).slice(0,110)):null;
+  }
+  if(eventName==="search_complete"){
+    const n=(p.detail&&p.detail.document_count)??p.document_count;
+    return n!=null?("search complete — "+n+" documents in evidence"):null;
+  }
   if(eventName==="analysis") return p.message || null;
   if(eventName==="file") return null;
   if(eventName==="error") return "Error: "+(p.message||p.error||"failed");
@@ -787,7 +818,7 @@ function buildPayload(text, fileIds){
     smart_tool_routing: CONFIG.smart_tool_routing,
     file_ids: ids,
     verbose: false,
-    agent_dev: CONFIG.agent_dev,
+    agent_dev: (document.getElementById("agent_dev") || {}).checked ?? CONFIG.agent_dev,
     use_supervisor: CONFIG.use_supervisor,
     code_exec: CONFIG.code_exec,
   };
@@ -860,7 +891,11 @@ function handleBlock(block, ui, downloads, state){
   const ln=reasoningLine(eventName,p);
   if(ln){
     // A refined-query retry is a distinct event in the search loop; make it read like one.
-    pushLine(ui,ln,/^Retrying with a refined query/i.test(ln)?"retry":null);
+    let kind=null;
+    if(/^Retrying with a refined query/i.test(ln)) kind="retry";
+    else if(ln.startsWith("thinking: ")) kind="think";
+    else if(ln.startsWith("decision: ")) kind="route";
+    pushLine(ui,ln,kind);
   }
   if(Object.keys(downloads).length) renderFiles(ui,downloads);
 }
