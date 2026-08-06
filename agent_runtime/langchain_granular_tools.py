@@ -414,19 +414,19 @@ def make_langchain_granular_tools(
         StructuredTool.from_function(
             func=keyword_search_tool,
             name="keyword_search",
-            description="Keyword/BM25 search over indexed contents. Returns JSON with doc_ids and snippets.",
+            description="Keyword/BM25 search of the I-GUIDE knowledge base. USE FOR: exact terms, names, acronyms, titles, IDs, or rare jargon the user typed verbatim. Complements semantic_search (which misses exact tokens) — for a topical query call BOTH. Returns JSON with doc_ids and snippets.",
             metadata={"category": "retrieval_internal"},
         ),
         StructuredTool.from_function(
             func=semantic_search_tool,
             name="semantic_search",
-            description="Vector semantic search over indexed contents. Returns JSON with doc_ids and snippets.",
+            description="Meaning-based (vector) search of the I-GUIDE knowledge base. USE FOR: concepts, paraphrases, and 'about X' questions where the user's wording differs from the documents'. Complements keyword_search (which misses paraphrases) — for a topical query call BOTH. Returns JSON with doc_ids and snippets.",
             metadata={"category": "retrieval_internal"},
         ),
         StructuredTool.from_function(
             func=neo4j_search_tool,
             name="neo4j_search",
-            description="Graph-aware Neo4j search. Uses pattern-matched Cypher (authors, tags, resource types, collections), LLM-generated Cypher, then keyword fallback. Returns JSON with doc_ids and snippets.",
+            description="Knowledge-GRAPH search. USE FOR: questions keyed on relationships or metadata rather than text — work BY an author or organization, items with a given tag, a specific resource type, members of a collection, and POPULARITY ('most popular/viewed/clicked', 'trending', ranked by real usage counts). Prefer it over semantic_search for those; do not use it for free-text topical questions. Returns JSON with doc_ids and snippets.",
             metadata={"category": "retrieval_internal"},
         ),
         StructuredTool.from_function(
@@ -444,15 +444,20 @@ def make_langchain_granular_tools(
         StructuredTool.from_function(
             func=spatial_search_tool,
             name="spatial_search",
-            description="Spatially-biased search inferred from location mentions. Returns JSON with doc_ids and snippets.",
+            description="Place-aware search of the I-GUIDE knowledge base: infers the location in the query and biases results to it. USE WHENEVER the request names a place (city, state, county, river, basin, region, country) — e.g. 'flood data for Illinois', 'wildfires in California'. Call it IN ADDITION to keyword/semantic search, not instead. Returns JSON with doc_ids and snippets.",
             metadata={"category": "retrieval_internal"},
         ),
         StructuredTool.from_function(
             func=opengeodata_search_tool,
             name="opengeodata_search",
             description=(
-                "OpenGeoData federated search. Optional session_context_json for bbox/time/provider hints. "
-                "Returns JSON with doc_ids and snippets."
+                "Federated search of EXTERNAL open-data catalogs (NASA CMR, Data.gov, Socrata) — data "
+                "that is NOT in the I-GUIDE knowledge base. USE FOR: satellite/remote-sensing imagery, "
+                "climate and weather, elevation/DEM/lidar, land cover, census and other government open "
+                "data, or any request for 'open', 'public' or 'external' data. Call it IN ADDITION to "
+                "the internal searches so the user sees both; do NOT use it to answer questions about "
+                "existing I-GUIDE elements. Optional session_context_json supplies bbox/time/provider "
+                "hints. Returns JSON with doc_ids and snippets."
             ),
             metadata={"category": "retrieval_external"},
         ),

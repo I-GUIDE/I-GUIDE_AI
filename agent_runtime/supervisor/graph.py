@@ -986,6 +986,48 @@ def _recall_recent_element_id(chat_history: Optional[List[Any]], *, max_items: i
     return None
 
 
+# --- coverage floor: query features that IMPLY a retrieval method ------------------
+# Tool choice is the LLM's, but a needed method must never be skipped. These cheap detectors let
+# the deterministic sweep add the implied methods after the peer runs (observed live: "satellite
+# imagery of wildfires in California" used neither spatial_search nor opengeodata_search).
+_GEO_NOUN_RE = re.compile(
+    r"\b(count(?:y|ies)|states?|provinces?|cit(?:y|ies)|towns?|villages?|rivers?|lakes?|basins?|"
+    r"watersheds?|regions?|coasts?|islands?|mountains?|valleys?|deltas?|national\s+parks?|"
+    r"municipalit(?:y|ies)|districts?|prefectures?|catchments?)\b", re.I)
+# "in/near/across <Capitalized>" — a place, unless it follows an authorship cue ("by <Name>").
+_PLACE_PHRASE_RE = re.compile(
+    r"(?<!\bby)\b(?:in|near|around|within|across|throughout|along|over)\s+(?:the\s+)?"
+    r"([A-Z][\w'.-]+(?:\s+[A-Z][\w'.-]+)?)")
+_EXTERNAL_DATA_RE = re.compile(
+    r"\b(satellite|imagery|remote[\s-]?sensing|earth\s+observation|landsat|sentinel|modis|viirs|"
+    r"aster|dem|lidar|elevation|land\s?cover|land\s+use|climate|weather|precipitation|rainfall|"
+    r"temperature|reanalysis|census|acs|noaa|nasa|usgs|epa|open\s+data|public\s+data|"
+    r"external\s+data|third[\s-]party|global\s+dataset)\b", re.I)
+
+
+_AUTHORSHIP_RE = re.compile(r"\bby\s+[A-Z]")
+
+
+def _mentions_place(query: str) -> bool:
+    """True when the request names a location (so place-aware search is implied).
+
+    An explicit geographic noun always counts. Otherwise a capitalized "in/near/across X" phrase
+    counts — except in an author-scoped request, where such a phrase is usually a venue or a
+    surname ("papers by Wang in Nature"), not a place.
+    """
+    text = query or ""
+    if _GEO_NOUN_RE.search(text):
+        return True
+    if _AUTHORSHIP_RE.search(text):
+        return False
+    return bool(_PLACE_PHRASE_RE.search(text))
+
+
+def _wants_external_data(query: str) -> bool:
+    """True when the request is for data types that live in EXTERNAL open-data catalogs."""
+    return bool(_EXTERNAL_DATA_RE.search(query or ""))
+
+
 def _direct_search_sweep(query: str, enabled_search_methods: Optional[List[str]],
                          *, k: int = 8) -> List[Dict[str, Any]]:
     """Deterministic multi-method retrieval sweep: run keyword AND semantic search directly
@@ -1023,6 +1065,27 @@ def _direct_search_sweep(query: str, enabled_search_methods: Optional[List[str]]
 
             docs.extend(_hit_to_document(h, source_name="semantic")
                         for h in (semantic_search(query, size=k) or []) if _public(h))
+        except Exception:
+            pass
+    # Conditional methods the QUERY implies — added regardless of what the LLM chose to call.
+    if permitted("spatial_search") and _mentions_place(query):
+        try:
+            from rag_pipeline.search.agents import _hit_to_document
+            from rag_pipeline.search.spatial import get_spatial_search_results
+
+            docs.extend(_hit_to_document(h, source_name="spatial")
+                        for h in (get_spatial_search_results(query, size=k) or []) if _public(h))
+        except Exception:
+            pass
+    if permitted("opengeodata_search") and _wants_external_data(query):
+        try:
+            # Normalized like the tool payload (keeps url/abstract/provider) so external hits stay
+            # citable as links rather than losing their landing page.
+            from agent_runtime.langchain_granular_tools import _normalize_hits
+            from rag_pipeline.search.opengeodata import get_opengeodata_results
+
+            docs.extend(_normalize_hits(get_opengeodata_results(query, limit=k) or [],
+                                        source="opengeodata"))
         except Exception:
             pass
     return [d for d in docs if isinstance(d, dict)]
