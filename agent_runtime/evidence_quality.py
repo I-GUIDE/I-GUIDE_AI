@@ -16,9 +16,12 @@ callable (handy in tests).
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, Dict, List, Optional, Union
+import logging
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 LLMLike = Union[Any, Callable[[str], str]]
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +73,68 @@ def _normalize_document(entry: Any, index: int) -> Dict[str, Any]:
     title = str(document.get("title") or document.get("element_type") or "Untitled").strip()
     contents = str(document.get("contents") or document.get("snippet") or document.get("text") or "").strip()
     return {"doc_id": doc_id, "title": title, "contents": contents, "_entry": entry}
+
+
+# Reciprocal Rank Fusion constant. 60 is the value from the original TREC work and the de facto
+# default; it damps the gap between adjacent top ranks so one source cannot dominate on position 1
+# alone. Not sensitive enough to be worth tuning here.
+_RRF_K = 60
+
+
+def _doc_source(entry: Any) -> str:
+    """Which retrieval method produced this doc, for per-source ranking."""
+    if not isinstance(entry, dict):
+        return "unknown"
+    document = entry.get("document") if isinstance(entry.get("document"), dict) else entry
+    return str(document.get("source") or document.get("source_system") or "unknown").strip().lower()
+
+
+def _doc_score(entry: Any) -> float:
+    """The doc's score AS REPORTED BY ITS OWN SOURCE.
+
+    Only ever compared against scores from the SAME source: BM25 relevance (~4-9) and the catalog
+    scorer's own scale (~0-1) are not commensurable, which is the whole reason this module fuses
+    ranks rather than values.
+    """
+    if not isinstance(entry, dict):
+        return 0.0
+    document = entry.get("document") if isinstance(entry.get("document"), dict) else entry
+    try:
+        return float(document.get("score", entry.get("score", 0.0)) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def rrf_order(documents: List[Any], *, k: int = _RRF_K) -> List[Any]:
+    """Order documents across sources by Reciprocal Rank Fusion.
+
+    Each source is ranked internally by its own score — valid, because a score is comparable within
+    the source that produced it — and the fused score is ``sum(1 / (k + rank))`` over the sources a
+    document appears in. Only RANKS cross the source boundary, never score magnitudes, so a BM25
+    8.58 and a catalog 1.0 no longer decide the order by scale.
+
+    This is a fallback for when LLM rerank is unavailable, and it fuses on retrieval position only:
+    it cannot judge topical fitness, so a hit that ranks high within its own source stays high here
+    even if it is off-topic. That judgement is the reranker's job.
+    """
+    if not isinstance(documents, list) or len(documents) <= 1:
+        return documents
+
+    by_source: Dict[str, List[Tuple[int, Any]]] = {}
+    for index, entry in enumerate(documents):
+        by_source.setdefault(_doc_source(entry), []).append((index, entry))
+
+    # index -> fused score. Keyed by position so unhashable/duplicate entries are still distinct.
+    fused: Dict[int, float] = {index: 0.0 for index in range(len(documents))}
+    for group in by_source.values():
+        # Sort by the source's own score, keeping the original order as the tie-break so a source
+        # that reports no scores at all retains the order it returned.
+        ranked = sorted(group, key=lambda pair: (-_doc_score(pair[1]), pair[0]))
+        for rank, (index, _entry) in enumerate(ranked, start=1):
+            fused[index] += 1.0 / (k + rank)
+
+    order = sorted(range(len(documents)), key=lambda i: (-fused[i], i))
+    return [documents[i] for i in order]
 
 
 def _extract_json_object(text: str) -> Optional[Any]:
@@ -134,14 +199,27 @@ def rerank_documents(
     normalized = [_normalize_document(entry, i) for i, entry in enumerate(documents)]
     by_id = {d["doc_id"]: d for d in normalized}
 
+    failure = ""
     try:
         raw = _invoke_llm(llm, _rerank_prompt(query, normalized))
         parsed = _extract_json_object(raw) or {}
         ranking = parsed.get("ranking") if isinstance(parsed, dict) else None
-    except Exception:
+        if not isinstance(ranking, list) or not ranking:
+            failure = "the model returned no usable ranking"
+    except Exception as exc:
         ranking = None
-    if not isinstance(ranking, list) or not ranking:
-        return documents
+        failure = f"{type(exc).__name__}: {exc}"
+
+    if failure:
+        # Degrading SILENTLY here was the real defect: the caller got the merged sweep order, which
+        # is arbitrary across sources, AND kept every document because top_k was only applied on
+        # the success path. Fall back to a deterministic rank fusion, still truncate, and say so.
+        logger.warning(
+            "Evidence rerank unavailable (%s); falling back to reciprocal rank fusion over %d docs",
+            failure, len(documents),
+        )
+        fused = rrf_order(documents)
+        return fused[:top_k] if top_k is not None else fused
 
     ordered: List[Any] = []
     seen = set()
