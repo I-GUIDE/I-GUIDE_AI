@@ -1245,8 +1245,9 @@ def _direct_search_sweep(query: str, enabled_search_methods: Optional[List[str]]
 _EXTERNAL_SOURCES = {"web", "opengeodata", "datacite"}
 
 
-def _has_platform_evidence(docs: Any) -> bool:
-    """Whether the run holds any evidence that did NOT come from the open web or a catalog."""
+def _platform_docs(docs: Any) -> List[Any]:
+    """The subset of *docs* that did NOT come from the open web or an external catalog."""
+    kept: List[Any] = []
     for doc in docs or []:
         if not isinstance(doc, dict):
             continue
@@ -1257,8 +1258,25 @@ def _has_platform_evidence(docs: Any) -> bool:
         etype = str(src.get("element_type") or "").strip().lower()
         if name in _EXTERNAL_SOURCES or etype in _EXTERNAL_SOURCES:
             continue
-        return True
-    return False
+        kept.append(doc)
+    return kept
+
+
+def _has_platform_evidence(docs: Any) -> bool:
+    """Whether the run holds any evidence that did NOT come from the open web or a catalog."""
+    return bool(_platform_docs(docs))
+
+
+def _platform_evidence_is_unhelpful(docs: Any, query: str) -> bool:
+    """Whether the platform gave us nothing USEFUL for *query*.
+
+    "Nothing at all" is the wrong bar. Keyword search is a nearest-match engine: it returns its
+    eight closest documents for any query, so an unknown subject comes back with a full result set
+    that mentions none of it — and the answer then reads "the provided evidence does not include
+    specific resources explaining <subject>". Reusing the refinement loop's own judgement
+    (empty OR below the topical-coverage floor) makes the fallback fire for exactly that case.
+    """
+    return _results_are_poor(_platform_docs(docs), query)
 
 
 # Requests whose subject is I-GUIDE's OWN catalogue. Deliberately narrower than the catalog
@@ -1972,7 +1990,7 @@ def build_supervisor_graph(
         # web rather than reporting no results while a public answer exists. Placed AFTER the
         # refinement loop on purpose — a bad phrasing should be retried against our own index
         # before going to a third party — and it cannot fire when the KB returned anything at all.
-        if not _has_platform_evidence(_merge_dedup(state.get("evidence") or [], docs)):
+        if _platform_evidence_is_unhelpful(_merge_dedup(state.get("evidence") or [], docs), q):
             web_docs = _web_fallback_evidence(q, enabled_search_methods)
             if web_docs:
                 emit_trace_event(

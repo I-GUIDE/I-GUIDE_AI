@@ -207,3 +207,55 @@ def test_fallback_does_fire_for_general_questions(monkeypatch, query):
     calls = _stub_web(monkeypatch)
     assert len(G._web_fallback_evidence(query, None)) == 2
     assert calls["search"] == 1
+
+
+# --- "nothing useful", not merely "nothing at all" ---------------------------------
+# Reported: "explain training-free gpro" answered "the provided evidence does not include specific
+# resources ... explaining training-free GPRO" with no web search. Keyword search is a nearest-match
+# engine — it returns its eight closest documents for ANY query — so an unknown subject comes back
+# with a FULL result set that mentions none of it. A trigger keyed on "no evidence at all" never
+# fires for that, which is the case the fallback is most needed for.
+
+
+def _offtopic(n=8):
+    return [{"doc_id": f"kb-{i}", "source": "keyword", "element_type": "dataset",
+             "title": f"Flood Risk Map: County {i}",
+             "contents": "FEMA flood hazard mapping for a county in Illinois."} for i in range(n)]
+
+
+def _ontopic():
+    return [{"doc_id": "kb-1", "source": "keyword", "element_type": "publication",
+             "title": "Training-free GRPO for policy optimization",
+             "contents": "A training-free variant of group relative policy optimization."}]
+
+
+def test_a_full_but_off_topic_result_set_counts_as_unhelpful():
+    docs = _offtopic()
+    assert G._has_platform_evidence(docs) is True          # there IS evidence ...
+    assert G._platform_evidence_is_unhelpful(docs, "explain training-free gpro") is True   # ... but it is useless
+
+
+def test_on_topic_platform_evidence_is_helpful():
+    assert G._platform_evidence_is_unhelpful(_ontopic(), "explain training-free grpo") is False
+
+
+def test_no_platform_evidence_is_still_unhelpful():
+    assert G._platform_evidence_is_unhelpful([], "explain training-free gpro") is True
+    assert G._platform_evidence_is_unhelpful([_web_doc(), _catalog_doc()],
+                                            "explain training-free gpro") is True
+
+
+def test_external_hits_do_not_rescue_an_off_topic_platform_result():
+    """Catalog hits are not platform evidence, so they neither satisfy nor block the judgement."""
+    docs = _offtopic() + [_catalog_doc()]
+    assert G._platform_evidence_is_unhelpful(docs, "explain training-free gpro") is True
+
+
+def test_the_reported_query_reaches_the_web(monkeypatch):
+    """End to end over the gates: the reported question must not be classed as a platform question
+    and must survive the unhelpful-evidence check."""
+    calls = _stub_web(monkeypatch)
+    q = "explain training-free gpro"
+    assert G._asks_about_platform_holdings(q) is False
+    assert G._platform_evidence_is_unhelpful(_offtopic(), q) is True
+    assert len(G._web_fallback_evidence(q, None)) == 2 and calls["search"] == 1
