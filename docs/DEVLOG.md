@@ -650,3 +650,62 @@ silently omit them for duck-typed executors would hide real wiring bugs.
 
 **Next** M1.3 (agent indices) is blocked on the embedding server. Taking the grounding-audit
 false positive (task #10) next instead, since it degrades every correct answer in the UI.
+
+---
+
+## 2026-08-07 · M6a · Grounding audit: verdict computed from the ledger, in code · model: gpt-4o
+
+**Change** `agent_runtime/evidence_quality.py`: added `_is_rollup_claim()` and
+`_recompute_verdict()`, applied to every audit result. Roll-up rows are reclassified as
+supported when at least one genuine claim is supported, and
+`hallucination_detected`/`severity`/`issues` are re-derived from the surviving ledger rather
+than taken from the model. Also added an explicit roll-up rule to `_AUDIT_PROMPT`. 22 tests.
+
+**Why** Driving the prototype produced a `severity: high` hallucination caveat on a
+**fully-grounded** answer — four notebooks, all four present in the retrieved evidence. The
+caveat then reached the user and undermined a correct answer.
+
+**Measured**, 5 runs each against the live index:
+
+| | false positives (well-grounded answer) | true positives (fabricated tail) |
+|---|---|---|
+| before | **5/5 high** | 5/5 high |
+| prompt rule only | **4/5 high** | 5/5 high |
+| + deterministic recomputation | **0/5 high** | **5/5 high** |
+
+Confirmed end to end through `/agent/chat/stream`: the same query now returns a clean
+1412-char answer with **no caveat**. Suite **592 passed**, same 3 pre-existing failures.
+
+**Surprised by** three things, and the first invalidated my own first diagnosis.
+
+1. **My initial reproduction was wrong, and I nearly filed a bug on it.** I passed raw
+   OpenSearch hits to `audit_answer_grounding`, and `_normalize_document` does not understand
+   `{"_source": {...}}` — it yields `doc_id="doc-0"`, `title="Untitled"`, `contents=""`. The
+   auditor received *literally empty evidence* and correctly reported everything absent. The
+   live path is fine because `_direct_search_sweep` normalises via `_hit_to_document`. Worth
+   noting as a latent trap: any future caller passing raw hits gets an audit that flags every
+   correct answer as fully hallucinated, silently.
+2. **The offending row was always the same one, and it is unprovable by construction.** The
+   answer's opening sentence, "The platform offers several notebooks that compute spatial
+   accessibility to hospitals," cannot have a verbatim supporting span — no document says "the
+   platform offers several." Its truth is carried by the items listed beneath it. Under the
+   prompt's one-span-per-row rule it lands as "absent" and promotes to high severity.
+3. **The prompt could not fix it.** Adding an explicit, emphatic rule not to open a row for
+   roll-up sentences moved the rate only **5/5 → 4/5**: the instruction competes with the
+   model's judgement and loses. `rollup_claims_reclassified` fires in 5/5 runs even *after*
+   the prompt change, i.e. the model still rows the sentence every single time and the code is
+   what corrects it.
+
+That third point is the general lesson, and it is the same one the deterministic search
+short-circuits already encode: **where an invariant is checkable, check it — do not ask a
+model to respect it.** The verdict is now derived from the ledger in both directions: a clean
+label over unsupported rows is corrected *upward* to high, and an issue raised against a row
+the model itself marked supported is dropped.
+
+The guard against this becoming a hole: `_HARD_COUNT_RE` keeps "three notebooks", "12
+datasets", "the only notebook" out of the roll-up class, so a fabricated *count* stays
+auditable. And with no usable ledger the model's verdict is left untouched, so this can never
+invent a clean result for an audit that did not produce one.
+
+**Next** M1.3 needs the embedding server. Proceeding to the extraction restructure (M2
+prerequisites: `contracts.py` + the callability analyzer) which is unblocked.
