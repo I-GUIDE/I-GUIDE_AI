@@ -29,6 +29,7 @@ import logging
 import os
 import shutil
 import subprocess
+from functools import lru_cache
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -172,17 +173,62 @@ def _is_auth_failure(text: str) -> bool:
     ))
 
 
-def _build_argv(exe: str, prompt: str, mdl: str) -> list:
+_DEFAULT_SYSTEM = ("You are a language model answering a single request. Answer directly and "
+                   "completely. You have no tools and no files to consult.")
+
+# Tools the coding agent would otherwise use. Denied by name because --bare (which would also
+# do this) cannot read OAuth, so a subscription run has to be constrained explicitly.
+_AGENT_TOOLS = ("Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Task,NotebookEdit,"
+                "TodoWrite,SlashCommand,KillShell,BashOutput")
+
+
+@lru_cache(maxsize=1)
+def _neutral_cwd() -> str:
+    """An empty directory to run the CLI from.
+
+    Without it the CLI inherits the current project: it discovers CLAUDE.md, reads the repo
+    and behaves like the coding agent rather than a model. Measured on one tool-selection
+    prompt from this repo's root: **78.8s across 4 turns**, and the "answer" was commentary on
+    this repo's own source. From an empty directory with the flags below: **3.5s, 1 turn**,
+    returning exactly the requested JSON.
+    """
+    import tempfile
+    path = os.path.join(tempfile.gettempdir(), "iguide_claude_cli_cwd")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _isolation_argv() -> list:
+    """Flags that stop `claude -p` from behaving like an agent.
+
+    ``--bare`` does all of this and more, but it never reads OAuth, so it is unavailable on
+    the subscription path this project uses for development. These flags are the
+    subscription-compatible equivalent. Set ``CLAUDE_CLI_ISOLATE=0`` to run without them (for
+    debugging what the agent would do), accepting the latency and the project contamination.
+    """
+    if str(os.getenv("CLAUDE_CLI_ISOLATE") or "").strip().lower() in {"0", "false", "no", "off"}:
+        return []
+    return ["--disallowed-tools", _AGENT_TOOLS,
+            "--strict-mcp-config",          # ignore every MCP server not passed explicitly
+            "--setting-sources", "",        # no user/project/local settings, no CLAUDE.md
+            "--no-session-persistence"]
+
+
+def _build_argv(exe: str, prompt: str, mdl: str, system: Optional[str] = None) -> list:
     argv = [exe, "-p", prompt, "--output-format", "json", "--model", mdl]
     if use_bare():
         argv.append("--bare")
+    else:
+        # Under --bare these are redundant; without it they are what keeps a call cheap.
+        argv += _isolation_argv()
+    argv += ["--system-prompt", system or _DEFAULT_SYSTEM]
     budget = str(os.getenv("CLAUDE_CLI_MAX_BUDGET_USD") or "").strip()
     if budget:
         argv += ["--max-budget-usd", budget]
     return argv
 
 
-def call(prompt: str) -> str:
+def call(prompt: str, *, system: Optional[str] = None) -> str:
     """Run one non-interactive `claude -p` turn and return its text.
 
     ``--output-format json`` is used rather than plain text because the wrapper object
@@ -203,8 +249,8 @@ def call(prompt: str) -> str:
     _load_token_from_env_file()
     mdl = model()
     try:
-        proc = subprocess.run(_build_argv(exe, prompt, mdl), capture_output=True,
-                              text=True, timeout=_timeout())
+        proc = subprocess.run(_build_argv(exe, prompt, mdl, system), capture_output=True,
+                              text=True, timeout=_timeout(), cwd=_neutral_cwd())
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"claude CLI timed out after {_timeout()}s (model={mdl})") from exc
 

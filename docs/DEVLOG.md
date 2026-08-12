@@ -1089,3 +1089,45 @@ and, for the last two, the real container.
 
 **Next** the agent path end to end: a prototype query that makes the model call
 `kb_method_search`, then `execute_code` with the returned import line.
+
+## 2026-08-12 · M0.6b · The agent path now runs on the CLI too — and it was running an agent
+**Change** `agent_runtime/chat_claude_cli.py` (new): a LangChain `BaseChatModel` with working
+  `bind_tools`, selected by `build_default_llm()` when `LLM_PROVIDER=claude-cli`. Plus CLI
+  isolation flags in `llm_claude_cli._build_argv` and a neutral working directory.
+
+**Why** M0.6 only switched `call_llm`. The agent itself goes through
+`executor_factory.build_default_llm()` → `ChatOpenAI`, so every agent turn of every experiment
+still billed OpenAI even with the provider set to claude-cli — which is most of the cost the
+switch was meant to remove, since `create_agent` drives everything through tool calls.
+
+Tool calling is prompt-enforced: the shim asks for `{"tool_calls":[...]}` or `{"content":...}`
+and parses it. That is a real limitation and it is handled rather than hidden — a malformed
+reply degrades to content (an unparseable turn should still end with an answer) and is counted
+in `malformed_replies`; a hallucinated tool name is dropped instead of reaching the executor.
+
+**Measured** one tool-selection prompt, `claude -p` from this repo's root vs isolated:
+
+| | before | after |
+|---|---|---|
+| latency | **78.8 s** | **3.5 s** |
+| turns the CLI took | 4 | 1 |
+| reply | prose *about this repo's source* | exactly the requested JSON |
+
+Full two-turn loop through the shim with the real tools: 3.4 s to choose `kb_method_search`,
+11.0 s to answer from its result, **0 malformed replies**, and the answer carried the correct
+pinned import line and requirements. Suite **762 passed**, same 3 pre-existing failures.
+
+**Surprised by** what `claude -p` actually is. It is not a completion endpoint — it is Claude
+Code. Invoked from a project directory it discovers `CLAUDE.md`, reads the repo, and takes
+multiple agent turns: the first "answer" I got back was *commentary on the very file I was
+writing*, which is both wrong and 22× slower. `--bare` suppresses all of this but explicitly
+never reads OAuth, so it is unavailable on the subscription path. The equivalent had to be
+assembled by hand: `--disallowed-tools` for every agent tool, `--strict-mcp-config`,
+`--setting-sources ""`, `--no-session-persistence`, an explicit `--system-prompt` replacing
+the coding-agent persona, and `cwd` set to an empty directory.
+
+Worth noting for the paper's methods section: any measurement taken through this backend
+*before* this change was contaminated by the contents of the checkout it ran in.
+
+**Next** drive the prototype UI against this backend and confirm the model reaches for
+`kb_method_search` on its own, from a real user question.

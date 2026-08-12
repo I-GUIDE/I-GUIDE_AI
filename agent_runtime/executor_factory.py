@@ -147,10 +147,21 @@ def normalize_openai_base_url(url: Optional[str]) -> Optional[str]:
 
 
 def build_default_llm() -> Any:
-    """Build a ``ChatOpenAI`` instance from environment variables.
+    """Build the agent's chat model from environment variables.
 
-    Priority: VLLM_* env vars → OPENAI_* env vars → defaults.
+    ``LLM_PROVIDER=claude-cli`` → the `claude` CLI (development and experiments only; see
+    ``agent_runtime/chat_claude_cli.py``). This branch exists so the whole agent path can be
+    exercised through the prototype without spending API credit — previously only the
+    ``call_llm`` path honoured the provider switch, so every agent turn still hit OpenAI.
+
+    Otherwise a ``ChatOpenAI``, priority VLLM_* → OPENAI_* → defaults.
     """
+    from rag_pipeline import llm_claude_cli
+
+    if llm_claude_cli.is_selected():
+        from agent_runtime.chat_claude_cli import build as build_claude_cli
+        return build_claude_cli()
+
     try:
         from langchain_openai import ChatOpenAI
     except Exception as exc:

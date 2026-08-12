@@ -1,0 +1,203 @@
+"""The `claude` CLI as the agent's chat model, including tool calling.
+
+``llm_claude_cli`` covered ``call_llm``; the agent itself needs a ``BaseChatModel`` with
+working ``bind_tools`` because ``create_agent`` drives everything through tool calls. Without
+this every agent turn of every experiment billed OpenAI even with LLM_PROVIDER=claude-cli.
+
+Tool calling is prompt-enforced, not API-enforced, so the parser is the load-bearing part and
+gets most of the attention here: a malformed reply must degrade to an answer rather than
+raise, and a hallucinated tool name must be dropped rather than reach the executor.
+
+No subprocess is started — ``llm_claude_cli.call`` is monkeypatched — so these are pure.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from agent_runtime import chat_claude_cli as ccc
+
+
+@pytest.fixture()
+def model(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "claude-cli")
+    replies = {"text": ""}
+
+    def fake_call(prompt, *, system=None):
+        replies["prompt"] = prompt
+        replies["system"] = system
+        return replies["text"]
+
+    from rag_pipeline import llm_claude_cli
+    monkeypatch.setattr(llm_claude_cli, "call", fake_call)
+    monkeypatch.setattr(llm_claude_cli, "check_not_deployed", lambda: None)
+    m = ccc.chat_class()(model_name="sonnet",
+                         tool_schemas=[{"name": "kb_method_search", "description": "find methods",
+                                        "parameters": {"query": {"type": "string"}},
+                                        "required": ["query"]}])
+    return m, replies
+
+
+def _invoke(model_and_replies, reply_text):
+    m, replies = model_and_replies
+    replies["text"] = reply_text
+    from langchain_core.messages import HumanMessage
+    return m.invoke([HumanMessage(content="find something")])
+
+
+# ------------------------------------------------------------------ tool calls
+
+def test_a_json_tool_call_becomes_a_real_tool_call(model):
+    out = _invoke(model, '{"tool_calls":[{"name":"kb_method_search","arguments":{"query":"crime"}}]}')
+    assert len(out.tool_calls) == 1
+    assert out.tool_calls[0]["name"] == "kb_method_search"
+    assert out.tool_calls[0]["args"] == {"query": "crime"}
+
+
+def test_a_fenced_reply_is_still_parsed():
+    """Models wrap JSON in a code fence constantly, however firmly they are told not to."""
+    assert ccc._extract_json('```json\n{"content":"hi"}\n```') == {"content": "hi"}
+
+
+def test_json_with_prose_around_it_is_recovered():
+    assert ccc._extract_json('Sure! {"content":"hi"} Hope that helps.') == {"content": "hi"}
+
+
+def test_arguments_sent_as_a_json_string_are_coerced(model):
+    """A recurring model habit: "arguments": "{\\"query\\": \\"x\\"}" instead of an object."""
+    out = _invoke(model, '{"tool_calls":[{"name":"kb_method_search","arguments":"{\\"query\\":\\"x\\"}"}]}')
+    assert out.tool_calls[0]["args"] == {"query": "x"}
+
+
+def test_a_single_tool_call_object_is_accepted_like_a_list(model):
+    out = _invoke(model, '{"tool_calls":{"name":"kb_method_search","arguments":{"query":"x"}}}')
+    assert len(out.tool_calls) == 1
+
+
+def test_a_hallucinated_tool_name_is_dropped_not_forwarded(model):
+    """An unknown name would raise deep inside the executor; drop it and let the model retry."""
+    out = _invoke(model, '{"tool_calls":[{"name":"definitely_not_a_tool","arguments":{}}]}')
+    assert out.tool_calls == []
+
+
+def test_a_content_reply_carries_no_tool_calls(model):
+    out = _invoke(model, '{"content":"the answer"}')
+    assert out.tool_calls == []
+    assert out.content == "the answer"
+
+
+# ------------------------------------------------------------------ degradation
+
+def test_a_non_json_reply_becomes_content_rather_than_an_exception(model):
+    m, _ = model
+    out = _invoke(model, "I could not follow the protocol, but here is the answer anyway.")
+    assert "answer anyway" in out.content
+    assert out.tool_calls == []
+    assert m.malformed_replies == 1, "the degradation must be counted, not silent"
+
+
+def test_an_empty_reply_does_not_raise(model):
+    out = _invoke(model, "")
+    assert out.content == ""
+
+
+def test_alternative_answer_keys_are_accepted(model):
+    assert _invoke(model, '{"answer":"forty-two"}').content == "forty-two"
+
+
+# ------------------------------------------------------------------ prompt assembly
+
+def test_the_prompt_carries_tools_the_protocol_and_the_conversation(model):
+    m, replies = model
+    _invoke(model, '{"content":"ok"}')
+    prompt = replies["prompt"]
+    assert "kb_method_search" in prompt
+    assert "tool_calls" in prompt
+    assert "find something" in prompt
+
+
+def test_the_system_prompt_replaces_the_coding_agent_persona(model):
+    """Without this the CLI answers as Claude Code and reads the working directory:
+    measured 78.8s over 4 turns, versus 3.5s over 1."""
+    m, replies = model
+    _invoke(model, '{"content":"ok"}')
+    assert "JSON" in (replies["system"] or "")
+
+
+def test_tool_results_are_labelled_with_their_tool(model):
+    """Unlabelled results are the main cause of the model repeating a call it already made."""
+    m, replies = model
+    replies["text"] = '{"content":"ok"}'
+    from langchain_core.messages import HumanMessage, ToolMessage
+    m.invoke([HumanMessage(content="q"),
+              ToolMessage(content="RESULTDATA", name="kb_method_search", tool_call_id="c0")])
+    assert "RESULT of kb_method_search" in replies["prompt"]
+
+
+def test_a_prior_tool_call_is_replayed_so_the_model_sees_what_it_asked(model):
+    m, replies = model
+    replies["text"] = '{"content":"ok"}'
+    from langchain_core.messages import AIMessage, HumanMessage
+    prior = AIMessage(content="", tool_calls=[{"name": "kb_method_search",
+                                               "args": {"query": "crime"},
+                                               "id": "c0", "type": "tool_call"}])
+    m.invoke([HumanMessage(content="q"), prior])
+    assert "kb_method_search" in replies["prompt"] and "crime" in replies["prompt"]
+
+
+# ------------------------------------------------------------------ wiring
+
+def test_bind_tools_builds_schemas_from_real_tools(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "claude-cli")
+    from agent_runtime.langchain_granular_tools import make_langchain_granular_tools
+
+    tools = [t for t in make_langchain_granular_tools() if t.name == "kb_method_search"]
+    bound = ccc.chat_class()(model_name="sonnet").bind_tools(tools)
+    assert [s["name"] for s in bound.tool_schemas] == ["kb_method_search"]
+    assert "query" in bound.tool_schemas[0]["parameters"]
+
+
+def test_the_provider_switch_selects_this_model(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "claude-cli")
+    monkeypatch.setenv("CLAUDE_CLI_MODEL", "sonnet")
+    from agent_runtime.executor_factory import build_default_llm
+
+    assert type(build_default_llm()).__name__ == "ChatClaudeCli"
+
+
+# ------------------------------------------------------------------ CLI isolation
+
+def test_the_cli_is_invoked_with_agent_tools_denied(monkeypatch):
+    """`claude -p` defaults to the full coding agent — it reads the cwd and acts. These flags
+    are the subscription-compatible stand-in for --bare, which cannot read OAuth."""
+    from rag_pipeline import llm_claude_cli
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CLI_BARE", raising=False)
+    monkeypatch.delenv("CLAUDE_CLI_ISOLATE", raising=False)
+    argv = llm_claude_cli._build_argv("claude", "prompt", "sonnet")
+    assert "--disallowed-tools" in argv
+    assert "--strict-mcp-config" in argv
+    assert "--system-prompt" in argv
+    denied = argv[argv.index("--disallowed-tools") + 1]
+    assert {"Bash", "Read", "WebFetch"} <= set(denied.split(","))
+
+
+def test_isolation_can_be_disabled_for_debugging(monkeypatch):
+    from rag_pipeline import llm_claude_cli
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("CLAUDE_CLI_ISOLATE", "0")
+    argv = llm_claude_cli._build_argv("claude", "prompt", "sonnet")
+    assert "--disallowed-tools" not in argv
+
+
+def test_a_deployment_marker_refuses_this_backend(monkeypatch):
+    from rag_pipeline import llm_claude_cli
+
+    monkeypatch.setenv("LLM_PROVIDER", "claude-cli")
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    with pytest.raises(RuntimeError, match="development-only"):
+        llm_claude_cli.check_not_deployed()
