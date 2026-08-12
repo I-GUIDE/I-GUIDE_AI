@@ -1037,3 +1037,55 @@ something to infer silently.
 
 **Next** end-to-end: agent finds a unit via `kb_method_search`, imports it inside the sandbox
 through the read-only mount, and passes data between two calls in one session.
+
+## 2026-08-12 · M2.5 · The library actually works in the sandbox — after two more defects
+**Change** Lazy element packages (`_element_init`, PEP 562 `__getattr__`) in
+  `library_emitter`; new `extractors/pkgmap.py` deriving each unit's install set from its own
+  slice; `notebook_extractor` populates `UnitContract.requirements` from it.
+
+**Why** With the tools in place I ran the real seam — build the library into `storage_root()`,
+mount it into the sandbox, use the exact import line the registry advertises. Two failures,
+both invisible to every static check:
+
+1. **A sibling's dependency broke an unrelated unit.** Python runs a parent package's
+   `__init__` before any submodule, so the pinned
+   `from iguide_methods.ke_x.v_45b703eec714 import load_chicago_crime_data` executed *every*
+   sibling module first, dying on `ModuleNotFoundError: pandas` raised by a **different unit**.
+   It also silently made per-unit requirements meaningless — the true install set was the
+   union over the element. Now the element `__init__` holds a `{symbol: module}` table and
+   resolves through `__getattr__`, so importing one unit imports one module.
+
+2. **Every contract understated its dependencies.** `UnitContract.requirements` was read by
+   the emitter and never written by the extractor: **16 of 16 units declared `{}`** while
+   their slices imported pandas, geopandas and smolagents. The agent reads that field to
+   decide what to install, so it installed nothing and the import failed.
+   `pkgmap.requirements_from_source` parses the slice — the thing that actually gets imported,
+   walking function bodies too since lazy imports are common in notebook code — and maps
+   import names to distributions. `inferred` names the distributions that were *assumed* to
+   match their import name, so a wrong guess is auditable rather than a confusing "no matching
+   distribution" at run time.
+
+**Measured** in the real Docker sandbox (`python:3.11-slim`, `--network none`, read-only
+rootfs), two sequential `execute_code` calls in one session:
+
+| | before | after |
+|---|---|---|
+| units with real pip requirements | 0/16 | 14/16 (2 stdlib-only, correctly empty) |
+| advertised import line works in-container | ✗ | ✓ |
+| declared deps sufficient to import | ✗ | ✓ |
+| deps reinstalled on call 2 | — | no (cached in the session `.deps`) |
+| call 1's files readable in call 2 | — | ✓ (`step1.json`, `weather.csv`, 48 rows) |
+| write to `/opt/iguide_methods` | — | refused, `OSError` |
+
+Suite **743 passed**, same 3 pre-existing live-cluster failures.
+
+**Surprised by** the shape of the whole M4.1/M2.5 sequence: four independent defects, each
+one hidden by the one before it. The library could not be searched, so nobody noticed the
+units were methods; the methods broke the element `__init__`, so nobody noticed the eager
+re-export was wrong; the eager re-export made per-unit requirements irrelevant, so nobody
+noticed they were empty. Each fix was the instrument that found the next defect, and none of
+them were reachable from unit tests over synthetic fixtures — every one needed the real corpus
+and, for the last two, the real container.
+
+**Next** the agent path end to end: a prototype query that makes the model call
+`kb_method_search`, then `execute_code` with the returned import line.

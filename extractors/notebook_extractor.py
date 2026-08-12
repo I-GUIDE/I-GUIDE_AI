@@ -310,6 +310,7 @@ class NotebookExtractor:
         """
         from .analysis import analyze_module, build_unit_slice, iter_units, slice_sha
         from .analysis.signatures import contract_params, signature_of
+        from .pkgmap import requirements_from_source
         from .contracts import ANALYZER_VERSION, CALLABLE, UnitContract
         from .doc_ids import method_unit_doc_id
         import ast
@@ -353,6 +354,11 @@ class NotebookExtractor:
                 callability=callability,
                 slice_sha=slice_sha(slice_src) if slice_src else "",
                 library_symbol=qualname.split(".")[-1],
+                # Derived from the SLICE, which is what actually gets imported. Left
+                # unpopulated, every unit shipped `requirements: {}` while its slice imported
+                # pandas and geopandas — so the contract the agent reads said "no
+                # dependencies" and the import then failed inside the sandbox.
+                requirements=requirements_from_source(slice_src) if slice_src else {},
                 provenance={"element_id": ctx.anchor(), "parent_doc_id": nb_doc_id,
                             "source_rel_path": rel_path, "commit_sha": ctx.commit_sha,
                             "extractor": self.name, "analyzer_version": ANALYZER_VERSION},

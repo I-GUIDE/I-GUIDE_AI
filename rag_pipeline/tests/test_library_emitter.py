@@ -252,3 +252,63 @@ def test_an_unparseable_slice_is_refused_rather_than_advertised(lib):
         _manifest(_unit_asset("broken", "elemA", "def broken(:\n", sha="x1")), root=lib)
     assert out["written"] == []
     assert out["skipped"]
+
+
+# --------------------------------------------------------------- lazy element packages
+
+def test_importing_one_unit_does_not_import_its_siblings(lib):
+    """The sandbox failure that made the pinned import line unusable.
+
+    Python runs a parent package's __init__ before any submodule, so the advertised
+    ``from iguide_methods.ke_x.v_sha import good`` executed EVERY sibling module first. In the
+    real container that raised ``ModuleNotFoundError: pandas`` from a different unit than the
+    one being imported, and it made each unit's declared requirements wrong — the true install
+    set was the union over the whole element.
+    """
+    good = _unit_asset("good", "elemA", "def good():\n    return 'ok'\n", sha="g1")
+    heavy = _unit_asset("heavy", "elemA",
+                        "import a_package_that_does_not_exist\n\ndef heavy():\n    return 1\n",
+                        sha="h1")
+    library_emitter.emit(_manifest(good, heavy), root=lib)
+
+    pkg = next(p for p in (lib / "iguide_methods").iterdir() if p.is_dir())
+    r = _import_in_subprocess(lib, f"from iguide_methods.{pkg.name}.v_g1 import good; print(good())")
+    assert r.returncode == 0, f"a sibling's import broke this one:\n{r.stderr[-400:]}"
+    assert r.stdout.strip() == "ok"
+
+
+def test_the_element_alias_resolves_lazily(lib):
+    good = _unit_asset("good", "elemA", "def good():\n    return 'ok'\n", sha="g1")
+    heavy = _unit_asset("heavy", "elemA",
+                        "import a_package_that_does_not_exist\n\ndef heavy():\n    return 1\n",
+                        sha="h1")
+    library_emitter.emit(_manifest(good, heavy), root=lib)
+    pkg = next(p for p in (lib / "iguide_methods").iterdir() if p.is_dir())
+    r = _import_in_subprocess(lib, f"from iguide_methods.{pkg.name} import good; print(good())")
+    assert r.returncode == 0, r.stderr[-400:]
+    assert r.stdout.strip() == "ok"
+
+
+def test_a_missing_symbol_on_an_element_package_raises_attribute_error(lib):
+    library_emitter.emit(_manifest(_unit_asset("good", "elemA", "def good():\n    return 1\n",
+                                               sha="g1")), root=lib)
+    pkg = next(p for p in (lib / "iguide_methods").iterdir() if p.is_dir())
+    r = _import_in_subprocess(lib, (
+        f"import iguide_methods.{pkg.name} as P\n"
+        "try:\n    P.nope; print('RESOLVED')\n"
+        "except AttributeError:\n    print('RAISED')"))
+    assert r.stdout.strip() == "RAISED"
+
+
+def test_dir_lists_the_units_without_importing_them(lib):
+    good = _unit_asset("good", "elemA", "def good():\n    return 1\n", sha="g1")
+    heavy = _unit_asset("heavy", "elemA",
+                        "import a_package_that_does_not_exist\n\ndef heavy():\n    return 1\n",
+                        sha="h1")
+    library_emitter.emit(_manifest(good, heavy), root=lib)
+    pkg = next(p for p in (lib / "iguide_methods").iterdir() if p.is_dir())
+    r = _import_in_subprocess(lib, (
+        f"import iguide_methods.{pkg.name} as P; "
+        "print(sorted(n for n in dir(P) if not n.startswith('_')))"))
+    assert r.returncode == 0, r.stderr[-300:]
+    assert "'good'" in r.stdout and "'heavy'" in r.stdout

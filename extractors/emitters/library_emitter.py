@@ -69,6 +69,43 @@ def _ident(text: str, *, fallback: str = "x") -> str:
     return s[:48]
 
 
+def _element_init(element_id: str, exports: List[tuple]) -> str:
+    """Element package init that resolves symbols LAZILY (PEP 562 module ``__getattr__``).
+
+    It used to eagerly re-export every unit::
+
+        from .v_38f5f29289b4 import filter_dataframe_by_value as filter_dataframe_by_value
+        from .v_45b703eec714 import load_chicago_crime_data as load_chicago_crime_data
+        ...
+
+    Python runs a parent package's ``__init__`` before any submodule, so
+    ``from iguide_methods.ke_x.v_45b703eec714 import load_chicago_crime_data`` — the pinned
+    line the registry advertises — executed *every* sibling module first. In the real sandbox
+    that failed with ``ModuleNotFoundError: pandas``, raised by a DIFFERENT unit than the one
+    being imported. It also made each unit's declared ``requirements`` wrong: the true install
+    set was the union over every unit in the element.
+
+    Lazily, importing one unit imports one module. ``from iguide_methods.ke_x import f`` still
+    works, resolving only f's module.
+    """
+    table = ",\n".join(f"    {sym!r}: {mod!r}" for sym, mod in sorted(exports))
+    return (
+        f'"""Methods extracted from element {element_id}. Generated — do not edit.\n\n'
+        f'Symbols resolve lazily, so importing one unit does not import its siblings\n'
+        f'(and does not require their dependencies).\n"""\n\n'
+        f"from importlib import import_module\n\n"
+        f"_UNITS = {{\n{table},\n}}\n\n"
+        f"__all__ = sorted(_UNITS)\n\n\n"
+        f"def __getattr__(name):\n"
+        f"    module = _UNITS.get(name)\n"
+        f"    if module is None:\n"
+        f"        raise AttributeError(name)\n"
+        f"    return getattr(import_module(f'.{{module}}', __name__), name)\n\n\n"
+        f"def __dir__():\n"
+        f"    return sorted(set(globals()) | set(_UNITS))\n"
+    )
+
+
 def _defines_at_module_level(source: str, symbol: str) -> bool:
     """Does *source* bind *symbol* at module level, so ``from <mod> import <symbol>`` works?
 
@@ -230,7 +267,7 @@ def emit(manifest: UnifiedManifest, *, root: Optional[Path] = None,
         title = str(element_units[0].get("title") or "").split(" — ")[-1]
         subpkg_name = element_package(element_id, title)
         subpkg = pkg / subpkg_name
-        exports: List[str] = []
+        exports: List[tuple] = []          # (symbol, module_name)
 
         for a in element_units:
             unit = a.get("unit") or {}
@@ -260,7 +297,7 @@ def emit(manifest: UnifiedManifest, *, root: Optional[Path] = None,
                 # Content-addressed: identical source -> identical bytes -> a no-op rewrite.
                 if not target.exists() or target.read_text(encoding="utf-8") != source:
                     target.write_text(source, encoding="utf-8")
-            exports.append(f"from .{module_name} import {symbol} as {symbol}")
+            exports.append((symbol, module_name))
             dotted = f"{PACKAGE_NAME}.{subpkg_name}.{module_name}"
             unit["library_module"] = dotted
             entry = {
@@ -302,9 +339,7 @@ def emit(manifest: UnifiedManifest, *, root: Optional[Path] = None,
 
         if exports and not dry_run:
             (subpkg / "__init__.py").write_text(
-                f'"""Methods extracted from element {element_id}. Generated — do not edit."""\n\n'
-                + "\n".join(sorted(exports)) + "\n",
-                encoding="utf-8")
+                _element_init(element_id, exports), encoding="utf-8")
             reqs = _requirements_for(element_units)
             if reqs:
                 (subpkg / "requirements.txt").write_text("\n".join(reqs) + "\n", encoding="utf-8")
