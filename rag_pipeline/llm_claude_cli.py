@@ -248,6 +248,9 @@ def preflight() -> dict:
 
         python -m rag_pipeline.llm_claude_cli
     """
+    # Resolve the .env token BEFORE reporting, or the diagnostic says "no token" for a
+    # working setup — the exact confusion this function exists to prevent.
+    _load_token_from_env_file()
     info = {
         "executable": shutil.which("claude"),
         "model": model(),
