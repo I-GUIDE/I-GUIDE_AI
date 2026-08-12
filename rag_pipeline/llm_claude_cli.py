@@ -116,12 +116,16 @@ def use_bare() -> bool:
 
 
 _AUTH_HINT = (
-    "claude CLI is not authenticated. Two supported paths:\n"
-    "  (a) API key  — export ANTHROPIC_API_KEY=...   (works with --bare, reproducible, and "
-    "is the path Anthropic's terms require for automated/scripted use)\n"
-    "  (b) subscription — run `claude` interactively and `/login`, then set "
-    "CLAUDE_CLI_BARE=0 (project context leaks into prompts; fine for hand-run batches, "
-    "not for anything whose numbers you will publish)\n"
+    "claude CLI is not authenticated (or its token has expired). Options, best first:\n"
+    "  (a) SUBSCRIPTION, long-lived — run `claude setup-token` once, then export the token it\n"
+    "      prints as CLAUDE_CODE_OAUTH_TOKEN. Survives across sessions, so batch runs do not\n"
+    "      keep dying on an expired access token. Requires CLAUDE_CLI_BARE=0 (--bare never\n"
+    "      reads OAuth). Check state with `claude auth status`.\n"
+    "  (b) SUBSCRIPTION, interactive — run `claude` and `/login`. Same constraint, but the\n"
+    "      access token expires and has to be refreshed by hand.\n"
+    "  (c) API KEY — export ANTHROPIC_API_KEY=... Works with --bare, so runs are reproducible\n"
+    "      (no CLAUDE.md or hooks injected), and it is the path Anthropic's terms require for\n"
+    "      automated use. Costs API credit.\n"
     "Or set LLM_PROVIDER=vllm|openai to bypass this backend entirely."
 )
 
@@ -214,6 +218,7 @@ def preflight() -> dict:
         "model": model(),
         "bare": use_bare(),
         "anthropic_api_key_set": bool(str(os.getenv("ANTHROPIC_API_KEY") or "").strip()),
+        "oauth_token_set": bool(str(os.getenv("CLAUDE_CODE_OAUTH_TOKEN") or "").strip()),
         "ok": False,
         "detail": "",
     }
