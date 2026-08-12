@@ -6,6 +6,12 @@
       "runtimeExecutable": "python3",
       "runtimeArgs": ["-m", "http.server", "8131", "--directory", "examples"],
       "port": 8131
+    },
+    {
+      "name": "iguide-agent-api",
+      "runtimeExecutable": "scripts/run_agent_api_dev.sh",
+      "runtimeArgs": [],
+      "port": 5002
     }
   ]
 }

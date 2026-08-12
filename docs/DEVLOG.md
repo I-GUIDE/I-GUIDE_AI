@@ -68,10 +68,13 @@ measured during planning against live infrastructure that will drift.
 
 *Quality gates*
 - Tests importing anything from `extractors/` or the emitters: **0**, across ~3,250 LOC.
-- `_AUDIT_FLAG_SEVERITIES = {"high"}` (`supervisor/graph.py:418`); severities ever
-  emitted across all eval records are `low` ×4 and `none` ×40. The user-visible
-  grounding caveat has fired **zero times**, so "0 hallucinations in 21 runs" is the
-  null output of a detector that has never triggered.
+- `_AUDIT_FLAG_SEVERITIES = {"high"}` (`supervisor/graph.py:418`); severities emitted
+  across the 11 committed eval records are `low` ×4 and `none` ×40 — so the user-visible
+  caveat never fired **on that corpus**, and "0 hallucinations in 21 runs" is the null
+  output of a detector that never triggered there.
+  > ⚠️ **REFINED (see M0.2b):** this must not be read as "the caveat cannot fire." Driving
+  > the prototype live produced a `severity: high` caveat on the very first substantive
+  > query — and it was a **false positive**. Scope the claim to the recorded corpus.
 - `retrieval_success` is pinned at **10/10** by construction: `scripts/eval_common.py`
   scores it against `TASK_META[tid]["primary_ids"]` (a subset) while computing
   `full_exp` on the line above.
@@ -313,3 +316,61 @@ this session*: the dry-run hours ago gave langchain 1.3.14, the real install gav
 
 **Next** M0.5 proper: add `pyarrow`, then build and *test* a constraints file rather than
 freezing whatever resolves today.
+
+---
+
+## 2026-08-07 · M0.2b · Prototype told to match the new auth contract, verified in-browser
+
+**Change** `examples/iguide_chat_prototype.html` and `examples/agent_chat_stream_demo.html`:
+API-key label "(optional)" → "(required by default)" with a tooltip naming
+`AGENT_CHAT_AUTH_OPTIONAL`; new `describeHttpError()` translating 403 / 500-misconfig /
+CORS-block into actionable sentences; the upload path checks status *before* parsing JSON
+(that route is now protected). New `scripts/run_agent_api_dev.sh` + a `.claude/launch.json`
+entry so there is one supported way to start the API locally with the right env.
+
+**Why** M0.2 changed the auth contract and I did not update the interface — so the
+prototype still described the key as optional, and a blank key surfaced as a raw
+`{"error":"Forbidden: invalid API key."}` body, which reads like a server bug rather than
+a setting. A feature is not done when the server is right; it is done when the interface
+tells the truth about it.
+
+**Measured** — driven through the real prototype at `localhost:8132` against a live API on
+`:5002`:
+
+| Case | Before | After |
+|---|---|---|
+| no key | raw JSON body | "403 — this server requires an API key. Enter it in the API key field above." |
+| wrong key | raw JSON body | "403 — the API key was rejected. Check the key matches AGENT_CHAT_API_KEY on the server." |
+| correct key | — | full substantive answer, 4 notebooks, 8 sources |
+
+Server-side matrix by curl: no key 403, wrong key 403, correct key 400
+`user_input is required` (i.e. past auth into the handler), Bearer token also 400,
+`/health` 200.
+
+**Surprised by** three things, in increasing order of importance.
+
+1. `scripts/run_agent_api_dev.sh` first used `set -a; . .env; set +a`, which **clobbered
+   my explicit `PORT=5002` with the file's 3500 and replaced the API key I passed**. That
+   is the shell twin of the `load_dotenv(override=True)` defect the plan already flagged:
+   the file beating the environment makes per-run overrides impossible and the reason
+   invisible. Rewrote it to skip any key already set in the environment.
+2. Driving one query exercised both blocked backends and showed the cost: the embedding
+   server is unreachable (stale `.env` host) so semantic retrieval is silently absent, and
+   Neo4j returns *"Unable to retrieve routing information"* before falling back to keyword.
+   The agent degrades correctly, but each unreachable backend is paid for in latency —
+   which is the argument for the planned `NEO4J_ENABLED=0` fast-fail.
+3. **The grounding audit fired `severity: high` on a well-grounded answer.** The answer
+   named four notebooks, all four present in the retrieved sources
+   (A2SFCA, Pysal Access Compute Example, SPASTC, 6.02 Thematic and Reference Mapping),
+   and the audit appended: *"contains a hallucinated claim about the platform offering
+   several notebooks for computing spatial accessibility to hospitals."* That claim is
+   exactly what the evidence supports.
+
+   This is a **false positive at the one severity that reaches the user**, and the gate's
+   own comment at `graph.py:415` says `{"high"}` exists specifically to suppress false
+   positives. So the caveat now degrades correct answers in the UI. It also corrects M0.1:
+   "the caveat has fired zero times" is true of the 11 recorded runs, not of the system —
+   it fired on the first live query. Logged as the top candidate for M6; it is also the
+   publishable negative result the planning work identified.
+
+**Next** M0.5 — the constraints file, which turned out to hide a worse problem than pandas.
