@@ -61,6 +61,12 @@ RAG_COMPONENT_TOOL_NAMES: set[str] = {
     # are registered, described and unreachable for every intent.
     "kb_method_search",
     "get_method_contract",
+    # Reading one element's source file, by id. The live MCP server exposes this as
+    # `mcp_fetch_element_source`; SEARCH_AGENT_PROMPT rule 8 has always told the model to call
+    # it, under the wrong (unprefixed) name AND with the real name absent from every set here,
+    # so it was stripped for every intent except analysis_task — where it survived only because
+    # the empty-selection fallback at tool_policy.py fires and returns everything.
+    "mcp_fetch_element_source",
 }
 
 FILE_TOOL_NAMES: set[str] = {

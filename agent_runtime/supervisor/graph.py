@@ -1281,11 +1281,22 @@ def _direct_search_sweep(query: str, enabled_search_methods: Optional[List[str]]
             pass
     if permitted("agent_kb_search"):
         try:
-            from agent_runtime.langchain_granular_tools import _normalize_hits
             from rag_pipeline.search.agent_kb import agent_kb_search
 
             payload = agent_kb_search(query, size=k) or {}
-            docs.extend(_normalize_hits(payload.get("results") or [], source="agent_kb"))
+            # `documents`, NOT `results` — and they are ALREADY normalized (doc_id, title,
+            # contents, parent_doc_id), so they must not be run through _normalize_hits, which
+            # expects raw OpenSearch hits. The first version of this block read `results` and
+            # re-normalized: no exception, no log, just a permanently empty arm. The `except`
+            # below could never have caught it, which is exactly why the wrong key survived.
+            for d in payload.get("documents") or []:
+                if not isinstance(d, dict):
+                    continue
+                parent = d.get("parent_doc_id")
+                docs.append({**d, "source": "agent_kb",
+                             # Cite the ELEMENT, not the block: a block id is not something a
+                             # reader can open, and the other sweep arms cite elements.
+                             "citation_ids": [parent] if parent else []})
         except Exception:
             pass
     if permitted("kb_method_search"):

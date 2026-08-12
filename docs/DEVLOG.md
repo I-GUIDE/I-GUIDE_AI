@@ -1244,3 +1244,60 @@ now a known backend symptom rather than a signal to go re-check the wiring.
 
 **Next** the same run under a native tool-calling model, to separate backend artefacts from
 real agent behaviour, and the invariant gate (M6) on top of a run that now genuinely executes.
+
+## 2026-08-12 · M3.0 / M4.3 · Source resolution at corpus scale, and an audit of my own blind spot
+**Change** new `extractors/sources.py` (GitHub / MinIO / HTTP → `ResolvedSource` with sha256)
+  and `scripts/measure_source_fetchability.py`. Plus five reachability fixes found by a
+  32-agent adversarial audit of the defect class from M4.2.
+
+**Why (sources)** M3 is corpus-scale ingest, and extraction quality is irrelevant for an
+element whose file cannot be fetched. The plan's target was ≥90% from a naive 8/12 baseline.
+
+**Measured** over all **180 notebook elements** on the live platform API:
+
+| | |
+|---|---|
+| fetchable | **174/180 (96.7%)** |
+| resolved via the curator's blob URL | 97 |
+| resolved via repo + path | 83 |
+| failures | 6, all HTTP 404 (file moved or repo renamed) |
+
+The blob-URL path matters for correctness, not just coverage: `notebook-url` pins the **ref**
+the curator linked, while repo+path has to guess the default branch — a different commit than
+the element was published against.
+
+**Why (audit)** M4.2 needed four filters fixed for one tool and M2.7 found a fifth. That is a
+class, not five accidents, so I ran a workflow: six lenses (tool allowlists, prompt
+enumeration, client config, env gates, emit/consume, silent degradation), every candidate
+adversarially verified by an independent agent instructed to refute it. 32 agents, **11
+findings confirmed** of the candidates raised. Fixed here:
+
+1. **My own bug, one commit old.** The `agent_kb_search` arm I added to `_direct_search_sweep`
+   in M4.2 read `payload["results"]`; the function returns `documents`. No exception, so the
+   surrounding `except` could never catch it — a permanently empty arm that measured as
+   "working". It also re-normalized already-normalized docs. This is precisely the defect
+   class I wrote the audit to find, introduced by the commit that fixed the previous one.
+2. `SEARCH_AGENT_PROMPT` rule 8 told the model to call **`fetch_element_source`**, which
+   exists under no path — the live MCP server exposes it as `mcp_fetch_element_source`. Same
+   shape as the `mcp_run_nbwf_*` phantom deleted in M0.7.
+3. …and that real name was in **no** tool-name set, so it was stripped for every intent except
+   `analysis_task`, where it survived only because the empty-selection fallback returns
+   everything. Fixed the name and added it to `RAG_COMPONENT_TOOL_NAMES`.
+4. `agent_chat_stream_demo.html` (served at `/agent/dashboard`) had the identical hardcoded
+   checkbox allowlist the prototype had — no `agent_kb_search`, no `kb_method_search`, no
+   `web_search`. Fixing one shipped client had left the other broken.
+5. The prototype's `RETRIEVAL_TOOLS` set drives the reasoning log, and a name absent from it is
+   **dropped entirely** — so method-library calls were invisible in the one place a user looks
+   to check the agent's work.
+
+Suite **792 passed**, same 3 pre-existing live-cluster failures.
+
+**Surprised by** finding 1. I had just spent five commits on "a capability that is registered
+but unreachable", wrote an audit for exactly that pattern, and the audit's first confirmed hit
+was code I had written an hour earlier — silently dead for the same structural reason (a
+failure with no exception to raise). The lesson is not "be more careful"; it is that this class
+is invisible to unit tests and to the person who wrote it, and needs an instrument. The
+remaining six confirmed findings (legacy `analysis_task` stripping every retrieval tool, the
+analyze peer's toolset, skills with no SKILL.md in the image) are queued, not yet done.
+
+**Next** corpus-scale ingest on the 174 fetchable notebooks, then the invariant gate.

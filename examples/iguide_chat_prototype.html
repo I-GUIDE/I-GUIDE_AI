@@ -551,9 +551,14 @@ function renderFiles(ui,map){
    abstracts is well past that, so JSON.parse FAILS on most search results. Every reader below
    therefore falls back to scraping the fields out of the truncated text — which is also why the
    Sources block under the answer is built from the final evidence instead of from these lines. */
+/* Must list EVERY retrieval tool: a name absent here is not merely unlabelled, it is dropped
+   from the reasoning log entirely, so the user cannot tell whether the agent consulted the
+   method library or ignored it. kb_method_search / get_method_contract were missing, which
+   made the whole feature invisible in the one place a user looks to check the agent's work. */
 const RETRIEVAL_TOOLS=new Set(["keyword_search","semantic_search","neo4j_search","spatial_search",
   "opengeodata_search","web_search","agent_kb_search","neo4j_get_element_by_id",
-  "neo4j_explore_related_nodes","get_kb_block"]);
+  "neo4j_explore_related_nodes","get_kb_block",
+  "kb_method_search","get_method_contract","mcp_fetch_element_source"]);
 
 /* A tool_result's `content` is the repr of a LangChain ToolMessage, not bare JSON:
    content='{"source": "keyword", ...}' name='keyword_search' tool_call_id='call_x'

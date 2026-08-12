@@ -455,3 +455,95 @@ def test_the_tool_description_survives_the_cli_shim_intact():
     assert "dependencies" in schema["description"]
     assert "iguide_methods" in schema["description"]
     assert not schema["description"].endswith("installed wi")
+
+
+# ------------------------------------------------------------------ agent_kb in the sweep
+
+def test_agent_kb_documents_enter_the_sweep(monkeypatch):
+    """The first version of this arm read payload["results"]; agent_kb_search returns
+    "documents". No exception, no log — a permanently empty arm that the surrounding
+    `except` could never have caught, because nothing raised."""
+    from rag_pipeline.search import agent_kb
+    from agent_runtime.supervisor import graph
+
+    monkeypatch.setattr(agent_kb, "agent_kb_search", lambda q, size=None, **kw: {
+        "source": "agent_kb", "count": 1,
+        "documents": [{"doc_id": "elem1::block::3", "parent_doc_id": "elem1",
+                       "title": "load step", "contents": "gpd.read_file(...)",
+                       "score": 2.0, "matched": "keyword"}],
+        "citation_ids": ["elem1"], "elements": {}})
+
+    docs = graph._direct_search_sweep("chicago crime", ["agent_kb_search"], k=5)
+    kb = [d for d in docs if d.get("source") == "agent_kb"]
+    assert kb, "agent_kb documents never reached the evidence set"
+    assert kb[0]["contents"] == "gpd.read_file(...)"
+
+
+def test_swept_agent_kb_docs_cite_the_parent_element(monkeypatch):
+    """A block id is not something a reader can open."""
+    from rag_pipeline.search import agent_kb
+    from agent_runtime.supervisor import graph
+
+    monkeypatch.setattr(agent_kb, "agent_kb_search", lambda q, size=None, **kw: {
+        "documents": [{"doc_id": "elem1::block::3", "parent_doc_id": "elem1",
+                       "title": "t", "contents": "c"}]})
+    doc = [d for d in graph._direct_search_sweep("q", ["agent_kb_search"], k=5)
+           if d.get("source") == "agent_kb"][0]
+    assert doc["citation_ids"] == ["elem1"]
+
+
+def test_agent_kb_is_skipped_when_not_enabled(monkeypatch):
+    from rag_pipeline.search import agent_kb
+    from agent_runtime.supervisor import graph
+
+    called = []
+    monkeypatch.setattr(agent_kb, "agent_kb_search",
+                        lambda q, size=None, **kw: called.append(q) or {"documents": []})
+    graph._direct_search_sweep("q", ["keyword_search"], k=5)
+    assert called == []
+
+
+# ------------------------------------------------------------------ shipped clients + prompt
+
+def _html(name):
+    from pathlib import Path
+    return Path("examples") / name
+
+
+def test_both_shipped_clients_can_request_the_kb_and_method_library():
+    """The prototype fix left the same defect live in the second shipped page, which
+    api/server.py serves at /agent/dashboard."""
+    for name in ("iguide_chat_prototype.html", "agent_chat_stream_demo.html"):
+        text = _html(name).read_text(encoding="utf-8")
+        assert "agent_kb_search" in text, f"{name} cannot request sub-document evidence"
+        assert "kb_method_search" in text, f"{name} cannot request the method library"
+
+
+def test_the_prototype_logs_method_library_calls():
+    """A tool name absent from RETRIEVAL_TOOLS is dropped from the reasoning log entirely, so
+    the user cannot tell whether the agent consulted the library or ignored it."""
+    import re
+
+    text = _html("iguide_chat_prototype.html").read_text(encoding="utf-8")
+    block = re.search(r"const RETRIEVAL_TOOLS=new Set\(\[(.*?)\]\)", text, re.DOTALL).group(1)
+    listed = set(re.findall(r'"([a-z0-9_]+)"', block))
+    assert {"kb_method_search", "get_method_contract"} <= listed
+
+
+def test_the_search_prompt_names_only_tools_that_can_exist():
+    """rule 8 named `fetch_element_source`; the live MCP server exposes it as
+    `mcp_fetch_element_source`, and MCP tools are always prefixed."""
+    from agent_runtime.prompts import SEARCH_AGENT_PROMPT as P
+
+    assert "`fetch_element_source`" not in P
+    assert "mcp_fetch_element_source" in P
+
+
+def test_the_element_source_tool_survives_the_policy_filter():
+    """It was in no name set, so it was stripped for every intent except analysis_task —
+    where it survived only because the empty-selection fallback returns everything."""
+    from agent_runtime.tool_policy import select_allowed_tools
+
+    for intent in ("general_discovery", "code_task", "hybrid"):
+        kept = select_allowed_tools(intent, ["keyword_search", "mcp_fetch_element_source"])
+        assert "mcp_fetch_element_source" in kept, f"stripped for {intent}"
