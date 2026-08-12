@@ -83,6 +83,40 @@ def check_not_deployed() -> None:
         )
 
 
+def _load_token_from_env_file() -> None:
+    """Make CLAUDE_CODE_OAUTH_TOKEN available to subprocesses started from a script.
+
+    `claude setup-token` prints a token the developer exports in their own shell. A batch
+    script, a test runner, or an agent tool started from elsewhere does not inherit that
+    session, so the CLI falls back to the expired keychain token and every call 401s with no
+    obvious cause. The rest of this repo already resolves configuration from .env, so read it
+    from there too — the environment still wins, and this only fills a gap.
+    """
+    if str(os.getenv("CLAUDE_CODE_OAUTH_TOKEN") or "").strip():
+        return
+    from pathlib import Path
+
+    here = Path(__file__).resolve().parent.parent
+    for candidate in (here / ".env", Path("/Users/yfkang/i-guide-platform-flask-servers/.env")):
+        try:
+            if not candidate.exists():
+                continue
+            for line in candidate.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                if key.strip() != "CLAUDE_CODE_OAUTH_TOKEN":
+                    continue
+                val = val.strip().strip('"').strip("'")
+                if val:
+                    os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = val
+                    logger.debug("loaded CLAUDE_CODE_OAUTH_TOKEN from %s", candidate)
+                    return
+        except OSError:
+            continue
+
+
 def available() -> bool:
     return shutil.which("claude") is not None
 
@@ -166,6 +200,7 @@ def call(prompt: str) -> str:
             "Install Claude Code, or set LLM_PROVIDER=vllm|openai."
         )
 
+    _load_token_from_env_file()
     mdl = model()
     try:
         proc = subprocess.run(_build_argv(exe, prompt, mdl), capture_output=True,
