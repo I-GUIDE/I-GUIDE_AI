@@ -20,7 +20,8 @@ def _upload(name: str, data: bytes) -> str:
 @pytest.fixture()
 def client(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENT_FILE_STORAGE_ROOT", str(tmp_path / "store"))
-    monkeypatch.delenv("AGENT_CHAT_API_KEY", raising=False)  # no auth in test
+    monkeypatch.delenv("AGENT_CHAT_API_KEY", raising=False)
+    monkeypatch.setenv("AGENT_CHAT_AUTH_OPTIONAL", "1")  # auth fails closed; opt out explicitly
     import api.server as srv
     return srv.app.test_client()
 

@@ -1,6 +1,7 @@
 import os
 import logging
 import json
+from functools import wraps
 from pathlib import Path
 from uuid import uuid4
 
@@ -18,13 +19,43 @@ app = Flask(__name__)
 # Load environment variables
 load_dotenv()
 
-CORS(app)
-
-swagger = Swagger(app)
-
-# Configure logging
+# Configure logging (before _cors_origins, which warns)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _cors_origins() -> list:
+    """Cross-origin allowlist.
+
+    ``AGENT_CORS_ORIGINS`` (comma-separated) wins; otherwise fall back to the
+    existing ``ALLOWED_DOMAIN_LIST`` (a JSON array) so deployments already
+    carrying that value keep working. Empty means no cross-origin access —
+    same-origin callers, including the bundled dashboard, are unaffected.
+    """
+    raw = str(os.getenv("AGENT_CORS_ORIGINS") or "").strip()
+    if raw:
+        return [o.strip() for o in raw.split(",") if o.strip()]
+
+    legacy = str(os.getenv("ALLOWED_DOMAIN_LIST") or "").strip()
+    if legacy:
+        try:
+            parsed = json.loads(legacy)
+            if isinstance(parsed, list):
+                return [str(o).strip() for o in parsed if str(o).strip()]
+        except ValueError:
+            logger.warning("ALLOWED_DOMAIN_LIST is not valid JSON; ignoring it.")
+
+    logger.warning(
+        "No AGENT_CORS_ORIGINS (or ALLOWED_DOMAIN_LIST) configured; cross-origin "
+        "requests are refused. Set AGENT_CORS_ORIGINS if a browser on another "
+        "origin must call this API."
+    )
+    return []
+
+
+CORS(app, origins=_cors_origins())
+
+swagger = Swagger(app)
 
 
 # ---------------------------------------------------------------------------
@@ -55,13 +86,55 @@ def _extract_presented_api_key() -> str:
     return ""
 
 
+def _auth_is_optional() -> bool:
+    """True only when a deployment has EXPLICITLY opted out of API-key auth.
+
+    Local development sets ``AGENT_CHAT_AUTH_OPTIONAL=1``. Everything else must
+    configure ``AGENT_CHAT_API_KEY`` — an unset key is a misconfiguration, not a
+    licence to serve the agent and the RAG pipeline to the open internet.
+    """
+    return str(os.getenv("AGENT_CHAT_AUTH_OPTIONAL") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _require_agent_chat_api_key() -> None:
+    """Raise unless the caller presented the configured API key.
+
+    Fails CLOSED: with no key configured this raises ``RuntimeError``, which the
+    routes surface as a 500 "misconfiguration" rather than serving the request.
+    The previous behaviour returned early, so an unset environment variable
+    silently disabled auth on every protected route.
+    """
     expected = _get_agent_chat_api_key()
     if not expected:
-        return  # auth disabled when key is not configured
+        if _auth_is_optional():
+            return
+        raise RuntimeError(
+            "AGENT_CHAT_API_KEY is not configured. Set it, or set "
+            "AGENT_CHAT_AUTH_OPTIONAL=1 to run without auth in local development."
+        )
     presented = _extract_presented_api_key()
     if not presented or presented != expected:
         raise PermissionError("Forbidden: invalid API key.")
+
+
+def require_api_key(view):
+    """Apply :func:`_require_agent_chat_api_key` to a route.
+
+    Mirrors the inline try/except the agent-chat routes already use, so the
+    response contract is identical: 403 on a bad key, 500 on a missing one.
+    """
+    @wraps(view)
+    def wrapper(*args, **kwargs):
+        try:
+            _require_agent_chat_api_key()
+        except PermissionError as exc:
+            return jsonify({"error": str(exc)}), 403
+        except RuntimeError as exc:
+            logger.error("Agent chat API key misconfigured: %s", exc)
+            return jsonify({"error": "Server misconfiguration: API key not set"}), 500
+        return view(*args, **kwargs)
+
+    return wrapper
 
 
 # ---------------------------------------------------------------------------
@@ -499,6 +572,7 @@ def agent_dashboard():
 
 
 @app.route('/agent/files/upload', methods=['POST'])
+@require_api_key
 def upload_agent_files():
     """
     Upload one or more files for the agent to inspect.
@@ -574,6 +648,7 @@ def upload_agent_files():
 
 
 @app.route('/agent/files/<file_id>/download', methods=['GET'])
+@require_api_key
 def download_agent_file(file_id):
     """
     Download an uploaded (or generated) file by file_id.
@@ -636,6 +711,7 @@ def download_agent_file(file_id):
 
 
 @app.route('/query', methods=['POST'])
+@require_api_key
 def query():
     """
 Main RAG pipeline endpoint with LLM routing and optional reranking.
@@ -2003,6 +2079,7 @@ def agent_chat_stream():
 
 
 @app.route('/query/batch', methods=['POST'])
+@require_api_key
 def batch_query():
     """
     Batch query endpoint for processing multiple queries in one call.

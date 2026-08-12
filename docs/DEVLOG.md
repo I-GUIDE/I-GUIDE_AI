@@ -106,3 +106,52 @@ that is why only 182/619 docs carry a bbox.
 
 **Next** M0.2 (fail-closed auth) — nothing else is deployable until the unauthenticated
 `/query` route is closed.
+
+---
+
+## 2026-08-07 · M0.2 · Auth fails closed; CORS scoped
+
+**Change** `api/server.py`: `_require_agent_chat_api_key` now raises `RuntimeError`
+when `AGENT_CHAT_API_KEY` is unset, unless `AGENT_CHAT_AUTH_OPTIONAL=1` is set
+explicitly. Added a `require_api_key` decorator and applied it to the four routes that
+had no auth at all: `/query`, `/query/batch`, `/agent/files/upload`,
+`/agent/files/<id>/download`. Replaced `CORS(app)` with `CORS(app, origins=_cors_origins())`,
+reading `AGENT_CORS_ORIGINS` (comma-separated) and falling back to the existing
+`ALLOWED_DOMAIN_LIST` JSON array. New `rag_pipeline/tests/test_api_auth.py` (24 cases).
+
+**Why** Two independent holes. `_require_agent_chat_api_key` returned early on an unset
+key — so auth was disabled by *omission*, which is the failure mode that never shows up
+in testing because the tests also omit the key. And `/query`, the full RAG pipeline, had
+only two auth call sites in the whole file (`:1286`, `:1781`) and was not one of them:
+it was reachable unauthenticated from any origin.
+
+The fail-closed contract was already designed and just never implemented — the
+agent-chat routes at `:1289` already catch `RuntimeError` and return
+*"Server misconfiguration: API key not set"*. Making the helper raise it made the
+existing handlers correct without touching them.
+
+**Measured** Unauthenticated data-bearing routes: **4 → 0**. Wildcard CORS: **1 → 0**.
+Auth tests: **0 → 24**, all passing.
+
+`rag_pipeline/tests/` — two runs, because the environment changes the answer:
+- Without `.env` (this worktree's default): 501 passed, **3 failed**.
+- With the main checkout's `.env` exported: **503 passed, 1 failed** in 151s.
+
+So two of the three were purely `Missing required environment variable:
+OPENSEARCH_NODE`, not defects. The remaining failure is
+`test_spatial_routing_e2e::test_spatial_routing_to_generation_e2e`, an e2e test against
+real backends, in a file this change does not touch. It also failed in the pre-change
+prod-pinned run recorded in M0.1.
+
+**Surprised by** Three existing fixtures relied on the fail-open behavior:
+`test_download_route.py:23` even documented it — `monkeypatch.delenv("AGENT_CHAT_API_KEY")
+# no auth in test`. That is the clearest possible evidence the hole was load-bearing in
+practice rather than theoretical. All three now set `AGENT_CHAT_AUTH_OPTIONAL=1`
+explicitly, which is the behavior they actually wanted.
+
+`/health` and `/agent/dashboard` are deliberately left open — the first is the container
+healthcheck, the second a static HTML page with no data. Both are asserted in the new
+suite so a future change to either has to be deliberate.
+
+**Next** M0.3, the eval metric fix. Until `retrieval_success` scores against the full
+expected sets, no later milestone can show an improvement.
