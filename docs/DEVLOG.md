@@ -482,3 +482,50 @@ unreadable dump of usage counters. Parsing now precedes the exit-code check, and
 `test_auth_failure_is_actionable_even_on_nonzero_exit` pins it.
 
 **Next** M0.8 — `_fan_out` in `ingest_from_github`, the last M0 item.
+
+---
+
+## 2026-08-07 · M0.8 · ingest_from_github now actually emits
+
+**Change** `extractors/ingest.py`: `ingest_from_github` calls `_fan_out(manifest, ctx.targets)`
+and takes `element_id` / `dry_run`. Emitting without an `element_id` now raises rather than
+proceeding. `extractors/cli.py` grows `--element-id` and `--dry-run` and reports on stderr
+which targets it emitted to. `MCP_server/tools/ingest_tools.py` mirrors both, returning
+`{"ok": false, "error": ...}` as data rather than raising, matching this repo's MCP convention.
+
+**Why** `_fan_out` was called only from `ingest_submission` (the webhook). So both other
+entry points — `extractors.cli` and the MCP `ingest_github_repo` tool — extracted everything
+and silently discarded it, while accepting `--targets` and `--reingest` arguments that
+implied persistence. The `element_id` guard exists because without it every derived doc_id
+anchors on `repo_id`, seeding docs into the agent KB that no platform element can ever claim.
+
+**Measured** Ingesting one real notebook (`cca9b545`) through the CLI:
+
+| | before | after |
+|---|---|---|
+| files persisted | **0** | **3** — `agent_kb/iguide_agent_notebook_blocks.json` (6 blocks), `generated_notebook_workflows/sources/nbwf_d01e717421c1b0ff.py`, and its manifest (12 keys) |
+| emit without `element_id` | silently produced nothing | refuses with an actionable error |
+| `--dry-run` | did not exist (was the only behavior) | prints the manifest, emits nothing |
+
+Suite: 522 passed, same 3 pre-existing failures.
+
+Bonus verification: the freshly generated SKILL.md came out with `allowed-tools: []` and the
+new "no single tool runs this pipeline" Run section, and **zero** `mcp_run_nbwf_*` occurrences
+— so M0.7 holds on generated output, not just on the one file I hand-edited.
+
+**Surprised by** two things this test run exposed.
+
+1. **The skill emitter writes into the working tree.** `skill_emitter._default_root()` is
+   `REPO_ROOT/.agents/skills`, so my single test ingest created
+   `.agents/skills/cca9b545-.../` inside the checkout — i.e. running ingestion mutates the
+   repo, and any CI or test run would dirty it. `AGENT_GENERATED_SKILLS_ROOT` overrides it,
+   but the *default* being the source tree is wrong for an emitter. Cleaned up; noted for the
+   M3 test work, which will need that root pointed at a tmpdir.
+2. **CLI-path ingestion produces badly named skills.** The generated skill was named
+   `cca9b545-8416-45a3-9267-122ce6ce9991` — the raw UUID — because `slugify(title)` had no
+   title to work from: `ctx.fields` carries the platform form metadata and the CLI path
+   supplies none. The webhook path gets titles, tags and authors; the CLI path gets nothing.
+   That is an argument for the M2 `sources.py` work fetching the element record from
+   `backend.i-guide.io` rather than relying on whoever calls the CLI to pass fields.
+
+**M0 complete.** Next: M1.1 (persistent workspace), the first of the three ceilings.

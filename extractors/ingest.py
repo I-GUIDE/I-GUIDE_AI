@@ -86,16 +86,36 @@ def ingest_from_github(
     *,
     ref: str = "",
     targets: Sequence[str] = VALID_TARGETS,
+    element_id: str = "",
+    dry_run: bool = False,
     reingest: bool = False,
 ) -> UnifiedManifest:
-    """Clone ``url`` (or use a local path), run notebook + code extractors, return a
-    dry-run UnifiedManifest (emitter fan-out is design-doc §10 step 2)."""
+    """Clone ``url`` (or use a local path), run notebook + code extractors, and emit.
+
+    Previously this returned the manifest WITHOUT calling ``_fan_out``, so both callers
+    that reach it -- ``extractors.cli`` and the MCP ``ingest_github_repo`` tool -- extracted
+    and then silently discarded everything, while accepting a ``--targets`` argument that
+    implied otherwise. ``ingest_submission`` (the webhook) was the only path that persisted.
+
+    ``element_id`` anchors every derived doc_id on the platform element. Without it ids
+    anchor on ``repo_id`` instead, which seeds unanchored docs into the agent KB that no
+    element can ever claim -- so emitting requires either an ``element_id`` or an explicit
+    ``dry_run``.
+    """
     from .notebook_extractor import NotebookExtractor
     from .code_extractor import CodeExtractor
+
+    if not dry_run and not element_id:
+        raise ValueError(
+            "ingest_from_github would emit docs anchored on repo_id, which no platform "
+            "element can claim. Pass element_id=... to anchor them, or dry_run=True to "
+            "inspect the manifest without emitting."
+        )
 
     rid = repo_id(url)
     repo_dir, commit_sha, cleanup = _materialize_source(url, ref)
     ctx = ExtractContext(source_url=url, repo_id=rid, commit_sha=commit_sha,
+                         element_id=element_id,
                          targets=tuple(targets), reingest=reingest, extra={"repo_dir": repo_dir})
     manifest = UnifiedManifest(repo_id=rid, source_url=url, commit_sha=commit_sha, cloned_at=_now_iso())
     try:
@@ -104,6 +124,8 @@ def ingest_from_github(
             _run_extractor(NotebookExtractor(), buckets[KIND_NOTEBOOK_BLOCK], ctx, manifest)
         if buckets.get(KIND_CODE_BLOCK):
             _run_extractor(CodeExtractor(), buckets[KIND_CODE_BLOCK], ctx, manifest)
+        if not dry_run:
+            _fan_out(manifest, ctx.targets)
     finally:
         cleanup()
     return manifest
