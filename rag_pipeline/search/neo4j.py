@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from typing import Any, Dict, List, MutableMapping, Optional
 
@@ -81,19 +82,65 @@ def _neo4j_run(cypher: str, params: Dict[str, Any], driver: Optional[Any] = None
         return list(session.run(cypher, **params))
 
 
+_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "can", "do", "does", "for", "from",
+    "has", "have", "how", "in", "is", "it", "its", "of", "on", "or", "that", "the", "their",
+    "there", "these", "this", "to", "what", "when", "where", "which", "who", "with",
+    # domain-generic words that match nearly everything in a geospatial catalog
+    "data", "dataset", "datasets", "notebook", "notebooks", "platform", "me", "show", "find",
+}
+
+
+def neo4j_query_terms(query: str, *, max_terms: int = 8) -> List[str]:
+    """Content terms for graph matching.
+
+    The Cypher used to test ``toLower(r.title) CONTAINS toLower($q)`` with $q bound to the
+    WHOLE query, i.e. a phrase-substring match. Measured against the live graph:
+
+        "spatial accessibility hospitals" -> 0 hits
+        "spatial accessibility"           -> 9 hits
+        "accessibility"                   -> 9 hits
+
+    So the graph arm returned nothing for essentially any natural-language question, and only
+    worked when the entire query happened to be a literal substring. The Neo4j outage was
+    masking this: the arm looked broken because it was unreachable, and stayed broken after
+    it became reachable.
+    """
+    tokens = re.findall(r"[A-Za-z0-9_]+", (query or "").lower())
+    terms = [t for t in tokens if len(t) > 2 and t not in _STOPWORDS]
+    seen, out = set(), []
+    for t in terms:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out[:max_terms] or tokens[:max_terms]
+
+
 def _build_neo4j_keyword_cypher() -> str:
+    """Match on ANY content term, and rank by HOW MANY matched.
+
+    Any-term recall with match-count ranking behaves like the keyword arm the rest of the
+    system uses: a question mentioning four concepts should surface the element covering
+    three of them, not nothing at all.
+
+    Restricted to knowledge-element labels via ``$labels``. Bare ``MATCH (r)`` also swept the
+    1195 :Alias and 1191 :Contributor nodes — 2386 of the graph's 3205 nodes are not knowledge
+    elements, and none of them carry ``visibility``, which ``is_public_visibility`` treats as
+    public. So a person's name matching a query term could be returned as a search result.
+    """
     return """
     MATCH (r)
     WHERE
-      (r.title IS NOT NULL    AND toLower(r.title)    CONTAINS toLower($q)) OR
-      (r.contents IS NOT NULL AND toLower(r.contents) CONTAINS toLower($q)) OR
-      (r.tags IS NOT NULL     AND any(tag IN r.tags WHERE toLower(tag) CONTAINS toLower($q)))
+      any(l IN labels(r) WHERE l IN $labels) AND
+      any(t IN $terms WHERE
+        (r.title IS NOT NULL    AND toLower(r.title)    CONTAINS t) OR
+        (r.contents IS NOT NULL AND toLower(r.contents) CONTAINS t) OR
+        (r.tags IS NOT NULL     AND any(tag IN r.tags WHERE toLower(tag) CONTAINS t)))
     WITH r,
-         CASE
-           WHEN r.title IS NOT NULL    AND toLower(r.title)    CONTAINS toLower($q) THEN 2.0
-           WHEN r.contents IS NOT NULL AND toLower(r.contents) CONTAINS toLower($q) THEN 1.5
-           ELSE 1.0
-         END AS relevance,
+         size([t IN $terms WHERE r.title IS NOT NULL AND toLower(r.title) CONTAINS t]) AS title_hits,
+         size([t IN $terms WHERE r.contents IS NOT NULL AND toLower(r.contents) CONTAINS t]) AS body_hits
+    WITH r, title_hits, body_hits,
+         (2.0 * title_hits) + (1.0 * body_hits) AS relevance,
          coalesce(log10(toFloat(coalesce(r.click_count, 0)) + 1), 0) AS popularity,
          coalesce(toFloat(count { (r)--() }), 0) AS connectivity
     WITH r,
@@ -125,7 +172,15 @@ def _records_to_hits(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
         if node is not None:
             properties = dict(node)
-            doc_id = properties.get("_id", getattr(node, "element_id", f"node:{idx}"))
+            # The platform UUID, NOT Neo4j's internal element id. Measured on the live graph:
+            # the `_id` property exists on 0 of 3205 nodes, so this fallback chain always
+            # reached `element_id` and emitted "4:f84f361b-...:532" as the doc_id. Every other
+            # retrieval arm keys doc_id on the platform UUID, so graph hits could never dedupe
+            # against them, could never match an expected id, and cited a link that resolves
+            # to nothing. `id` is present on all 819 knowledge-element nodes.
+            doc_id = (properties.get("id")
+                      or properties.get("_id")
+                      or getattr(node, "element_id", f"node:{idx}"))
         else:
             properties = {k: v for k, v in record.items() if isinstance(v, (str, int, float, list, dict))}
             doc_id = properties.get("doc_id", f"row:{idx}")
@@ -168,7 +223,15 @@ def get_neo4j_search_results(
     if not query:
         return []
 
-    params = {"q": query, "limit": max(1, min(int(limit or 0), 100))}
+    # $terms, not $q: the old binding made this a whole-phrase substring match, so any
+    # multi-word question returned nothing. Keep "q" too for a caller-supplied cypher.
+    terms = neo4j_query_terms(query)
+    if not terms:
+        return []
+    from rag_pipeline.search.neo4j_graph_tools import _get_resource_labels
+
+    params = {"q": query, "terms": terms, "labels": sorted(_get_resource_labels()),
+              "limit": max(1, min(int(limit or default_top_k()), 100))}
     cypher_stmt = cypher or _build_neo4j_keyword_cypher()
 
     try:

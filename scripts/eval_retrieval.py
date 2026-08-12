@@ -85,6 +85,15 @@ def arm_semantic(query: str, k: int) -> Optional[List[str]]:
     return _ids(hits) if hits else None
 
 
+def arm_neo4j(query: str, k: int) -> Optional[List[str]]:
+    try:
+        from rag_pipeline.search.neo4j import get_neo4j_search_results
+        hits = get_neo4j_search_results(query, limit=k)
+    except Exception:
+        return None
+    return _ids(hits) if hits else None
+
+
 def arm_agent_kb(query: str, k: int) -> Optional[List[str]]:
     try:
         from rag_pipeline.search.agent_kb import agent_kb_search
@@ -114,12 +123,27 @@ def arm_union_kb(query: str, k: int) -> Optional[List[str]]:
     return _rrf(parts)[:k] if parts else None
 
 
+def arm_union_neo4j(query: str, k: int) -> Optional[List[str]]:
+    """Kept so the negative result stays reproducible, and NOT part of ``union``.
+
+    Once the graph arm returned real platform UUIDs it scored 20/37 alone — but every one of
+    those 20 was already found by keyword (29/37), and it contributed **0 unique** elements.
+    Fusing a strict subset into a fixed top-k window can only evict correct hits: measured
+    union@20 fell 29/37 -> 26/37. The graph earns its keep through traversal (related
+    elements, contributor/collection edges), not through lexical recall.
+    """
+    parts = [r for r in (arm_keyword(query, k), arm_semantic(query, k), arm_neo4j(query, k)) if r]
+    return _rrf(parts)[:k] if parts else None
+
+
 ARMS: Dict[str, Callable[[str, int], Optional[List[str]]]] = {
     "keyword": arm_keyword,
     "semantic": arm_semantic,
+    "neo4j": arm_neo4j,
     "agent_kb": arm_agent_kb,
     "union": arm_union,
     "union+agent_kb": arm_union_kb,
+    "union+neo4j": arm_union_neo4j,
 }
 
 

@@ -933,3 +933,53 @@ was unroutable, which the IP fix already removed. Keeping it for dev machines of
 
 **Next** `kb_method_search` / `get_method_contract` so the agent can find units, then a real
 end-to-end compose through the sandbox mount.
+
+## 2026-08-12 · M4.0 · The graph arm was returning the wrong ids for the wrong nodes
+**Change** `rag_pipeline/search/neo4j.py` — three defects in the keyword arm:
+  (a) `neo4j_query_terms()` + `any(t IN $terms ...)` replacing a `CONTAINS $q` phrase match,
+  ranked by match count (`2*title_hits + body_hits`);
+  (b) `doc_id` now resolves to the platform UUID (`properties["id"]`), not Neo4j's internal
+  `element_id`;
+  (c) the match is scoped to `$labels` from the existing `_get_resource_labels()`.
+  New `rag_pipeline/tests/test_neo4j_search.py` (22 tests, fake driver, no network).
+
+**Why** With credentials fixed the arm connected and still returned nothing useful. The
+Cypher bound `$q` to the *whole query* and tested `toLower(r.title) CONTAINS toLower($q)` — a
+phrase-substring match, so any natural-language question missed:
+
+    "spatial accessibility hospitals" -> 0      "spatial accessibility" -> 9
+    "accessibility"                   -> 9      "flood"                 -> 10
+
+Then, with terms fixed, hits came back with `doc_id = "4:f84f361b-...:532"`. The chain was
+`properties.get("_id", node.element_id)`, and `_id` exists on **0 of 3205 nodes**, so it
+*always* fell through to the internal id. Every other arm keys `doc_id` on the platform UUID,
+so graph hits could never dedupe against them and cited links resolving to nothing.
+Third, `MATCH (r)` swept all 3205 nodes; **2386 are :Alias/:Contributor**, which carry no
+`visibility` — and `is_public_visibility(None)` is `True` — so a contributor's *name* matching
+a query term was a returnable search result.
+
+**Measured** recall@20 over the 37 full expected ids:
+
+| arm | before | after |
+|---|---|---|
+| neo4j alone | 0/37 | **20/37** |
+| keyword | 29/37 | 29/37 |
+
+Suite **681 passed**, same 3 pre-existing live-cluster failures.
+
+**Surprised by** the fix not being worth fusing in. Once the arm worked I added it to the
+union — and recall@20 *fell* 29/37 → 26/37. Set analysis explains it: of the 37 expected
+elements, keyword-only found 9, both found 20, and **neo4j-only found 0**. The graph's hits
+are a strict subset of BM25's, so RRF into a fixed window can only evict correct hits. I
+reverted the fusion and kept `union+neo4j` as a named arm so the negative result stays
+reproducible. The graph earns its keep through *traversal* — related elements, collection and
+contributor edges — not through lexical recall, and M4's "union the KB arm" plan should not be
+read as "union every arm."
+
+**Also** `.env`'s `NEO4J_PASSWORD` contains an unquoted `$`, so `set -a; source .env` silently
+shell-expands it into a wrong password. Doing that during this step tripped
+`Neo.ClientError.Security.AuthenticationRateLimit` and briefly looked like a credential
+problem. Load `.env` with `python-dotenv` (or `scripts/run_agent_api_dev.sh`), never `source`.
+
+**Next** `kb_method_search` / `get_method_contract` so the agent can find units, then a real
+end-to-end compose through the sandbox mount.
