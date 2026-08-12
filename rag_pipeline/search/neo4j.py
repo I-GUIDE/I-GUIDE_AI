@@ -5,6 +5,7 @@ from typing import Any, Dict, List, MutableMapping, Optional
 
 from .utils import get_logger, getenv, normalize_source_fields, safe_score
 from ..state import EvidenceEntry, ensure_state_shapes, get_query_text, merge_retrieval
+from .utils import default_top_k  # shared retrieval window
 
 log = get_logger("search_neo4j")
 
@@ -175,7 +176,7 @@ def retrieve_neo4j(state: MutableMapping[str, Any]) -> List[Dict[str, Any]]:
 
     params = state.get("params") or {}
     try:
-        limit = int(params.get("top_k", 8))
+        limit = int(params.get("top_k", default_top_k()))
     except (TypeError, ValueError):
         limit = 8
 

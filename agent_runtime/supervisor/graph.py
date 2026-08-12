@@ -1169,12 +1169,17 @@ def _wants_external_data(query: str) -> bool:
 
 
 def _direct_search_sweep(query: str, enabled_search_methods: Optional[List[str]],
-                         *, k: int = 8) -> List[Dict[str, Any]]:
+                         *, k: Optional[int] = None) -> List[Dict[str, Any]]:
     """Deterministic multi-method retrieval sweep: run keyword AND semantic search directly
     (cheap OpenSearch calls, no LLM) so every search turn has baseline coverage from BOTH
     core methods regardless of which tools the LLM SearchAgent chose to call — it frequently
     stops after a single tool, leaving results incomplete. Respects the request's
     enabled_search_methods allowlist. Never raises; each method degrades independently."""
+    # Resolved here, not as a default argument: a default binds at import and would freeze
+    # the window regardless of AGENT_SEARCH_TOP_K.
+    if k is None:
+        from rag_pipeline.search.utils import default_top_k
+        k = default_top_k()
     allow = ({str(m).strip() for m in enabled_search_methods}
              if enabled_search_methods is not None else None)
 

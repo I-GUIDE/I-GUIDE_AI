@@ -529,3 +529,60 @@ new "no single tool runs this pipeline" Run section, and **zero** `mcp_run_nbwf_
    `backend.i-guide.io` rather than relying on whoever calls the CLI to pass fields.
 
 **M0 complete.** Next: M1.1 (persistent workspace), the first of the three ceilings.
+
+---
+
+## 2026-08-07 · M1.2 · One retrieval window (AGENT_SEARCH_TOP_K, default 20)
+
+**Change** New `rag_pipeline/search/utils.default_top_k()` as the single source of truth,
+routed into every retrieval entry point: `keyword.py` (wrapper + `get_keyword_search_results`),
+`semantic.py` (wrapper + `semantic_search`), `core.py`, `neo4j.py`, `spatial.py` ×2,
+`opengeodata.py` ×3, `_safe_int` plus six tool signatures in `langchain_granular_tools.py`,
+and `_direct_search_sweep`. `AGENT_SUPERVISOR_TOP_K` deliberately left at 8. 16 regression
+tests in `test_retrieval_window.py`.
+
+**Why** Recall over the benchmark's full expected sets was 22/37 at the effective window of
+8 while 29/37 was available at 20 — the single largest measured improvement for the least
+code in this whole plan.
+
+**Measured**
+
+| | recall |
+|---|---|
+| k=8 (old effective window) | **22/37 (59.5%)** |
+| k=20 (new default) | **29/37 (78.4%)** |
+| k=50 | 33/37 (89.2%) |
+
+Verified live through `/agent/chat/stream` — the same endpoint the prototype uses —
+`keyword_search count=8 → count=20`. Hardcoded windows remaining: **0**. Suite 522 passed,
+same 3 pre-existing failures. `AGENT_SUPERVISOR_TOP_K` still 8, so answer-prompt cost is
+unchanged.
+
+**Surprised by** three things, and the first two are corrections to the plan.
+
+1. **The window was in 16 places, not 6.** The plan (and the analysis behind it) listed
+   `keyword.py`, `semantic.py`, four tool signatures and the sweep. The real count included
+   `core.py`, `neo4j.py`, `spatial.py` ×2, `opengeodata.py` ×3, a sixth tool
+   (`opengeodata_search_tool`), and — the one that actually mattered — **`size: int = 12`
+   defaults on `get_keyword_search_results` and `semantic_search` themselves**, a *third*
+   distinct window nobody had counted.
+2. **My first attempt measured "no change" and was right to.** Recall came back 26/37 for
+   both k=8 and k=20 because I had only fixed the state-machine wrapper, while my
+   measurement called `get_keyword_search_results` directly and hit its own `12`. The
+   instrument caught my incomplete change — which is precisely why M0.4 came before this.
+3. **A near-regression worth recording.** Making `opengeodata`'s `limit` default to `None`
+   would have *reduced* it to a single result: `_payload_from_context` does
+   `int(limit or 1)`, so `None` collapses to 1, not to the window. Resolved before the call
+   and pinned by `test_opengeodata_none_becomes_the_window_not_one`.
+
+The general lesson, now encoded in the helper's docstring and a test: these values must
+resolve at **call** time. `limit: int = default_top_k()` binds once at import and silently
+ignores the environment forever — the same trap that made attempt 1 unmeasurable.
+
+**Tooling note** The browser pane's viewport went to 0x0 partway through this step, so the
+final prototype check was done against the SSE stream directly rather than the rendered UI.
+Same endpoint, same payload, but recording it because it is weaker evidence than a rendered
+page: it confirms the server behavior the prototype consumes, not the prototype's rendering
+of it.
+
+**Next** M1.1 — the persistent workspace.

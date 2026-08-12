@@ -14,7 +14,7 @@ except Exception:  # pragma: no cover - optional dependency
 from opensearchpy import OpenSearch
 from dotenv import load_dotenv
 
-from .utils import get_logger, getenv, normalize_source_fields, safe_score
+from .utils import get_logger, getenv, normalize_source_fields, safe_score, default_top_k
 from ..state import EvidenceEntry, ensure_state_shapes, get_query_text, merge_retrieval
 
 load_dotenv()
@@ -434,7 +434,7 @@ def retrieve_spatial(state: MutableMapping[str, Any]) -> List[Dict[str, Any]]:
             logger.debug("No coordinates in state; attempting NLP extraction from query")
             limit_value: Any = config.get("limit")
             if limit_value is None:
-                limit_value = state.get("params", {}).get("top_k", 8)
+                limit_value = state.get("params", {}).get("top_k", default_top_k())
             
             # Use the NLP + Maps API flow
             result = get_spatial_search_results(query_text, size=limit_value)
@@ -456,7 +456,7 @@ def retrieve_spatial(state: MutableMapping[str, Any]) -> List[Dict[str, Any]]:
 
     limit_value: Any = config.get("limit")
     if limit_value is None:
-        limit_value = state.get("params", {}).get("top_k", 8)
+        limit_value = state.get("params", {}).get("top_k", default_top_k())
 
     element_type = config.get("element_type")
 

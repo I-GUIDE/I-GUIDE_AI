@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from typing import Any, Dict, List, Optional
+from .utils import default_top_k  # shared retrieval window
 
 
 # --------------------------------------------------------------------------- #
@@ -173,7 +174,7 @@ def resolve_parent_elements_local(hits: List[Dict[str, Any]]) -> Dict[str, Dict[
     return elements
 
 
-def agent_kb_search(query: str, *, size: int = 8, client=None, embed: bool = True,
+def agent_kb_search(query: str, *, size: Optional[int] = None, client=None, embed: bool = True,
                     resolve_parents: bool = True) -> Dict[str, Any]:
     """Search the agent KB; return normalized, parent-linked evidence.
 

@@ -9,7 +9,7 @@ from opensearchpy import OpenSearch
 
 from dotenv import load_dotenv
 
-from .utils import get_logger, getenv
+from .utils import default_top_k, get_logger, getenv
 
 load_dotenv()
 
@@ -82,7 +82,10 @@ def get_embedding_endpoint():
         return jsonify({"error": "embedding service unavailable"}), 503
     return jsonify({"embedding": embedding})
 
-def semantic_search(query: str, size: int = 12) -> List[Dict[str, Any]]:
+def semantic_search(query: str, size: Optional[int] = None) -> List[Dict[str, Any]]:
+    # None -> the shared retrieval window, resolved at call time (a literal default here
+    # was a third independent window alongside the wrapper's 8 and the tools' 8).
+    size = max(1, min(int(size or default_top_k()), 100))
     start_time = time.time()
     logger.info(f"Starting semantic search for query: {query}")
 
@@ -151,9 +154,9 @@ def retrieve_semantic(state: MutableMapping[str, Any]) -> List[Dict[str, Any]]:
 
     params = state.get("params") or {}
     try:
-        size = int(params.get("top_k", 8))
+        size = int(params.get("top_k", default_top_k()))
     except (TypeError, ValueError):
-        size = 8
+        size = default_top_k()
 
     return semantic_search(query, size=size)
 

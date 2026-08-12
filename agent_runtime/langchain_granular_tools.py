@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
+from rag_pipeline.search.utils import default_top_k
+
 from .langchain_file_tools import make_langchain_file_tools
 from rag_pipeline.search.opengeodata import get_opengeodata_results
 from rag_pipeline.search.web import results_to_hits, run_web_search
@@ -29,7 +31,12 @@ from rag_pipeline.qgis_headless_tools import (
 )
 
 
-def _safe_int(value: Any, default: int = 8, minimum: int = 1, maximum: int = 100) -> int:
+def _safe_int(value: Any, default: Optional[int] = None, minimum: int = 1, maximum: int = 100) -> int:
+    """Coerce a model-supplied limit. ``default=None`` resolves the shared retrieval window
+    at CALL time -- a literal default would freeze it at import and ignore
+    AGENT_SEARCH_TOP_K, which is exactly how the old hardcoded 8 survived."""
+    if default is None:
+        default = default_top_k()
     try:
         parsed = int(value)
     except (TypeError, ValueError):
@@ -113,17 +120,17 @@ def _build_payload(hits: List[Dict[str, Any]], source: str) -> str:
     return json.dumps(payload, ensure_ascii=True, default=str)
 
 
-def keyword_search_tool(query: str, limit: int = 8) -> str:
+def keyword_search_tool(query: str, limit: Optional[int] = None) -> str:
     hits = get_keyword_search_results(query, size=_safe_int(limit))
     return _build_payload(hits, source="keyword")
 
 
-def semantic_search_tool(query: str, limit: int = 8) -> str:
+def semantic_search_tool(query: str, limit: Optional[int] = None) -> str:
     hits = run_semantic_search(query, size=_safe_int(limit))
     return _build_payload(hits, source="semantic")
 
 
-def neo4j_search_tool(query: str, limit: int = 8) -> str:
+def neo4j_search_tool(query: str, limit: Optional[int] = None) -> str:
     hits = get_neo4j_agent_results(query, limit=_safe_int(limit))
     return _build_payload(hits, source="neo4j")
 
@@ -142,12 +149,12 @@ def neo4j_explore_related_nodes_tool(element_id: str, depth: int = 2, limit: int
     return json.dumps(payload, ensure_ascii=True, default=str)
 
 
-def spatial_search_tool(query: str, limit: int = 8) -> str:
+def spatial_search_tool(query: str, limit: Optional[int] = None) -> str:
     hits = get_spatial_search_results(query, size=_safe_int(limit))
     return _build_payload(hits, source="spatial")
 
 
-def agent_kb_search_tool(query: str, limit: int = 8) -> str:
+def agent_kb_search_tool(query: str, limit: Optional[int] = None) -> str:
     """Search the agent knowledge base (extracted blocks/method-specs from ingested submissions)."""
     payload = run_agent_kb_search(query, size=_safe_int(limit))
     return json.dumps(payload, ensure_ascii=True, default=str)
@@ -158,7 +165,7 @@ def get_kb_block_tool(doc_id: str) -> str:
     return json.dumps(run_get_kb_block(doc_id), ensure_ascii=True, default=str)
 
 
-def opengeodata_search_tool(query: str, limit: int = 8, session_context_json: Optional[str] = None) -> str:
+def opengeodata_search_tool(query: str, limit: Optional[int] = None, session_context_json: Optional[str] = None) -> str:
     session_ctx: Optional[Mapping[str, Any]] = None
     if session_context_json:
         try:
