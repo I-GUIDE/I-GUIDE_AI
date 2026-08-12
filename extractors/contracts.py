@@ -28,6 +28,7 @@ ANALYZER_VERSION = 1
 # --- callability verdicts ---------------------------------------------------------------
 CALLABLE = "callable"
 NEEDS_GLOBALS = "needs_globals"
+NEEDS_INSTANCE = "needs_instance"  # a bound method: calling it requires constructing its class
 UNPARSEABLE = "unparseable"
 SPEC_ONLY = "spec_only"          # publications: a declared contract with no body
 

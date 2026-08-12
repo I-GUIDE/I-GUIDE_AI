@@ -57,6 +57,10 @@ RAG_COMPONENT_TOOL_NAMES: set[str] = {
     "web_fetch",
     "agent_kb_search",
     "get_kb_block",
+    # The method library. Same filter caveat as the web tools above: absent from this set, both
+    # are registered, described and unreachable for every intent.
+    "kb_method_search",
+    "get_method_contract",
 }
 
 FILE_TOOL_NAMES: set[str] = {

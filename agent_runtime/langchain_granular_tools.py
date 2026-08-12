@@ -165,6 +165,35 @@ def get_kb_block_tool(doc_id: str) -> str:
     return json.dumps(run_get_kb_block(doc_id), ensure_ascii=True, default=str)
 
 
+def kb_method_search_tool(query: str, limit: Optional[int] = None) -> str:
+    """Find callable methods in the extracted library, with the exact import line for each."""
+    from agent_runtime.method_library import library_summary, search_methods
+
+    results = search_methods(query, limit=_safe_int(limit, default=8, maximum=25) or 8)
+    summary = library_summary()
+    payload: Dict[str, Any] = {"source": "method_library", "results": results,
+                               "library": {"units": summary["units"],
+                                           "elements": summary["elements"]}}
+    if not summary["units"]:
+        # An empty library and a query that matched nothing are different situations, and the
+        # model cannot tell them apart from an empty result list. Left implicit, it reports
+        # "the platform has no such method" when in fact nothing has been ingested yet.
+        payload["note"] = ("No method library has been built yet (no elements ingested with "
+                           "--targets library). This is not evidence that no such method exists.")
+    elif not results:
+        payload["note"] = (f"No method matched. The library holds {summary['units']} units from "
+                           f"{summary['elements']} elements; try the operation name or the "
+                           f"source element's topic.")
+    return json.dumps(payload, ensure_ascii=True, default=str)
+
+
+def get_method_contract_tool(symbol: str) -> str:
+    """Full contract for one library method: signature, params, invariants, deps, import line."""
+    from agent_runtime.method_library import get_contract
+
+    return json.dumps(get_contract(symbol), ensure_ascii=True, default=str)
+
+
 def opengeodata_search_tool(query: str, limit: Optional[int] = None, session_context_json: Optional[str] = None) -> str:
     session_ctx: Optional[Mapping[str, Any]] = None
     if session_context_json:
@@ -560,6 +589,34 @@ def make_langchain_granular_tools(
                 "Fetch the FULL agent-KB block by its doc_id (returned by agent_kb_search). "
                 "Use to read a block's complete code / method body for verbatim reuse, since "
                 "search results are truncated."
+            ),
+            metadata={"category": "retrieval_internal"},
+        ),
+        StructuredTool.from_function(
+            func=kb_method_search_tool,
+            name="kb_method_search",
+            description=(
+                "Search the METHOD LIBRARY: real, importable Python functions extracted from "
+                "platform notebooks and code, each verified to be independently callable. "
+                "Returns a signature, a summary and the EXACT import line for each hit. "
+                "USE IT BEFORE WRITING ANALYSIS CODE FROM SCRATCH — the library is already "
+                "mounted read-only in the execution sandbox, so an import line returned here "
+                "works verbatim inside execute_code with no installation and no download. "
+                "Prefer a library method over re-implementing one: it carries the source "
+                "element's provenance, so results stay attributable to a platform element."
+            ),
+            metadata={"category": "retrieval_internal"},
+        ),
+        StructuredTool.from_function(
+            func=get_method_contract_tool,
+            name="get_method_contract",
+            description=(
+                "Full contract for one method from kb_method_search: parameters with types, "
+                "return value, declared invariants (e.g. requires a projected CRS), pip "
+                "requirements, the pinned import line and the source element. "
+                "Call it before invoking an unfamiliar method — the invariants say what the "
+                "method assumes about its inputs, and violating one produces a plausible "
+                "wrong number rather than an error."
             ),
             metadata={"category": "retrieval_internal"},
         ),

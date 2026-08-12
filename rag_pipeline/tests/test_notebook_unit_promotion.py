@@ -190,13 +190,32 @@ CORPUS = Path("/Users/yfkang/i-guide-platform-flask-servers/agent_chat_files/eva
 
 @pytest.mark.skipif(not CORPUS.exists(), reason="cached notebook corpus not present")
 def test_real_corpus_promotes_the_expected_number_of_units():
-    """Pins the measured baseline so a regression in promotion is visible."""
-    total = callable_ = 0
+    """Pins the measured baseline so a regression in promotion is visible.
+
+    The callable baseline was 39/41 and that number was **wrong**, not good: 24 of those
+    "callable" units were bound methods, which read no globals (``self`` is a parameter) and
+    so passed every blocker check. Their slices define the enclosing CLASS, so the advertised
+    ``from <module> import <method>`` raised ImportError — and because that line lives in the
+    element's ``__init__``, one bad unit took down every sibling. Only 14 of 40 advertised
+    import lines actually worked.
+
+    With methods verdicted ``needs_instance`` the honest count is 16, and 16/16 import. A
+    smaller library that imports beats a larger one that lies; raising this number again
+    should mean promoting real module-level functions, not re-admitting methods.
+    """
+    total = callable_ = methods = 0
     for f in sorted(CORPUS.glob("*.ipynb")):
         r = _extract(f, element_id=f.stem)
         units = _units(r)
         total += len(units)
-        callable_ += sum(1 for u in units
-                         if u.unit["callability"]["verdict"] == "callable")
+        for u in units:
+            verdict = u.unit["callability"]["verdict"]
+            callable_ += verdict == "callable"
+            if "." in (u.unit.get("qualified_name") or ""):
+                methods += 1
+                assert verdict != "callable", (
+                    f"{u.unit['qualified_name']} is a bound method verdicted callable — "
+                    f"its slice defines the class, so the import line will fail")
     assert total >= 40, f"unit count regressed to {total}"
-    assert callable_ >= 39, f"callable count regressed to {callable_}"
+    assert callable_ >= 16, f"callable count regressed to {callable_}"
+    assert methods >= 20, "expected the corpus to still contain class-based notebooks"

@@ -194,3 +194,61 @@ def test_element_package_names_are_safe_identifiers(title):
     name = library_emitter.element_package("abc12345", title)
     assert "/" not in name and ".." not in name
     assert name.replace("_", "a").isalnum()
+
+
+# --------------------------------------------------------------- import-line verification
+
+def test_a_slice_that_does_not_define_the_symbol_is_skipped_not_advertised(lib):
+    """Defense in depth behind the analyzer's needs_instance verdict.
+
+    The emitter used to write ``from .v_sha import <symbol>`` on the emitter's word alone. For
+    bound methods the slice defined only the CLASS, so the import raised — and since that line
+    lives in the element's __init__.py, ONE bad unit took down every sibling unit in the
+    element. Measured on the real corpus: 26 of 40 advertised import lines failed, of which
+    only 24 were themselves methods.
+    """
+    class_only = "class Downloader:\n    def build_url(self):\n        return 1\n"
+    out = library_emitter.emit(
+        _manifest(_unit_asset("build_url", "elemA", class_only, sha="m1")), root=lib)
+    assert out["written"] == []
+    assert out["skipped"] and "module level" in out["skipped"][0]["reason"]
+
+
+def test_one_unimportable_unit_cannot_break_its_siblings(lib):
+    good = _unit_asset("good_fn", "elemA", "def good_fn():\n    return 'ok'\n", sha="g1")
+    bad = _unit_asset("method", "elemA", "class C:\n    def method(self):\n        return 1\n",
+                      sha="b1")
+    out = library_emitter.emit(_manifest(good, bad), root=lib)
+    assert len(out["written"]) == 1
+    r = _import_in_subprocess(lib, "import iguide_methods as M; print(M.get('good_fn')())")
+    assert r.returncode == 0, r.stderr[-400:]
+    assert r.stdout.strip() == "ok"
+
+
+def test_every_registry_import_line_actually_imports(lib):
+    """The property the registry exists to guarantee, asserted end to end."""
+    a = _unit_asset("alpha", "elemA", "def alpha():\n    return 1\n", sha="a1")
+    b = _unit_asset("beta", "elemB", "def beta():\n    return 2\n", sha="b1")
+    library_emitter.emit(_manifest(a, b), root=lib)
+    registry = json.loads((lib / "iguide_methods" / "_registry.json").read_text())
+    lines = [f"from {e['module']} import {e['library_symbol']}"
+             for e in registry.values()
+             if isinstance(e, dict) and not e.get("ambiguous") and e.get("module")]
+    assert lines
+    for line in lines:
+        r = _import_in_subprocess(lib, line)
+        assert r.returncode == 0, f"advertised import failed: {line}\n{r.stderr[-300:]}"
+
+
+def test_a_module_level_constant_unit_is_importable(lib):
+    """Not every unit is a def; a symbol bound by assignment is a legitimate export."""
+    out = library_emitter.emit(
+        _manifest(_unit_asset("TABLE", "elemA", "TABLE = {'a': 1}\n", sha="c1")), root=lib)
+    assert len(out["written"]) == 1
+
+
+def test_an_unparseable_slice_is_refused_rather_than_advertised(lib):
+    out = library_emitter.emit(
+        _manifest(_unit_asset("broken", "elemA", "def broken(:\n", sha="x1")), root=lib)
+    assert out["written"] == []
+    assert out["skipped"]

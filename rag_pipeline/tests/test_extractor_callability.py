@@ -216,3 +216,69 @@ def test_annotation_beats_the_name_heuristic():
     src = "def f(df: int):\n    return df\n"
     p = contract_params(ast.parse(src).body[0])[0]
     assert p.inferred_type == "number", "a declared annotation must win over a name guess"
+
+
+# --------------------------------------------------------------- bound methods
+
+def test_a_public_method_is_not_callable_on_its_own():
+    """The false-callable that broke the real library.
+
+    A method reads no globals — ``self`` is a parameter — so every blocker check passes and
+    it was verdicted ``callable``. On the 14-notebook corpus that was 24 of 40 units, and the
+    emitted slice defines the CLASS, so the advertised
+    ``from <module> import build_api_url`` raised ImportError.
+    """
+    from extractors.contracts import NEEDS_INSTANCE
+
+    src = (
+        "import requests\n"
+        "\n"
+        "class Downloader:\n"
+        "    def __init__(self, base):\n"
+        "        self.base = base\n"
+        "\n"
+        "    def build_url(self, lat, lon):\n"
+        "        return f'{self.base}?lat={lat}&lon={lon}'\n"
+    )
+    verdicts, _scope, summary = analyze_module(src)
+    v = verdicts["Downloader.build_url"]
+    assert v.verdict == NEEDS_INSTANCE
+    assert not v.is_callable
+    assert "instance" in v.reason
+    assert summary["callable"] == 0
+    assert "Downloader.build_url" in summary["needs_instance"]
+
+
+def test_a_module_level_function_is_unaffected_by_a_sibling_class():
+    src = (
+        "class C:\n"
+        "    def m(self):\n"
+        "        return 1\n"
+        "\n"
+        "def free(x):\n"
+        "    return x + 1\n"
+    )
+    verdicts, _scope, summary = analyze_module(src)
+    assert verdicts["free"].is_callable
+    assert not verdicts["C.m"].is_callable
+    assert summary["callable"] == 1
+
+
+def test_a_staticmethod_is_still_reported_as_needing_an_instance():
+    """Conservative on purpose: a @staticmethod IS importable via its class, but not by the
+    bare name the registry would advertise. Promoting it needs a qualified export path, which
+    is a feature, not something to infer silently."""
+    src = (
+        "class C:\n"
+        "    @staticmethod\n"
+        "    def helper(x):\n"
+        "        return x\n"
+    )
+    verdicts, _scope, _s = analyze_module(src)
+    assert not verdicts["C.helper"].is_callable
+
+
+def test_private_methods_are_not_offered_at_all():
+    src = "class C:\n    def _hidden(self):\n        return 1\n"
+    verdicts, _scope, _s = analyze_module(src)
+    assert "C._hidden" not in verdicts

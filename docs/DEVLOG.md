@@ -983,3 +983,57 @@ problem. Load `.env` with `python-dotenv` (or `scripts/run_agent_api_dev.sh`), n
 
 **Next** `kb_method_search` / `get_method_contract` so the agent can find units, then a real
 end-to-end compose through the sandbox mount.
+
+## 2026-08-12 · M4.1 · The agent can find extracted methods — and 26 of 40 were unimportable
+**Change** `agent_runtime/method_library.py` (new) + two tools `kb_method_search` /
+  `get_method_contract`, registered and added to `graph_state.RAG_COMPONENT_TOOL_NAMES`.
+  Then, forced by what the tools exposed: a new `NEEDS_INSTANCE` verdict in
+  `extractors/analysis/callability.py`, and a `_defines_at_module_level()` guard in
+  `library_emitter`.
+
+**Why** M2 ended with 40 units written to an importable package the sandbox mounts — and no
+way for the agent to learn any of them existed. Extracted, mounted, undiscoverable.
+
+Both tools read the library's `_registry.json` rather than a `MethodUnit` OpenSearch index as
+planned. The registry is written by the same `emit()` that writes the modules, so an import
+line taken from it is guaranteed to resolve; an index doc and the mounted library drift
+independently, and the failure mode of that drift is the worst kind — the agent is told to
+import something that does not exist, inside a container with no network to check. The cost
+is search quality (token overlap, no IDF), which is adequate at tens of units and is called
+out in the docstring as the point to index properly.
+
+**Measured** on the real 14-notebook corpus, before → after:
+
+| | before | after |
+|---|---|---|
+| units advertised as callable | 40 | 16 |
+| **advertised import lines that actually import** | **14/40** | **16/16** |
+| verdicts | 39 callable, 1 needs_globals | 16 callable, 24 needs_instance, 1 needs_globals |
+
+Suite **714 passed**, same 3 pre-existing live-cluster failures.
+
+**Surprised by** how badly the library was broken, and by having measured it wrong before.
+The first search returned `def download_all_samples(self, csv_files)` — a bound method offered
+as a standalone callable. `iter_units` collects public methods as `Class.method` deliberately
+(they are useful evidence), but a method reads no globals — `self` is a *parameter* — so it
+passed every blocker check and was verdicted `callable`. **24 of 40 units were methods.**
+
+Worse, the failure was not contained. The slice correctly emits the enclosing class, but the
+registry advertised the bare method name, so `from .v_sha import build_api_url` raised
+ImportError — and that line lives in the element's `__init__.py`, so **one bad method took
+down every sibling unit in its element**. 26 of 40 import lines failed, of which only 24 were
+themselves methods.
+
+My earlier "39/40 slices import" was measuring the wrong thing: I imported the *module*, not
+the *symbol*, and the symbol re-export is exactly where it breaks. Corrected here. This is
+the plan's `0 false-callable` exit criterion failing in the field, and it is why that
+criterion is asymmetric — a false-not-callable costs coverage, a false-callable ships a
+broken unit.
+
+Methods are still indexed for discovery, just never given `EMIT_LIBRARY`. Promoting them
+properly means exporting a qualified path and deciding whether a class whose `__init__` opens
+files or hits the network is "independently callable" at all — a real design question, not
+something to infer silently.
+
+**Next** end-to-end: agent finds a unit via `kb_method_search`, imports it inside the sandbox
+through the read-only mount, and passes data between two calls in one session.

@@ -35,7 +35,8 @@ import symtable
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..contracts import CALLABLE, NEEDS_GLOBALS, UNPARSEABLE, Callability
+from ..contracts import (CALLABLE, NEEDS_GLOBALS, NEEDS_INSTANCE, UNPARSEABLE,
+                         Callability)
 
 _BUILTINS = frozenset(dir(builtins))
 
@@ -250,6 +251,21 @@ def analyze_module(source: str) -> Tuple[Dict[str, Callability], ModuleScope, Di
         elif c.free_names:
             c.verdict = NEEDS_GLOBALS
             c.reason = f"unbound name(s): {', '.join(c.free_names)}"
+        elif "." in qualname:
+            # A bound method. It reads no globals — `self` is a PARAMETER — so every check
+            # above passes and it was being verdicted `callable`. Measured on the 14-notebook
+            # corpus that was 24 of 40 units, and it is a false-callable in the strict sense:
+            # the emitted slice defines the CLASS, so `from <module> import build_api_url`
+            # raises ImportError, and one such re-export poisoned its element's __init__ and
+            # took every sibling unit down with it (26 of 40 import lines failed).
+            #
+            # Calling one really does require constructing the class, whose __init__ may open
+            # files or hit the network, so this is not merely a naming problem to paper over.
+            # Still emitted for discovery — the method body is useful evidence — but never
+            # shipped as importable code.
+            c.verdict = NEEDS_INSTANCE
+            c.reason = (f"bound method of {qualname.split('.')[0]!r}; calling it requires an "
+                        f"instance, so it is not importable as a standalone function")
         verdicts[qualname] = c
 
     _demote_transitively(verdicts)
@@ -260,6 +276,7 @@ def analyze_module(source: str) -> Tuple[Dict[str, Callability], ModuleScope, Di
         "total": total,
         "callable": ok,
         "needs_globals": sorted(n for n, v in verdicts.items() if v.verdict == NEEDS_GLOBALS),
+        "needs_instance": sorted(n for n, v in verdicts.items() if v.verdict == NEEDS_INSTANCE),
         "unparseable": sorted(n for n, v in verdicts.items() if v.verdict == UNPARSEABLE),
         "blocked_by": _blocked_by_histogram(verdicts),
         "module_side_effect_lines": scope.side_effect_lines,

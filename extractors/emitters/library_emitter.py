@@ -69,6 +69,38 @@ def _ident(text: str, *, fallback: str = "x") -> str:
     return s[:48]
 
 
+def _defines_at_module_level(source: str, symbol: str) -> bool:
+    """Does *source* bind *symbol* at module level, so ``from <mod> import <symbol>`` works?
+
+    Parsed, not grepped: a method named in a class body, or the symbol appearing only inside
+    another function, must not count. An unparseable slice returns False — refusing to
+    advertise an import we cannot verify is the safe direction.
+    """
+    import ast
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if stmt.name == symbol:
+                return True
+        elif isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+            targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+            for t in targets:
+                if isinstance(t, ast.Name) and t.id == symbol:
+                    return True
+                if isinstance(t, (ast.Tuple, ast.List)) and any(
+                        isinstance(e, ast.Name) and e.id == symbol for e in t.elts):
+                    return True
+        elif isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            for alias in stmt.names:
+                if (alias.asname or alias.name.split(".")[0]) == symbol:
+                    return True
+    return False
+
+
 def element_package(element_id: str, title: str = "") -> str:
     """Per-element subpackage name: ``ke_<id8>_<slug>``.
 
@@ -208,6 +240,18 @@ def emit(manifest: UnifiedManifest, *, root: Optional[Path] = None,
             if not (sha and source and symbol):
                 summary["skipped"].append({"unit": unit.get("qualified_name"),
                                            "reason": "missing slice_sha, source or symbol"})
+                continue
+            if not _defines_at_module_level(source, symbol):
+                # Never advertise an import that was not verified against the slice itself.
+                # Bound methods reached here with a bare method name while the slice defined
+                # only their CLASS, so `from .v_sha import build_api_url` raised ImportError —
+                # and because that line lives in the element's __init__, it took every sibling
+                # unit in the element down with it: 26 of 40 import lines failed on the real
+                # corpus. The analyzer now verdicts methods needs_instance so they never get
+                # here, and this check keeps any future promotion bug local to one unit.
+                summary["skipped"].append({
+                    "unit": unit.get("qualified_name"),
+                    "reason": f"slice does not define {symbol!r} at module level"})
                 continue
             module_name = f"v_{sha}"
             if not dry_run:
