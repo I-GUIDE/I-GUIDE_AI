@@ -35,7 +35,9 @@ SEARCH_AGENT_PROMPT = (
     "2. COVERAGE: fan out across the enabled retrieval tools — do NOT stop after one. For a "
     "topical query call BOTH `keyword_search` AND `semantic_search` (they surface different "
     "documents); add `neo4j_search` for author/organization/type/graph angles, `spatial_search` "
-    "when a place is mentioned, and `opengeodata_search` per rule 9. Merge everything you find "
+    "when a place is mentioned, `agent_kb_search` for evidence INSIDE elements (code blocks, "
+    "method specs, dataset schemas — element-level search only sees titles and abstracts), and "
+    "`opengeodata_search` per rule 9. Merge everything you find "
     "and return concise evidence with doc_ids from tool outputs.\n"
     "3. Do not fabricate citations or sources.\n"
     "4. If evidence is insufficient, explicitly say so.\n"
@@ -75,7 +77,8 @@ SEARCH_AGENT_PROMPT = (
     "11. POPULARITY questions ('most popular/viewed/clicked elements', 'trending datasets') are "
     "answered by REAL usage counts: call `neo4j_search` with the user's wording (its "
     "deterministic tier ranks by click_count) — never substitute `semantic_search`, whose "
-    "topically-similar results are NOT popularity data and must not be presented as such."
+    "topically-similar results are NOT popularity data and must not be presented as such.\n"
+    "12. REUSE BEFORE REINVENTION. When the user asks whether code already exists, how to compute or implement something, or wants to reuse platform work, call `kb_method_search`. It searches EXTRACTED, INDEPENDENTLY CALLABLE functions — not documents — and returns each one's signature and an exact import line that already works inside `execute_code`, because the library is mounted there read-only. Call `get_method_contract` on a promising hit for its parameters, dependencies and invariants, and report the import line VERBATIM. Pointing the user at a notebook to 'adapt' is the weaker answer whenever a callable unit exists: the unit carries provenance back to its source element, so a result computed with it stays attributable. If the tool reports that no library has been built yet, say that — it is not evidence that no such method exists."
 )
 
 # CodeAgent — built by build_code_agent_executor; used by the standalone run_code_agent_query
@@ -85,6 +88,7 @@ CODE_AGENT_PROMPT = (
     "Goal: produce practical code and implementation guidance.\n"
     "Rules:\n"
     "1. Use the `search_agent_evidence` tool to fetch domain-specific references before finalizing technical details.\n"
+    "1b. BEFORE writing an analysis function from scratch, call `kb_method_search` (when available) to check whether the platform already has a callable one, and `get_method_contract` for its parameters and invariants. The method library is mounted read-only inside `execute_code`, so the returned import line works verbatim — no install, no download, no network. Import it rather than re-implementing it: a library unit carries provenance back to its source element, so the number it produces stays attributable to a platform element, which re-implemented code cannot be.\n"
     "2. Ground domain facts and citations only on tool evidence.\n"
     "3. When appropriate, output a runnable fenced code block.\n"
     "4. Include a short `Dependencies:` section listing required packages or system dependencies.\n"

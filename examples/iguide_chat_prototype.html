@@ -260,8 +260,19 @@ const CONFIG = {
   // Socrata) for open-geodata discovery — it complements the KB (see SearchAgent rule 9), it does
   // not replace it. NOTE: send the method names, NOT `[]` — server-side a non-null empty list means
   // "none match" and strips ALL search tools; `null`/omit means "all".
-  // `web_search` brings its `web_fetch` companion along automatically (server-side rule).
-  enabled_search_methods: ["keyword_search", "semantic_search", "neo4j_search", "spatial_search", "opengeodata_search", "web_search"],
+  // `web_search` brings its `web_fetch` companion along automatically (server-side rule), as do
+  // `agent_kb_search` -> `get_kb_block` and `kb_method_search` -> `get_method_contract`.
+  //
+  // `agent_kb_search` and `kb_method_search` were missing here, and this list is a HARD filter:
+  // the tools were registered, allowed by tool_policy, and still never offered to the search
+  // peer. Observed directly — asked for reusable Chicago-crime mapping code, the agent listed
+  // "keyword_search, semantic_search, neo4j_search, spatial_search" as everything it had and
+  // answered "go adapt this notebook", when `plot_choropleth_map` was sitting in the method
+  // library with a working import line. Sub-document evidence and the method library are the
+  // whole point of the system; leaving them out of the default made both invisible.
+  enabled_search_methods: ["keyword_search", "semantic_search", "neo4j_search", "spatial_search",
+                           "agent_kb_search", "kb_method_search",
+                           "opengeodata_search", "web_search"],
   recent_k: 8,
 };
 function newSessionId(){

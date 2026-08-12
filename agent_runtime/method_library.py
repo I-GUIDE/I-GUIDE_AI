@@ -73,6 +73,16 @@ def load_registry() -> Dict[str, Any]:
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 
+# Dropped from the QUERY before scoring. Symbol names are full of these as connective parts —
+# `determine_number_of_cluster`, `load_chicago_community_areas` — so without this filter
+# "what is the capital of France" scores a clustering method 6.5 on the word "of" alone.
+# Filtering the query (not the symbol) keeps `get_url` findable by "get url".
+_QUERY_STOPWORDS = frozenset("""
+a an and any are as at be by can do does for from get has have how i if in into is it its me
+my of on or that the their there these this to use using want was what when where which who
+will with would you your please already instead scratch code data platform notebook notebooks
+""".split())
+
 
 def _tokens(text: str) -> List[str]:
     """Split on non-alphanumerics AND on camelCase/snake_case word boundaries.
@@ -129,7 +139,9 @@ def search_methods(query: str, *, limit: int = 8,
     that cannot be found is a coverage problem, while a wrong import line is a broken run.
     """
     reg = load_registry() if registry is None else registry
-    qt = _tokens(query)
+    qt = [t for t in _tokens(query) if t not in _QUERY_STOPWORDS]
+    if not qt:
+        return []
     scored: List[tuple] = []
     for key, entry in reg.items():
         if not isinstance(entry, dict):

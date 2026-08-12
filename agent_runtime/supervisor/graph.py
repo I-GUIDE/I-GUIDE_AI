@@ -1168,6 +1168,52 @@ def _wants_external_data(query: str) -> bool:
     return bool(_EXTERNAL_DATA_RE.search(query or ""))
 
 
+def _method_units_as_documents(query: str, k: int) -> List[Dict[str, Any]]:
+    """Library methods rendered as evidence documents.
+
+    The contents field carries the signature, summary AND the exact import line, because the
+    import line is the part that makes the answer actionable — an answer that names a method
+    without saying how to import it is barely better than naming a notebook.
+    """
+    from agent_runtime.method_library import search_methods
+
+    hits = [h for h in search_methods(query, limit=max(1, min(int(k), 8)))
+            if not h.get("ambiguous")]
+    # A relevance floor RELATIVE to the best hit. Unlike the tool — where the model can judge a
+    # ranked list for itself — this path spends evidence slots without being asked, so it takes
+    # only the clear matches. Measured on "choropleth map of Chicago crime": plot_choropleth_map
+    # 23.0 and load_chicago_crime_data 21.0 are the answer, while display_code_txt and
+    # process_weather_file_to_24h score 6.5 purely on the generic words "code", "data" and "map".
+    if hits:
+        floor = 0.4 * float(hits[0].get("score") or 0.0)
+        hits = [h for h in hits if float(h.get("score") or 0.0) >= floor][:4]
+
+    docs: List[Dict[str, Any]] = []
+    for hit in hits:
+        symbol = str(hit.get("symbol") or "")
+        contents = "\n".join(filter(None, [
+            str(hit.get("signature") or ""),
+            str(hit.get("doc_summary") or ""),
+            f"import: {hit['import_line']}" if hit.get("import_line") else "",
+            f"requires: {', '.join(hit.get('requirements') or [])}"
+            if hit.get("requirements") else "",
+        ]))
+        docs.append({
+            "doc_id": f"method::{symbol}",
+            "title": f"{symbol.split('.')[-1]} — callable method",
+            "contents": contents,
+            "source": "method_library",
+            "resource_type": "MethodUnit",
+            # Cite the SOURCE ELEMENT, not the synthetic method id: a unit is evidence about
+            # the element it came from, and that is the id a reader can open.
+            "citation_ids": [hit["element_id"]] if hit.get("element_id") else [],
+            "element_id": hit.get("element_id"),
+            "import_line": hit.get("import_line"),
+            "score": hit.get("score"),
+        })
+    return docs
+
+
 def _direct_search_sweep(query: str, enabled_search_methods: Optional[List[str]],
                          *, k: Optional[int] = None) -> List[Dict[str, Any]]:
     """Deterministic multi-method retrieval sweep: run keyword AND semantic search directly
@@ -1231,6 +1277,27 @@ def _direct_search_sweep(query: str, enabled_search_methods: Optional[List[str]]
 
             docs.extend(_normalize_hits(get_opengeodata_results(query, limit=k) or [],
                                         source="opengeodata"))
+        except Exception:
+            pass
+    if permitted("agent_kb_search"):
+        try:
+            from agent_runtime.langchain_granular_tools import _normalize_hits
+            from rag_pipeline.search.agent_kb import agent_kb_search
+
+            payload = agent_kb_search(query, size=k) or {}
+            docs.extend(_normalize_hits(payload.get("results") or [], source="agent_kb"))
+        except Exception:
+            pass
+    if permitted("kb_method_search"):
+        # Local registry read — no network, no cluster, sub-millisecond. Unioned rather than
+        # left to tool choice for the reason stated at the top of default_search_fn: the model
+        # does not reliably reach for a tool it was merely offered. Measured across three runs
+        # of the same question ("is there code I can reuse for a Chicago crime choropleth?"),
+        # with the tool registered, policy-allowed, request-enabled and named in the persona's
+        # COVERAGE and REUSE rules, the peer called it ZERO times and answered "adapt this
+        # notebook" while `plot_choropleth_map` sat in the library with a working import line.
+        try:
+            docs.extend(_method_units_as_documents(query, k))
         except Exception:
             pass
     # web_search is deliberately NOT part of this sweep. Every other method here is a cheap call to

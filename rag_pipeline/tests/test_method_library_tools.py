@@ -243,3 +243,173 @@ def test_the_tool_returns_json_the_model_can_parse(monkeypatch, registry):
     assert hits[0]["symbol"] == "ke_crime.load_crime_points"
     contract = json.loads(get_method_contract_tool(hits[0]["symbol"]))
     assert contract["import_line"] == hits[0]["import_line"]
+
+
+# ------------------------------------------------------------------ the second filter
+
+def _names(enabled):
+    from agent_runtime.langchain_granular_tools import make_langchain_granular_tools
+    return {getattr(t, "name", "")
+            for t in make_langchain_granular_tools(enabled_search_methods=enabled)}
+
+
+def test_enabling_a_search_tool_brings_its_reader(): 
+    """A reader is the second half of its search tool, never an independent method.
+
+    Both kb_method_search and agent_kb_search return truncated hits; enabling one without its
+    reader leaves the agent able to FIND a method but unable to read its contract.
+    """
+    assert {"kb_method_search", "get_method_contract"} <= _names(["kb_method_search"])
+    assert {"agent_kb_search", "get_kb_block"} <= _names(["agent_kb_search"])
+    assert {"web_search", "web_fetch"} <= _names(["web_search"])
+
+
+def test_a_reader_is_not_offered_without_its_search_tool():
+    kept = _names(["keyword_search"])
+    assert "get_method_contract" not in kept
+    assert "get_kb_block" not in kept
+
+
+def test_the_prototype_default_reaches_the_method_library():
+    """The prototype's enabled_search_methods list is a HARD filter, and it omitted both
+    agent_kb_search and kb_method_search — so the KB and the method library were registered,
+    allowed by tool_policy, and still never offered to the search peer."""
+    import re
+    from pathlib import Path
+
+    html = Path("examples/iguide_chat_prototype.html").read_text(encoding="utf-8")
+    match = re.search(r"enabled_search_methods:\s*\[(.*?)\]", html, re.DOTALL)
+    assert match, "the prototype no longer declares enabled_search_methods"
+    configured = set(re.findall(r'"([a-z_]+)"', match.group(1)))
+    assert {"agent_kb_search", "kb_method_search"} <= configured
+    assert {"kb_method_search", "get_method_contract",
+            "agent_kb_search", "get_kb_block"} <= _names(sorted(configured))
+
+
+# ------------------------------------------------------------------ the third filter: the prompt
+
+def test_the_search_persona_names_the_method_library():
+    """The tool being ALLOWED is not enough — the peer follows the enumerated playbook.
+
+    Observed with the tool registered, allowed by tool_policy and enabled in the request: the
+    peer called web_search, keyword_search, semantic_search and neo4j_get_element_by_id, then
+    answered "adapt this notebook" while `plot_choropleth_map` sat in the library with a
+    working import line. The COVERAGE rule lists tools by name and nothing named the library.
+    """
+    from agent_runtime.prompts import SEARCH_AGENT_PROMPT as P
+
+    assert "kb_method_search" in P
+    assert "agent_kb_search" in P, "sub-document evidence is absent from the coverage fan-out"
+    assert "get_method_contract" in P
+
+
+def test_the_code_persona_checks_for_an_existing_method_first():
+    from agent_runtime.prompts import CODE_AGENT_PROMPT as P
+
+    assert "kb_method_search" in P
+
+
+# ------------------------------------------------------------------ deterministic union
+
+def test_an_off_topic_question_matches_no_method(registry):
+    """Symbol names are full of connective words — determine_number_of_cluster contains "of" —
+    so without stopword filtering "what is the capital of France" scored a clustering method
+    6.5 on that word alone and it reached the evidence set."""
+    assert ml.search_methods("what is the capital of France", registry=registry) == []
+
+
+def test_a_query_of_only_stopwords_returns_nothing(registry):
+    assert ml.search_methods("what is the of and to", registry=registry) == []
+
+
+def test_stopword_filtering_does_not_break_short_symbol_queries(registry):
+    """'get url' must still find get_url; the filter applies to the QUERY, not the symbol.
+
+    Note "get" IS a query stopword, so the match rides on "url" and the joined token "get_url".
+    """
+    hits = ml.search_methods("get_url", registry=registry)
+    assert hits, "a bare symbol name became unfindable"
+    assert any("get_url" in h["symbol"] for h in hits)
+
+
+def test_the_sweep_unions_methods_without_the_model_choosing(monkeypatch, registry):
+    """The peer would not call the tool: across three runs of the same question, with it
+    registered, policy-allowed, request-enabled and named in two persona rules, it was called
+    zero times. graph.py:1445 already states the principle — do not rely on tool choice."""
+    monkeypatch.setattr(ml, "load_registry", lambda: registry)
+    from agent_runtime.supervisor.graph import _method_units_as_documents
+
+    docs = _method_units_as_documents("load chicago crime points", 8)
+    assert docs, "the sweep surfaced no method for a query that clearly matches one"
+    assert docs[0]["source"] == "method_library"
+    assert "from iguide_methods" in docs[0]["contents"], (
+        "evidence without the import line is barely better than naming a notebook")
+
+
+def test_swept_methods_cite_their_source_element_not_a_synthetic_id(monkeypatch, registry):
+    monkeypatch.setattr(ml, "load_registry", lambda: registry)
+    from agent_runtime.supervisor.graph import _method_units_as_documents
+
+    doc = _method_units_as_documents("load chicago crime points", 8)[0]
+    assert doc["citation_ids"] == ["cca9b545"]
+    assert not doc["citation_ids"][0].startswith("method::")
+
+
+def test_the_sweep_applies_a_relevance_floor(monkeypatch, registry):
+    """The sweep spends evidence slots unasked, so it takes only clear matches."""
+    monkeypatch.setattr(ml, "load_registry", lambda: registry)
+    from agent_runtime.supervisor.graph import _method_units_as_documents
+
+    assert len(_method_units_as_documents("load chicago crime points", 8)) <= 4
+
+
+def test_the_sweep_respects_the_enabled_methods_allowlist(monkeypatch, registry):
+    monkeypatch.setattr(ml, "load_registry", lambda: registry)
+    from agent_runtime.supervisor.graph import _direct_search_sweep
+
+    docs = _direct_search_sweep("load chicago crime points", ["keyword_search"], k=5)
+    assert not [d for d in docs if d.get("source") == "method_library"]
+
+
+def test_every_swept_document_carries_an_import_line(monkeypatch, registry):
+    """The ambiguous STUB has no import line and is a dead end as evidence; its qualified
+    candidates do have one and are legitimate evidence. The invariant is the import line, not
+    the name."""
+    monkeypatch.setattr(ml, "load_registry", lambda: registry)
+    from agent_runtime.supervisor.graph import _method_units_as_documents
+
+    docs = _method_units_as_documents("get_url", 8)
+    assert docs, "both qualified get_url units should be reachable"
+    for d in docs:
+        assert d.get("import_line"), f"{d['title']} entered evidence with no way to import it"
+        assert "from iguide_methods" in d["contents"]
+
+
+# ------------------------------------------------------------------ the fourth filter
+
+def test_the_api_accepts_the_method_tools_as_search_methods():
+    """The fourth independent gate on the same name.
+
+    kb_method_search had to be added to FOUR separate lists before it could be reached:
+    RAG_COMPONENT_TOOL_NAMES (tool_policy), the enabled_search_methods filter in
+    make_langchain_granular_tools, the prototype's CONFIG, and this request-validation
+    allowlist. Missing here, the whole request 400s — observed as
+    "unknown search method(s): 'kb_method_search'" with the run never starting.
+    """
+    from agent_runtime.search_methods import KNOWN_SEARCH_METHODS, normalize_search_methods
+
+    assert {"kb_method_search", "get_method_contract"} <= set(KNOWN_SEARCH_METHODS)
+    assert normalize_search_methods(["kb_method_search"]) == ["kb_method_search"]
+
+
+def test_the_prototype_payload_validates_end_to_end():
+    """Every method the shipped prototype sends must survive request validation."""
+    import re
+    from pathlib import Path
+
+    from agent_runtime.search_methods import normalize_search_methods
+
+    html = Path("examples/iguide_chat_prototype.html").read_text(encoding="utf-8")
+    configured = re.findall(r'"([a-z_]+)"',
+                            re.search(r"enabled_search_methods:\s*\[(.*?)\]", html, re.DOTALL).group(1))
+    assert set(normalize_search_methods(configured)) == set(configured)

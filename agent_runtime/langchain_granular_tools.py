@@ -624,13 +624,20 @@ def make_langchain_granular_tools(
     if enabled_search_methods is not None:
         enabled = {str(name).strip() for name in enabled_search_methods if str(name).strip()}
         neo4j_companion_tools = {"neo4j_get_element_by_id", "neo4j_explore_related_nodes"}
+        # A reader tool is the second half of its search tool, never an independent method:
+        # enabling the search alone must not leave the agent able to FIND something but unable
+        # to READ it. web_search/web_fetch already worked this way; agent_kb_search and
+        # kb_method_search return truncated hits and are useless without their readers.
+        companion_of = {
+            "get_kb_block": "agent_kb_search",
+            "get_method_contract": "kb_method_search",
+            "web_fetch": "web_search",
+        }
         retrieval_tools = [
             tool for tool in retrieval_tools
             if getattr(tool, "name", "") in enabled
             or ("neo4j_search" in enabled and getattr(tool, "name", "") in neo4j_companion_tools)
-            # web_fetch is the second half of web_search, not an independent method: asking for
-            # web_search alone must not leave the agent able to find pages but unable to read one.
-            or ("web_search" in enabled and getattr(tool, "name", "") == "web_fetch")
+            or companion_of.get(getattr(tool, "name", ""), "\0") in enabled
         ]
 
     tools = [*retrieval_tools, *make_langchain_qgis_tools(session_id=session_id)]

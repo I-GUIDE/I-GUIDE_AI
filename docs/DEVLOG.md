@@ -1131,3 +1131,58 @@ Worth noting for the paper's methods section: any measurement taken through this
 
 **Next** drive the prototype UI against this backend and confirm the model reaches for
 `kb_method_search` on its own, from a real user question.
+
+## 2026-08-12 · M4.2 · Four filters stood between a registered tool and the model
+**Change** `kb_method_search` reachable end to end: added to the prototype's
+  `enabled_search_methods`, to `search_methods.KNOWN_SEARCH_METHODS`, to the SearchAgent
+  COVERAGE rule plus a new REUSE rule (and a CodeAgent rule), and — decisively — unioned
+  deterministically into `_direct_search_sweep` via `_method_units_as_documents`. Reader tools
+  now follow their search tool generically (`get_kb_block`→`agent_kb_search`,
+  `get_method_contract`→`kb_method_search`, as `web_fetch` already did). Query stopwords added
+  to the method scorer.
+
+**Why** M4.1 registered the tools and put them in `RAG_COMPONENT_TOOL_NAMES`, which I took to
+mean they were reachable. Driving the prototype showed they were not, and each fix revealed
+the next gate. The same name had to be added to **four independent lists**:
+
+1. `graph_state.RAG_COMPONENT_TOOL_NAMES` — the `tool_policy` filter (done in M4.1).
+2. the prototype's hardcoded `enabled_search_methods` — a **hard** server-side filter.
+   `agent_kb_search` was missing here too, so **sub-document evidence had never been reachable
+   from this UI at all**.
+3. `search_methods.KNOWN_SEARCH_METHODS` — request validation. Missing here the whole request
+   400s: `unknown search method(s): 'kb_method_search'`, and the run never starts.
+4. the SearchAgent persona, whose COVERAGE rule enumerates tools **by name**.
+
+**Measured** the same question — *"I want to make a choropleth map of Chicago crime. Is there
+already code on the platform I can reuse?"* — through the prototype, five runs:
+
+| run | change under test | called the tool? | answer |
+|---|---|---|---|
+| 1 | M4.1 as committed | no | "adapt this notebook" |
+| 2 | + prototype list, + companion rule | no | "adapt this notebook" (more elements) |
+| 3 | + COVERAGE and REUSE prompt rules | no | "adapt this notebook" |
+| 4 | + deterministic sweep | **request rejected** (filter 3) | — |
+| 5 | + request validation | **yes** | three callable methods, with import lines |
+
+Run 5's answer names `load_chicago_crime_data`, `load_chicago_community_areas` and
+`plot_choropleth_map`, gives the pinned import line for each, and sketches the pipeline that
+composes them. All three import lines were checked against the library on disk: **3/3 real**,
+none fabricated. Suite **775 passed**, same 3 pre-existing failures.
+
+**Surprised by** runs 1–3. The tool was registered, policy-allowed, request-enabled and named
+in *two* persona rules, and the peer still called it **zero times out of three**, preferring
+`keyword_search`/`semantic_search`/`neo4j_get_element_by_id`. `graph.py:1445` already carries
+the lesson in its own comment — *"do NOT rely on the LLM picking the right tool"* — written
+for the by-id tools after the same failure. Prompt text did not move this at all; the
+deterministic union did, on the first try. Worth remembering when the instinct is to write a
+better instruction.
+
+Two smaller findings from the same runs. Scoring had no stopword filter, so *"what is the
+capital of France"* matched `determine_number_of_cluster` on the word **"of"** — fixed, and
+off-topic queries now return nothing. And the grounding audit earned its keep on real content:
+the model wrote "all three methods require geopandas, matplotlib and smolagents" when only
+`plot_choropleth_map` declares matplotlib, and the audit flagged exactly that — a true
+positive on a claim that would have been tedious to catch by hand.
+
+**Next** the composition half: make the code peer import a swept method inside `execute_code`
+and pass a GeoDataFrame between two calls in one session.
