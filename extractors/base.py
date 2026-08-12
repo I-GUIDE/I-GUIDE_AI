@@ -14,13 +14,16 @@ from typing import Any, Dict, List, Optional, Protocol, Sequence, runtime_checka
 EMIT_OPENSEARCH = "opensearch"
 EMIT_MCP = "mcp"
 EMIT_SKILL = "skill"
-VALID_TARGETS = (EMIT_OPENSEARCH, EMIT_MCP, EMIT_SKILL)
+# Callable units emitted as an importable method library (see extractors/analysis/slices.py).
+EMIT_LIBRARY = "library"
+VALID_TARGETS = (EMIT_OPENSEARCH, EMIT_MCP, EMIT_SKILL, EMIT_LIBRARY)
 
 # Asset kinds produced by the four extractors.
 KIND_NOTEBOOK_BLOCK = "notebook_block"
 KIND_CODE_BLOCK = "code_block"          # function/class API surface
 KIND_DATASET = "dataset"
 KIND_PUBLICATION = "publication"        # method-spec / provenance
+KIND_METHOD_UNIT = "method_unit"        # ONE callable function + its contract
 
 
 @dataclass
@@ -44,6 +47,9 @@ class AssetRecord:
     block: Optional[Dict[str, Any]] = None   # {code, markdown_context, constructs, resolved_tools, file_io, imports}
     spatial: Optional[Dict[str, Any]] = None # {crs, bounds, resolution, schema, spatial-bounding-box-geojson, ...}
     runnable: Optional[Dict[str, Any]] = None  # {workflow_id, mode, entrypoint, entrypoint_parameters, source_path, manifest_path, runnable_tool}
+    # A serialized contracts.UnitContract. Mirrors how block/runnable/spatial already ride
+    # along, so opensearch_emitter needs no structural change to carry it.
+    unit: Optional[Dict[str, Any]] = None
     extracted: Dict[str, Any] = field(default_factory=dict)  # additive metadata mirrored into the OpenSearch `extracted` object
     source_fields: Dict[str, Any] = field(default_factory=dict)  # platform form fields inherited into _source (authors, tags, contributor, abstract, ...)
 

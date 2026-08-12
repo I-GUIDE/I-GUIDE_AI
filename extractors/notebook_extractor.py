@@ -25,9 +25,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import nbformat
 
 from .base import (
+    EMIT_LIBRARY,
     EMIT_MCP,
     EMIT_OPENSEARCH,
     EMIT_SKILL,
+    KIND_METHOD_UNIT,
     KIND_NOTEBOOK_BLOCK,
     AssetRecord,
     ExtractContext,
@@ -154,7 +156,16 @@ class NotebookExtractor:
         edges: List[ProvenanceEdge] = []
         ordered_steps: List[Dict[str, Any]] = []
         transformed_code: List[Tuple[int, str]] = []
+        parsed_cells: List[Tuple[int, str]] = []
         all_parse_ok = True
+        # R notebooks are a live false-positive risk: `nc <- st_read(...)` parses as valid
+        # Python (`<` then unary `-`), and r1 rewrites `%%R ...` to `_cellmagic('R ...')`,
+        # which also parses cleanly. Without this guard an R notebook would be promoted as
+        # runnable Python.
+        nb_language = str(((nb.get("metadata") or {}).get("kernelspec") or {}).get("language")
+                          or ((nb.get("metadata") or {}).get("language_info") or {}).get("name")
+                          or "").strip().lower()
+        is_python_nb = nb_language in ("", "python")
         md_buffer: List[str] = []
         tags: set[str] = set()
 
@@ -171,6 +182,10 @@ class NotebookExtractor:
             transformed, parse_ok, constructs, tools, imports, file_refs = _classify_cell(source)
             all_parse_ok = all_parse_ok and parse_ok
             transformed_code.append((order, transformed))
+            if parse_ok:
+                # Per-function promotion assembles the module from cells that PARSE, so one
+                # bad cell costs that cell -- not every unit in the notebook.
+                parsed_cells.append((order, transformed))
             tags.update(imports)
 
             doc_id = notebook_block_doc_id(nb_doc_id, order)
@@ -202,8 +217,21 @@ class NotebookExtractor:
             edges.append(ProvenanceEdge(src=nb_doc_id, rel="INCLUDES", dst=doc_id, detail={"order": order}))
             ordered_steps.append({"order": order, "tools": tools, "summary": (md_context or source.splitlines()[0])[:120]})
 
+        # ---- per-function promotion --------------------------------------------------
+        # Independent of the whole-notebook gate below. Previously a single unparseable cell
+        # set all_parse_ok=False and the notebook yielded NOTHING reusable; now it costs that
+        # cell only. Measured on the 14-notebook corpus: 40 of 41 functions are independently
+        # callable, and every one of their slices imports in a clean subprocess.
+        unit_summary: Dict[str, Any] = {}
+        if parsed_cells and is_python_nb:
+            unit_summary = self._promote_units(
+                assets, edges, parsed_cells, nb_doc_id=nb_doc_id, rel_path=rel_path,
+                title_base=title_base, title=title, ctx=ctx,
+                source_fields=source_fields, form_tags=form_tags, tags=tags,
+            )
+
         # whole-notebook runnable descriptor (promotion gate: every code cell parsed)
-        if assets and all_parse_ok:
+        if assets and all_parse_ok and is_python_nb:
             module_source = self._build_module_source(title_base, transformed_code)
             fns = _top_level_functions(module_source)
             entrypoint = _find_entrypoint(fns)
@@ -256,8 +284,106 @@ class NotebookExtractor:
 
         warnings: List[str] = []
         if assets and not all_parse_ok:
-            warnings.append("not all code cells parsed; workflow not promoted (index-only blocks).")
+            warnings.append("not all code cells parsed; whole-notebook workflow not promoted "
+                            "(blocks and callable units are unaffected).")
+        if not is_python_nb:
+            warnings.append(f"notebook kernel language is {nb_language!r}, not python; "
+                            "no units or workflow promoted.")
+        if unit_summary:
+            warnings.append(
+                f"callable units: {unit_summary.get('callable', 0)} of "
+                f"{unit_summary.get('total', 0)} functions independently callable"
+                + (f"; blocked_by={unit_summary.get('blocked_by')}"
+                   if unit_summary.get("blocked_by") else ""))
         return ExtractionResult(assets=assets, edges=edges, skill=skill, warnings=warnings)
+
+    def _promote_units(self, assets: List[AssetRecord], edges: List[ProvenanceEdge],
+                       parsed_cells: List[Tuple[int, str]], *, nb_doc_id: str, rel_path: str,
+                       title_base: str, title: str, ctx: ExtractContext,
+                       source_fields: Dict[str, Any], form_tags: Any, tags: set) -> Dict[str, Any]:
+        """Emit one MethodUnit asset per top-level function, with its contract.
+
+        Only ``callable`` units are given EMIT_LIBRARY: a ``needs_globals`` unit is still
+        indexed (so it is discoverable and its blocker is visible) but is never shipped as
+        importable code, because making it run would mean inlining the module-level statements
+        the slice builder exists to exclude.
+        """
+        from .analysis import analyze_module, build_unit_slice, iter_units, slice_sha
+        from .analysis.signatures import contract_params, signature_of
+        from .contracts import ANALYZER_VERSION, CALLABLE, UnitContract
+        from .doc_ids import method_unit_doc_id
+        import ast
+        import dataclasses
+
+        module_source = self._build_module_source(title_base, parsed_cells)
+        try:
+            verdicts, scope, summary = analyze_module(module_source)
+        except Exception:
+            return {}
+        if not verdicts:
+            return summary or {}
+
+        try:
+            tree = ast.parse(module_source)
+        except SyntaxError:
+            return summary or {}
+        nodes = dict(iter_units(tree))
+
+        for qualname, callability in verdicts.items():
+            node = nodes.get(qualname)
+            if node is None:
+                continue
+            doc = ast.get_docstring(node) or ""
+            slice_src = build_unit_slice(module_source, qualname, scope=scope,
+                                         verdicts=verdicts,
+                                         provenance={"element_id": ctx.anchor(),
+                                                     "parent_doc_id": nb_doc_id,
+                                                     "source_rel_path": rel_path,
+                                                     "commit_sha": ctx.commit_sha,
+                                                     "extractor": self.name,
+                                                     "analyzer_version": ANALYZER_VERSION})
+            contract = UnitContract(
+                qualified_name=qualname,
+                unit_kind="method" if "." in qualname else "function",
+                signature=signature_of(node),
+                params=contract_params(node, doc),
+                returns=(ast.unparse(node.returns) if getattr(node, "returns", None) else ""),
+                docstring=doc,
+                doc_summary=(doc.strip().splitlines() or [""])[0][:200],
+                callability=callability,
+                slice_sha=slice_sha(slice_src) if slice_src else "",
+                library_symbol=qualname.split(".")[-1],
+                provenance={"element_id": ctx.anchor(), "parent_doc_id": nb_doc_id,
+                            "source_rel_path": rel_path, "commit_sha": ctx.commit_sha,
+                            "extractor": self.name, "analyzer_version": ANALYZER_VERSION},
+            )
+            unit_doc_id = method_unit_doc_id(nb_doc_id, qualname)
+            is_callable = callability.verdict == CALLABLE
+            targets = [EMIT_OPENSEARCH]
+            if is_callable and EMIT_LIBRARY in (ctx.targets or ()):
+                targets.append(EMIT_LIBRARY)
+            # contents is the RETRIEVAL text: signature + summary, never the raw body — raw
+            # code retrieves poorly against natural-language questions.
+            contents = (f"{contract.signature}\n\n{contract.doc_summary}").strip()
+            if not is_callable:
+                contents += f"\n\n[not independently callable: {callability.reason}]"
+            assets.append(AssetRecord(
+                asset_id=unit_doc_id,
+                kind=KIND_METHOD_UNIT,
+                resource_type=resource_type_for(KIND_METHOD_UNIT),
+                doc_id=unit_doc_id,
+                emit_targets=targets,
+                source_rel_path=rel_path,
+                title=f"{qualname} — {title}",
+                contents=contents,
+                unit=dataclasses.asdict(contract),
+                source_fields={**source_fields, "tags": sorted(set(form_tags) | tags)},
+                extracted={"parent_doc_id": nb_doc_id, "parent_type": "Notebook",
+                           "callable": is_callable, "unit_name": qualname},
+            ))
+            edges.append(ProvenanceEdge(src=nb_doc_id, rel="DEFINES", dst=unit_doc_id,
+                                        detail={"verdict": callability.verdict}))
+        return summary or {}
 
     @staticmethod
     def _build_module_source(title: str, cells: List[Tuple[int, str]]) -> str:

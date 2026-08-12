@@ -832,3 +832,51 @@ Suite **631 passed**, same 3 pre-existing failures.
 
 **Next** per-function promotion in `notebook_extractor`, replacing the all-or-nothing
 `all_parse_ok` gate at `:206`.
+
+---
+
+## 2026-08-07 · M2.3 · Per-function promotion — one bad cell no longer costs a notebook
+
+**Change** `notebook_extractor` now emits one `MethodUnit` asset per top-level function, each
+carrying a serialized `UnitContract`, assembled from the cells that **parsed**. Independent of
+the whole-notebook workflow gate. Supporting wiring: `EMIT_LIBRARY` as a fourth target,
+`KIND_METHOD_UNIT`, `AssetRecord.unit`, `doc_ids.method_unit_doc_id`, an
+`iguide_agent_method_units` index, `DEFINES` edges, and an R-kernel guard. 13 tests.
+
+**Why** `if assets and all_parse_ok:` meant a single unparseable cell — shell escapes, a
+partial edit, notebook-only syntax — produced *nothing reusable from the entire notebook*.
+Real notebooks routinely contain one.
+
+**Measured**, through the real extractor over the 14 cached notebooks:
+
+| | |
+|---|---|
+| block assets | 290 |
+| **method units** | **41** |
+| independently callable | **40** |
+
+Matches the standalone M2.1 measurement exactly, which is the point — the extractor and the
+analyzer agree. Three notebooks with unparseable cells (`21788323` 4 bad cells, `5278e805` 3,
+`cca9b545` 1) now yield 1, 1 and 5 units respectively; under the old gate all three yielded
+zero. Suite **644 passed**, same 3 pre-existing failures.
+
+Design decisions worth recording:
+
+- **`needs_globals` units are indexed but never shipped.** They keep `EMIT_OPENSEARCH` (so
+  they stay discoverable and their blocker is visible in `contents`) and are denied
+  `EMIT_LIBRARY`. Shipping one would require inlining the module-level statements the slice
+  builder exists to exclude, so the two decisions have to agree.
+- **`contents` is retrieval text, not the body** — signature plus doc summary. Raw code
+  retrieves poorly against natural-language questions, which is the same reasoning
+  `_embed_text` already applies to blocks.
+- **Unit doc_ids are name-keyed** (`::unit::{qualified_name}`), not order-keyed. Inserting a
+  cell renames every `::block::{order}` doc after it; a name-keyed id survives reordering,
+  which matters for idempotent re-ingest. Pinned by a test that inserts a leading cell and
+  asserts the ids are unchanged.
+- **The R guard is not theoretical.** `nc <- st_read(...)` parses as valid Python (`<` then
+  unary `-`), and r1 rewrites `%%R ...` to `_cellmagic('R ...')`, which also parses. Without
+  the kernel check an R notebook would be promoted as runnable Python.
+
+**Next** the library emitter (write the slices as an importable package), then mounting it
+into the sandbox. `scripts/measure_callable_units.py` is now redundant with the extractor
+itself and should be folded into a coverage report at M3.

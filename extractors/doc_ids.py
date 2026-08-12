@@ -17,6 +17,7 @@ from .base import (
     KIND_CODE_BLOCK,
     KIND_DATASET,
     KIND_NOTEBOOK_BLOCK,
+    KIND_METHOD_UNIT,
     KIND_PUBLICATION,
 )
 
@@ -28,6 +29,7 @@ _RESOURCE_TYPE = {
     KIND_CODE_BLOCK: "CodeAsset",
     KIND_DATASET: "Dataset",
     KIND_PUBLICATION: "PublicationMethodSpec",
+    KIND_METHOD_UNIT: "MethodUnit",
 }
 
 
@@ -112,6 +114,16 @@ def run_invocation_for(workflow_id: str) -> Dict[str, Any]:
     return {"tool": tool, "args": {key: workflow_id}}
 
 
+def method_unit_doc_id(parent_doc_id: str, qualified_name: str, rel_path: str = "") -> str:
+    """Doc id for one callable unit.
+
+    Keyed on the unit's NAME, not on a cell index, so it survives cell reordering — unlike
+    ``{element}::block::{order}``, where inserting a cell renames every doc after it.
+    """
+    tail = f"{rel_path}::{qualified_name}" if rel_path else qualified_name
+    return f"{parent_doc_id}::unit::{tail}"
+
+
 def slugify(text: str, *, max_len: int = 64) -> str:
     """Lowercase-hyphen slug matching skills.py name regex ^[a-z0-9][a-z0-9-]{0,63}$."""
     s = _SLUG_RE.sub("-", (text or "").strip().lower()).strip("-")
@@ -125,6 +137,6 @@ def slugify(text: str, *, max_len: int = 64) -> str:
 __all__ = [
     "normalize_repo_url", "repo_id", "resource_type_for",
     "notebook_block_doc_id", "code_asset_doc_id", "dataset_doc_id",
-    "publication_methodspec_doc_id", "parent_doc_id",
+    "publication_methodspec_doc_id", "parent_doc_id", "method_unit_doc_id",
     "workflow_id_for", "mcp_tool_name_for", "run_invocation_for", "slugify",
 ]
