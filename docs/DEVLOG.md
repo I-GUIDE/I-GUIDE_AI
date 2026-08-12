@@ -193,3 +193,52 @@ new `retrieval_recall` field is what M1.2's exit criterion will be read from.
 
 **Next** M0.4 — `scripts/eval_retrieval.py`, so recall@k is measurable per method
 without an LLM in the loop.
+
+---
+
+## 2026-08-07 · M0.4 · scripts/eval_retrieval.py — the retrieval instrument
+
+**Change** New `scripts/eval_retrieval.py`. Deterministic, no LLM: recall@k,
+precision@k and MRR over the full expected sets, for arbitrary `--k` across arms
+`keyword | semantic | agent_kb | union | union+agent_kb`. Union arms fuse with RRF
+(k=60), matching the agent's own reranker so a union figure is comparable to what the
+agent would actually see. Writes JSON with `--json`.
+
+**Why** `run_eval_cases.py` measures end-to-end agent behavior, where a retrieval
+regression can hide behind a good answer and a retrieval gain can be masked by the model
+failing to use it. M1.2, M3 and M4 all claim to move retrieval, so they need an
+instrument that isolates it and costs nothing to re-run.
+
+**Measured** Baseline against the live cluster, `keyword` arm, all 11 tasks / 37 ids:
+
+| k | recall | |
+|---|---|---|
+| 8 (current effective window) | **22/37** | 59.5% |
+| 20 | **29/37** | 78.4% |
+| 50 | 33/37 | 89.2% |
+| 100 | 34/37 | 91.9% |
+
+This **independently reproduces** the M0.1 baseline through a different code path,
+which is the result I most wanted from this step — the 22/37 and 29/37 figures the whole
+M1.2 case rests on are now produced by committed, re-runnable code rather than a
+throwaway script.
+
+Missed by every arm even at k=100 — genuine indexing gaps, not window problems:
+`afbee4bd` (T6), `643aaea1` (T9), `de05a428` (T10). Exactly 3, matching M0.1.
+
+**Surprised by** Two things worth keeping. First, `semantic` reports **unavailable**
+rather than scoring 0/37, because `semantic_search` returns `[]` both when the embedder
+is down and when nothing matched — collapsing those would have silently understated
+every union arm and made the embedding outage look like a retrieval quality problem.
+Second, my initial "unreachable at every k" label was wrong: it listed 8 elements when
+only k=8 and k=20 had been tested, 5 of which are recoverable at k=50. Fixed to "missed
+at every k *tested*", with a pointer to raise `--k` to separate a ranking problem from
+an indexing gap. A metric that overstates the size of a problem is as unhelpful as one
+that hides it.
+
+Note `outputs/` is gitignored (`.gitignore:63`), so the JSON is not committed —
+regenerate with:
+`python scripts/eval_retrieval.py --k 8,20,50,100 --methods keyword --json outputs/retrieval_$(date +%F).json`
+
+**Next** M0.5 — `constraints.txt`, so the dev/prod version drift stops making every
+later measurement ambiguous.
