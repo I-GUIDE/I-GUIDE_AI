@@ -188,7 +188,17 @@ def make_code_execution_tools(
             "Set `tier` to size the run: 'quick' (60s/512MB) for a small check, 'standard' "
             "(300s/2GB, the default) for real analysis, 'heavy' (900s/6GB) for large "
             "geospatial joins where available. Only pass `timeout_seconds` to override the "
-            "tier deliberately."
+            "tier deliberately. "
+            # Stated here because a peer that skips kb_method_search will otherwise GUESS the
+            # package name: one run guessed `from method_library import ...` (the host
+            # directory name) and failed with ModuleNotFoundError. The importable package is
+            # `iguide_methods`, whatever the mount is called.
+            "The I-GUIDE METHOD LIBRARY is importable in the sandbox as the package "
+            "`iguide_methods` — extracted, independently callable functions from platform "
+            "elements, already present with NO install and NO network. Get an exact, "
+            "version-pinned import line from `kb_method_search` / `get_method_contract` "
+            "rather than guessing a module path, and still declare the method's own "
+            "`dependencies` (e.g. geopandas), which are NOT preinstalled."
         ),
     )
     return [tool]

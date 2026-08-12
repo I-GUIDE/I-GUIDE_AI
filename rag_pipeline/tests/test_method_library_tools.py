@@ -413,3 +413,45 @@ def test_the_prototype_payload_validates_end_to_end():
     configured = re.findall(r'"([a-z_]+)"',
                             re.search(r"enabled_search_methods:\s*\[(.*?)\]", html, re.DOTALL).group(1))
     assert set(normalize_search_methods(configured)) == set(configured)
+
+
+# ------------------------------------------------------------------ the fifth filter
+
+def test_the_code_peer_can_reach_the_method_library():
+    """The fifth gate, and the one that matters most.
+
+    default_code_fn hardcodes its own KB allowlist — it does NOT follow the request's
+    enabled_search_methods — and it listed only agent_kb_search/get_kb_block. So the peer that
+    WRITES AND RUNS the code, in whose sandbox the library is mounted, could not see it. Told
+    by its own prompt to call kb_method_search and not having it, the model guessed the
+    package from the host directory name: `from method_library import ...` ->
+    ModuleNotFoundError. The package is `iguide_methods`.
+    """
+    import inspect
+
+    from agent_runtime.supervisor import graph
+
+    src = inspect.getsource(graph.default_code_fn)
+    assert "kb_method_search" in src
+    assert "get_method_contract" in src
+
+
+def test_execute_code_tells_the_model_the_package_name():
+    """A peer that skips the tool must still not be able to guess wrong."""
+    from agent_runtime.langchain_exec_tools import make_code_execution_tools
+
+    desc = make_code_execution_tools()[0].description
+    assert "iguide_methods" in desc
+    assert "kb_method_search" in desc
+
+
+def test_the_tool_description_survives_the_cli_shim_intact():
+    """The shim's old 600-char cut landed inside execute_code's description at
+    "...they are installed wi", removing how to pass dependencies."""
+    from agent_runtime.chat_claude_cli import _tool_schema
+    from agent_runtime.langchain_exec_tools import make_code_execution_tools
+
+    schema = _tool_schema(make_code_execution_tools()[0])
+    assert "dependencies" in schema["description"]
+    assert "iguide_methods" in schema["description"]
+    assert not schema["description"].endswith("installed wi")

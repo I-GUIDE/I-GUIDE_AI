@@ -1825,12 +1825,23 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         request_tool, requests = _make_request_tool()
         tools = [*make_skill_tools(skill_roots=skill_roots), request_tool]
         # KB read tools so the code peer can pull the FULL source of referenced blocks
-        # (get_kb_block) and reuse it verbatim instead of stubbing loaders.
+        # (get_kb_block) and reuse it verbatim instead of stubbing loaders, PLUS the method
+        # library, which matters most exactly here: this is the peer that writes and runs the
+        # code, and the library is mounted in its sandbox.
+        #
+        # This allowlist is hardcoded — it does NOT follow the request's
+        # enabled_search_methods — so it is a fifth independent gate on the same names.
+        # Observed with the method tools absent: the peer was told by its own prompt to call
+        # kb_method_search, did not have it, and guessed the package name from the directory
+        # instead — `from method_library import ...`, which fails. The package is
+        # `iguide_methods`.
+        _CODE_PEER_KB_TOOLS = {"agent_kb_search", "get_kb_block",
+                               "kb_method_search", "get_method_contract"}
         try:
             from agent_runtime.langchain_granular_tools import make_langchain_granular_tools
             tools.extend(t for t in make_langchain_granular_tools(
-                enabled_search_methods=["agent_kb_search", "get_kb_block"])
-                if getattr(t, "name", "") in {"agent_kb_search", "get_kb_block"})
+                enabled_search_methods=sorted(_CODE_PEER_KB_TOOLS))
+                if getattr(t, "name", "") in _CODE_PEER_KB_TOOLS)
         except Exception:
             pass
         # Geocoding runs agent-side (the sandbox has NO network): lets the peer turn named

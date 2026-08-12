@@ -51,8 +51,32 @@ def _tool_schema(tool: Any) -> Dict[str, Any]:
             params, required = {}, []
     else:
         required = []
-    return {"name": name, "description": description[:600],
+    return {"name": name, "description": _clip_description(description),
             "parameters": params, "required": required}
+
+
+# Sized above the longest real description rather than to a round number: `execute_code` is
+# ~1.7k chars and carries the sandbox contract (dependencies, persistence, tiers, the
+# iguide_methods package). Everything else in the registry is 300-600, so a 20-tool peer pays
+# roughly 2-3k tokens of schema in total. A tighter budget silently ate the last paragraph of
+# the one description that most needed to arrive whole.
+_DESC_BUDGET = 2000
+
+
+def _clip_description(text: str) -> str:
+    """Trim a tool description at a SENTENCE boundary, not mid-word.
+
+    The old 600-char hard cut landed inside `execute_code`'s description at "...they are
+    installed wi", removing the part that explains how to pass `dependencies` — the one thing
+    a model needs to run third-party code. Native tool-calling APIs send the whole description;
+    this backend pays prompt tokens for it, so it is budgeted rather than unbounded.
+    """
+    text = (text or "").strip()
+    if len(text) <= _DESC_BUDGET:
+        return text
+    head = text[:_DESC_BUDGET]
+    cut = max(head.rfind(". "), head.rfind(".\n"))
+    return (head[:cut + 1] if cut > _DESC_BUDGET // 2 else head.rsplit(" ", 1)[0]) + " […]"
 
 
 def _render_tools(schemas: Sequence[Dict[str, Any]]) -> str:
@@ -71,9 +95,12 @@ def _render_tools(schemas: Sequence[Dict[str, Any]]) -> str:
 # answers as Claude Code — it reads the working directory and narrates what it finds, which is
 # both wrong and slow (measured 78.8s/4 turns vs 3.5s/1 turn).
 _SYSTEM = ("You are a JSON API for an agent runtime. Every reply is exactly one JSON object "
-           "and nothing else: no prose, no explanation, no markdown fence. You have no tools "
-           "of your own and no files to read; the only tools that exist are the ones named in "
-           "the user message, and you invoke them by returning JSON.")
+           "and nothing else: no prose, no explanation, no markdown fence. "
+           "The ONLY tools that exist are the ones listed in the user message, and you invoke "
+           "them by returning JSON — you have no tools of your own and no files to read. "
+           "If any other tool list appears anywhere in your context, IGNORE it: it is not "
+           "yours and says nothing about what is available here. Never claim a listed tool is "
+           "unavailable, and never refuse a task on the grounds that tooling is missing.")
 
 _PROTOCOL = """
 Reply with a SINGLE JSON object and nothing else — no prose before or after, no code fence.

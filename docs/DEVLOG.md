@@ -1186,3 +1186,61 @@ positive on a claim that would have been tedious to catch by hand.
 
 **Next** the composition half: make the code peer import a swept method inside `execute_code`
 and pass a GeoDataFrame between two calls in one session.
+
+## 2026-08-12 · M2.7 · Composition works — after a fifth gate and a leaking tool list
+**Change** the method tools added to `default_code_fn`'s hardcoded KB allowlist
+  (`supervisor/graph.py`); `execute_code`'s description now names the `iguide_methods`
+  package; the CLI shim's description budget raised to fit it; and the `claude` CLI is now
+  denied **all** of its own tools, not just the file/shell ones.
+
+**Why** M4.2 made the library discoverable by the SEARCH peer. Asking the agent to actually
+*run* a library method exposed two more problems.
+
+**Gate five.** `default_code_fn` builds its own KB toolset with a **hardcoded** allowlist —
+it does not follow the request's `enabled_search_methods` — and it listed only
+`agent_kb_search` / `get_kb_block`. So the peer that writes and runs the code, in whose
+sandbox the library is mounted, could not see the library at all. Its own prompt (added in
+M4.2) told it to call `kb_method_search`; not having it, the model guessed the package name
+from the host directory: `from method_library import ...` → `ModuleNotFoundError`. The package
+is `iguide_methods`.
+
+**The leaking tool list.** Two runs refused outright, claiming the code tool was unavailable
+while it was bound, docker-backed and policy-allowed. The second refusal named the culprit:
+
+> "Only a limited set of tools (`AskUserQuestion`, `ScheduleWakeup`, `ShareOnboardingGuide`,
+> `Skill`, and `ToolSearch`) are callable here."
+
+Those are the **CLI's own** tools — precisely the ones left allowed by the partial deny list
+from M0.6b. The CLI advertises its remaining tools to the model, and under a long prompt the
+model believed that list over the one in the prompt, then confabulated a justification.
+Denying every CLI tool removes the competing list; the system prompt now also disowns any
+other tool list explicitly.
+
+**Measured** same request, four runs:
+
+| run | change under test | tool calls | outcome |
+|---|---|---|---|
+| 1 | M4.2 as committed | 0 exec | "code-execution tool is not available" (false) |
+| 2 | explicit "use execute_code" | exec ran | guessed `from method_library import …` → ModuleNotFoundError |
+| 3 | + gate five, + package name in description | 0 exec | refused, naming the CLI's own tools |
+| 4 | + full CLI tool deny | **7 kb_method_search, 6 get_method_contract, 24 execute_code** | **exit 0** |
+
+Run 4 is the M2 composition criterion met: the agent searched the library, fetched the
+contract, imported
+`from iguide_methods.ke_afbee4bd_…v_7180f12f1def import extract_24h_before_peak`, declared
+`pandas` from the contract, built a 48-row frame, wrote `weather.csv`, ran the **extracted
+platform function** on it and reported true stdout — peak found, 24 preceding rows returned.
+Module, symbol and dependency all verified against the registry and the file on disk.
+Suite **785 passed**, same 3 pre-existing failures.
+
+**Surprised by** how much of this was the *backend*, not the system. Three of the four failed
+runs were artifacts of driving the agent through `claude -p`: a truncated tool description
+that cut the `dependencies` instructions, and then a tool list from the CLI's own harness
+overriding the prompt's. Prompt-enforced tool calling is a genuinely weaker substrate than the
+native API, and it fails in ways that *look* like product bugs — an answer confidently
+reporting that a working tool does not exist. Two consequences: eval numbers must not be
+produced through this backend without saying so, and "the model said the tool was missing" is
+now a known backend symptom rather than a signal to go re-check the wiring.
+
+**Next** the same run under a native tool-calling model, to separate backend artefacts from
+real agent behaviour, and the invariant gate (M6) on top of a run that now genuinely executes.

@@ -201,3 +201,58 @@ def test_a_deployment_marker_refuses_this_backend(monkeypatch):
     monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
     with pytest.raises(RuntimeError, match="development-only"):
         llm_claude_cli.check_not_deployed()
+
+
+def test_the_longest_real_description_is_not_clipped():
+    """Regression guard on the budget.
+
+    execute_code's description carries the whole sandbox contract. A 600-char cut removed how
+    to pass `dependencies`; a later 1400-char cut removed the paragraph naming the
+    `iguide_methods` package. Both were silent, and both changed what the model could do.
+    """
+    from agent_runtime.chat_claude_cli import _tool_schema
+    from agent_runtime.langchain_exec_tools import make_code_execution_tools
+
+    tool = make_code_execution_tools()[0]
+    schema = _tool_schema(tool)
+    assert schema["description"] == (tool.description or "").strip(), (
+        "execute_code's description is being clipped again; raise _DESC_BUDGET")
+
+
+def test_a_pathological_description_is_still_bounded():
+    from agent_runtime.chat_claude_cli import _clip_description, _DESC_BUDGET
+
+    clipped = _clip_description("word " * 5000)
+    assert len(clipped) <= _DESC_BUDGET + 16
+    assert clipped.endswith("[…]")
+
+
+def test_clipping_lands_on_a_sentence_boundary_when_it_can():
+    from agent_runtime.chat_claude_cli import _clip_description, _DESC_BUDGET
+
+    text = ("A" * (_DESC_BUDGET // 2)) + ". " + ("B" * _DESC_BUDGET) + ". tail"
+    assert _clip_description(text).endswith(". […]")
+
+
+def test_the_cli_is_left_with_no_tools_of_its_own(monkeypatch):
+    """The CLI advertises its remaining tools to the model, and under a long prompt the model
+    believes that list over the prompt's. Observed verbatim in an agent turn: "Only a limited
+    set of tools (AskUserQuestion, ScheduleWakeup, ShareOnboardingGuide, Skill, and ToolSearch)
+    are callable here" — exactly the tools left allowed — then a refusal to run code because
+    execute_code was "not available", while it was bound and working."""
+    from rag_pipeline import llm_claude_cli
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CLI_BARE", raising=False)
+    monkeypatch.delenv("CLAUDE_CLI_ISOLATE", raising=False)
+    argv = llm_claude_cli._build_argv("claude", "prompt", "sonnet")
+    denied = set(argv[argv.index("--disallowed-tools") + 1].split(","))
+    assert {"AskUserQuestion", "ScheduleWakeup", "ShareOnboardingGuide", "Skill",
+            "ToolSearch"} <= denied, "the CLI can still offer the model a competing tool list"
+
+
+def test_the_system_prompt_disowns_any_other_tool_list():
+    from agent_runtime.chat_claude_cli import _SYSTEM
+
+    assert "IGNORE" in _SYSTEM
+    assert "unavailable" in _SYSTEM

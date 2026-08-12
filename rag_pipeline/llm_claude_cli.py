@@ -176,10 +176,26 @@ def _is_auth_failure(text: str) -> bool:
 _DEFAULT_SYSTEM = ("You are a language model answering a single request. Answer directly and "
                    "completely. You have no tools and no files to consult.")
 
-# Tools the coding agent would otherwise use. Denied by name because --bare (which would also
+# Every tool the CLI would otherwise expose. Denied by name because --bare (which would also
 # do this) cannot read OAuth, so a subscription run has to be constrained explicitly.
-_AGENT_TOOLS = ("Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Task,NotebookEdit,"
-                "TodoWrite,SlashCommand,KillShell,BashOutput")
+#
+# The second group matters more than it looks. When this list covered only the file/shell
+# tools, the CLI still advertised its REMAINING tools to the model — and under a long prompt
+# the model believed that list over the one described in the prompt. Observed verbatim in an
+# I-GUIDE agent turn: "Only a limited set of tools (AskUserQuestion, ScheduleWakeup,
+# ShareOnboardingGuide, Skill, and ToolSearch) are callable here" — precisely the tools left
+# allowed at the time — followed by a refusal to run code because `execute_code` was
+# "not available in this environment", while it was bound and working. Leaving the CLI with
+# ZERO tools of its own removes the competing list.
+_AGENT_TOOLS = (
+    "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Task,NotebookEdit,"
+    "TodoWrite,SlashCommand,KillShell,BashOutput,"
+    "AskUserQuestion,ScheduleWakeup,ShareOnboardingGuide,Skill,ToolSearch,Artifact,Monitor,"
+    "ReportFindings,SendUserFile,Workflow,CronCreate,CronList,CronDelete,"
+    "TaskCreate,TaskUpdate,TaskList,TaskGet,TaskOutput,TaskStop,SendMessage,"
+    "EnterPlanMode,ExitPlanMode,LSP,PushNotification,RemoteTrigger,DesignSync,"
+    "EnterWorktree,ExitWorktree"
+)
 
 
 @lru_cache(maxsize=1)
