@@ -176,8 +176,11 @@ class CodeExtractor:
                 emit_targets=([EMIT_OPENSEARCH, EMIT_MCP] if EMIT_MCP in ctx.targets else [EMIT_OPENSEARCH]),
                 source_rel_path=rel_path,
                 title=f"{rel_path}  (runnable)",
-                contents=f"[runnable: {runnable_tool}] Entry point in {rel_path} "
-                         f"({'function:' + entrypoint if entrypoint else 'script'} mode).",
+                # Identify, do not advertise a callable tool — see
+                # doc_ids.mcp_tool_name_for and notebook_extractor's matching marker.
+                contents=f"[workflow {wid}] Entry point in {rel_path} "
+                         f"({'function:' + entrypoint if entrypoint else 'script'} mode). "
+                         f"Not directly callable; reuse the extracted functions.",
                 source_fields={**source_fields, "tags": tags},
                 runnable={
                     "workflow_id": wid, "runnable_tool": runnable_tool,

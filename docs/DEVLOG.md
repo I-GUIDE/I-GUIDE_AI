@@ -76,10 +76,14 @@ measured during planning against live infrastructure that will drift.
   scores it against `TASK_META[tid]["primary_ids"]` (a subset) while computing
   `full_exp` on the line above.
 - Dev/prod dependency drift: dev runs langchain **1.2.10** / core **1.4.9** / langgraph
-  **1.0.10**; `pip install -r requirements.txt` resolves to **1.3.14 / 1.5.3 / 1.2.10**.
-  Repo suite against the prod-resolved set: **550 passed, 9 failed, 1 skipped** (5 are
-  `tests/live/*` needing env; substantive: `test_state_uniformity.py` ×2,
-  `test_langchain_geo_tools.py::test_spatial_join`).
+  **1.0.10**; `pip install --dry-run -r requirements.txt` resolves to
+  **1.3.14 / 1.5.3 / 1.2.10**. The unbounded `>=1.0` pins are real and confirmed by the
+  resolver report.
+  > ⚠️ **RETRACTED (see M0.5):** this entry originally claimed "repo suite against the
+  > prod-resolved set: 550 passed, 9 failed". That measurement was invalid — the venv it
+  > ran in had no `pyvenv.cfg`, `sys.prefix` was `/opt/anaconda3`, and its interpreter
+  > resolved langchain from `~/.local` at **1.2.10**. It measured the dev stack, not the
+  > prod stack. M0.5 re-measures with a verified-isolated venv.
 
 *Execution*
 - Sandbox: `python:3.11-slim`, **512m / 1.0 cpu / 60s / 256 pids**, `--network none`.
@@ -242,3 +246,70 @@ regenerate with:
 
 **Next** M0.5 — `constraints.txt`, so the dev/prod version drift stops making every
 later measurement ambiguous.
+
+---
+
+## 2026-08-07 · M0.7 · Stop advertising a tool that cannot exist
+
+**Change** `extractors/doc_ids.py`: `mcp_tool_name_for` now returns the real executor
+name (`mcp_run_notebook_workflow` / `mcp_run_code_element`) instead of
+`mcp_run_<workflow_id>`; added `run_invocation_for()` returning tool **and** argument,
+since a name alone is not actionable for these executors. Both extractors' `contents`
+markers changed from `[runnable: mcp_run_<wid>]` to `[workflow <wid>] … Not directly
+callable; reuse the extracted functions.` `SkillSpec.allowed_tools` is now empty, and
+`skill_emitter._render` emits an explicit "no single tool runs this" Run section instead
+of silently omitting it. Hand-corrected the one shipped
+`.agents/skills/ai-agent-for-chicago-crime-analysis/SKILL.md`.
+
+**Why** `generic_executor_tools` registers exactly two fixed tools that take the workflow
+id as an *argument*; it does not register one tool per workflow. So every
+`mcp_run_nbwf_*` name ever emitted named a tool that could not exist — and one shipped
+into a SKILL.md `allowed-tools` list, i.e. the model was explicitly told to invoke a
+fiction. Worse, the docstring at `doc_ids.py:84` asserted the false belief
+("The executor registers `run_<workflow_id>`"), so the bug was documented as intended
+behavior.
+
+The executors stay unreachable in beta regardless: `AGENT_ALLOW_WORKFLOW_EXEC` remains 0
+and `generic_executor_tools` stays out of `DEFAULT_MCP_MODULES`, because the execution
+body is a bare `exec()` of ingested source in the MCP server process. Hence "not directly
+callable" rather than a corrected tool name — a truthful name for a gated tool would still
+waste a turn.
+
+**Measured** Emitted names that cannot resolve: **1 per promoted workflow → 0**.
+Shipped SKILL.md files advertising a nonexistent tool: **1 → 0**. Suite unchanged
+(501 passed, same 3 pre-existing failures).
+
+**Next** M0.5, now materially larger — see the pyarrow finding below.
+
+---
+
+## 2026-08-07 · M0.5a · pyarrow is an undeclared dependency, and two geo tools are broken in prod
+
+**Change** None yet — this entry records the finding, because it is a production defect
+found while building the lock file and it deserves its own record.
+
+**Why it matters** `pyarrow` appears in **no** requirements file, yet three code paths
+call `to_parquet`:
+- `agent_runtime/langchain_geo_tools.py:436` — `vector_reproject`
+- `agent_runtime/langchain_geo_tools.py:476` — `vector_spatial_join`
+- `extractors/geo_handles.py:42` — the GeoDataFrame file-handle mechanism (pickle fallback)
+
+The dev machine has `pyarrow 24.0.0` from anaconda. A clean `pip install -r
+requirements.txt` does not install it. So in the deployed image the two vector tools
+return `{"ok": false, "error": "Missing optional dependency 'pyarrow.parquet'"}` and
+`geo_handles` silently degrades to pickle — while both pass in dev.
+
+**Measured** In a verified-isolated venv built only from `requirements.txt`:
+`vector_spatial_join` → `ok: false`. That is the single extra failure in the prod-stack
+suite run (**502 passed, 2 failed** vs dev's **503 passed, 1 failed**).
+
+**Surprised by** How wrong my earlier framing was. I had recorded this as *LangChain*
+version drift. It is not: the langchain triple moves nothing here. The real drift is the
+scientific stack — prod resolves **pandas 3.0.5** against dev's **2.2.3** (a major
+version), numpy 2.1.3 → 2.5.2, geopandas 1.1.2 → 1.1.4, and `fiona` appears from nowhere
+at 1.10.1. For a geospatial platform a silent major pandas bump is a far larger risk than
+a langchain minor, and neither was bounded. Also worth noting the resolver moved *within
+this session*: the dry-run hours ago gave langchain 1.3.14, the real install gave 1.3.15.
+
+**Next** M0.5 proper: add `pyarrow`, then build and *test* a constraints file rather than
+freezing whatever resolves today.

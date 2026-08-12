@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from typing import Any, Dict
 
 from .base import (
     KIND_CODE_BLOCK,
@@ -78,13 +79,37 @@ def workflow_id_for(asset_id: str, *, code: bool = False) -> str:
 
 
 def mcp_tool_name_for(workflow_id: str) -> str:
-    """Tool name the generic executor exposes for a promoted workflow.
+    """Agent-side name of the executor that can run *workflow_id*.
 
-    MUST match what the agent sees (langchain_mcp_tools prefixes remote tools
-    with ``mcp_``). The executor registers ``run_<workflow_id>``; the agent-side
-    name is therefore ``mcp_run_<workflow_id>``.
+    The previous implementation returned ``mcp_run_<workflow_id>``, on the belief
+    that the executor registers one tool per workflow. It does not:
+    ``MCP_server/tools/generic_executor_tools.py`` registers exactly two fixed
+    tools, ``run_notebook_workflow`` and ``run_code_element``, each taking the id
+    as an *argument*. So every ``mcp_run_nbwf_*`` name ever emitted named a tool
+    that could not exist, and one of them shipped into a SKILL.md ``allowed-tools``
+    list where the model was told to invoke it.
+
+    NOTE these executors are deliberately NOT reachable in beta: they are gated by
+    ``AGENT_ALLOW_WORKFLOW_EXEC`` (default 0) and ``generic_executor_tools`` is not
+    in ``langchain_mcp_tools.DEFAULT_MCP_MODULES``, because the execution body is a
+    bare ``exec()`` of ingested notebook source inside the MCP server process
+    (``generated_notebook_tools.py:43-47``). Reuse goes through the method library
+    instead. This function therefore describes the *correct* name for a manifest
+    record; it must not be used to tell a model what to call.
     """
-    return f"mcp_run_{workflow_id}"
+    return "mcp_run_code_element" if workflow_id.startswith("cwf_") else "mcp_run_notebook_workflow"
+
+
+def run_invocation_for(workflow_id: str) -> Dict[str, Any]:
+    """The full, truthful invocation for *workflow_id* — tool name plus argument.
+
+    A tool name alone is not actionable for these executors, since the workflow id
+    travels as a parameter. Kept so manifests record a complete call if workflow
+    execution is ever re-enabled behind a real sandbox.
+    """
+    tool = mcp_tool_name_for(workflow_id)
+    key = "element_id" if tool.endswith("code_element") else "workflow_id"
+    return {"tool": tool, "args": {key: workflow_id}}
 
 
 def slugify(text: str, *, max_len: int = 64) -> str:
@@ -101,5 +126,5 @@ __all__ = [
     "normalize_repo_url", "repo_id", "resource_type_for",
     "notebook_block_doc_id", "code_asset_doc_id", "dataset_doc_id",
     "publication_methodspec_doc_id", "parent_doc_id",
-    "workflow_id_for", "mcp_tool_name_for", "slugify",
+    "workflow_id_for", "mcp_tool_name_for", "run_invocation_for", "slugify",
 ]

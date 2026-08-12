@@ -227,8 +227,13 @@ class NotebookExtractor:
                 emit_targets=([EMIT_OPENSEARCH, EMIT_MCP, EMIT_SKILL] if EMIT_MCP in ctx.targets else [EMIT_OPENSEARCH]),
                 source_rel_path=rel_path,
                 title=f"{title} — workflow",
-                # prepend the run pointer so the code peer sees it via _format_documents
-                contents=f"[runnable: {runnable_tool}] Workflow extracted from {rel_path} ({mode} mode).",
+                # Identify the workflow WITHOUT naming a callable tool. The old marker
+                # was "[runnable: mcp_run_<wid>]", a tool that cannot exist (see
+                # doc_ids.mcp_tool_name_for) and whose executors are gated off anyway.
+                # Telling the model to invoke it wasted a turn and taught it a fiction.
+                contents=(f"[workflow {wid}] Whole-notebook workflow extracted from "
+                          f"{rel_path} ({mode} mode). Not directly callable; reuse the "
+                          f"extracted functions."),
                 runnable=runnable,
                 source_fields={**source_fields, "tags": sorted(set(form_tags) | tags)},
                 extracted={"parent_doc_id": nb_doc_id, "parent_type": "Notebook", "runnable_tool": runnable_tool},
@@ -239,7 +244,10 @@ class NotebookExtractor:
                 name=slugify(title),
                 description=str(ctx.fields.get("abstract") or ctx.fields.get("description")
                                or f"Run the {title} workflow extracted from {rel_path}."),
-                allowed_tools=[runnable_tool],
+                # Deliberately empty: the only name we could put here is an executor
+                # that is gated off and not registered. A SKILL.md shipped in this repo
+                # advertised "mcp_run_nbwf_d01e717421c1b0ff" in allowed-tools.
+                allowed_tools=[],
                 tags=sorted(set(form_tags) | tags),
                 ordered_steps=ordered_steps,
             )

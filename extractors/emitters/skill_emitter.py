@@ -53,6 +53,14 @@ def _render(skill: Dict[str, Any]) -> str:
     if skill.get("allowed_tools"):
         lines += ["", "## Run", "",
                   f"Invoke `{skill['allowed_tools'][0]}` (the extracted workflow) to reproduce this pipeline."]
+    else:
+        # No callable tool exists for a promoted workflow: the per-workflow executor
+        # names were fictional and the real executors are gated off (see
+        # doc_ids.mcp_tool_name_for). Say what to do instead of naming nothing.
+        lines += ["", "## Run", "",
+                  "There is no single tool that runs this pipeline. Reproduce it by "
+                  "reusing the functions extracted from this element and composing them "
+                  "in `execute_code`; the steps above give the order."]
     return "\n".join(lines).rstrip() + "\n"
 
 
