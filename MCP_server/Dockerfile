@@ -19,8 +19,8 @@ ENV MPLBACKEND=Agg \
     C_INCLUDE_PATH=/usr/include/gdal
 
 # Copy requirements and install Python deps
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt constraints.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -c constraints.txt
 
 # Copy packages the tool modules import from
 COPY MCP_server/ ./MCP_server/

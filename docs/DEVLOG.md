@@ -374,3 +374,60 @@ Server-side matrix by curl: no key 403, wrong key 403, correct key 400
    publishable negative result the planning work identified.
 
 **Next** M0.5 — the constraints file, which turned out to hide a worse problem than pandas.
+
+---
+
+## 2026-08-07 · M0.5 · constraints.txt — and two real production defects it exposed
+
+**Change** New `constraints.txt` pinning the stack the passing suite and the eval baseline
+were actually produced on. Added `pyarrow` to `requirements.txt`. The three Dockerfiles
+that install the root requirements (`rag_pipeline/`, `MCP_server/`,
+`metadata-extraction-server/`) now `pip install -r requirements.txt -c constraints.txt`.
+
+**Why** `requirements.txt` carries unbounded pins and both entrypoints ran a plain
+`pip install`, so "the deployed stack" was whatever PyPI happened to serve that hour. The
+resolution moved *inside this session*: a dry-run gave langchain 1.3.14, the real install
+an hour later gave 1.3.15.
+
+**Measured** — four clean, verified-isolated builds, same suite, same `.env`:
+
+| Build | Result |
+|---|---|
+| dev machine (anaconda) | **503 passed, 1 failed** |
+| clean, unconstrained | 502 passed, **2** failed — `test_spatial_join` |
+| constrained, but only `langgraph` pinned | 502 passed, **2** failed — `test_history_repair_middleware` |
+| **fully pinned (this commit)** | **503 passed, 1 failed — matches dev** |
+
+The one remaining failure is `test_spatial_routing_e2e`, pre-existing and unrelated.
+
+**Surprised by** two defects, both of which were shipping:
+
+1. **`pyarrow` was undeclared.** `langchain_geo_tools.py:436` (`vector_reproject`) and
+   `:476` (`vector_spatial_join`) write GeoParquet, and `geo_handles.py:42` uses it to move
+   (Geo)DataFrames between tools. Dev had pyarrow 24.0.0 via anaconda; a clean build did
+   not. So both vector tools returned
+   `{"ok": false, "error": "Missing optional dependency 'pyarrow.parquet'"}` **in every
+   deployed image**, and `geo_handles` silently fell back to pickle. `requirements.txt:28`
+   already carried a comment about exactly this failure mode for bs4/lxml/markdownify —
+   the pattern had been recognised once and pyarrow missed. Fixed: `test_langchain_geo_tools.py`
+   goes **12 passed / 1 failed → 13 passed**.
+
+2. **Pinning `langgraph` alone is not enough, and the failure is total.** Its sub-packages
+   version independently: a clean build took `langgraph-prebuilt` **1.0.13** against the
+   pinned `langgraph` **1.0.10**, and 1.0.13 does
+   `from langgraph.runtime import ExecutionInfo` — a name absent in 1.0.10. That raises
+   `ImportError` while importing `langchain.agents`, so **`create_agent` cannot be
+   constructed and the entire agent is dead on arrival**, not degraded. `langgraph-checkpoint`
+   (4.0.1 → 4.2.0), `langgraph-sdk` (0.3.9 → 0.3.15) and `langsmith` (0.6.7 → 0.10.18)
+   drifted the same way. All now pinned.
+
+   This reframes the whole exercise: I had been treating the drift as a *quality* risk
+   (untested versions) when it also contained an *availability* risk (a clean build that
+   cannot start the agent at all).
+
+Also worth recording: `fiona` is listed in `requirements.txt` but is **not installed in
+dev**, so dev reads vectors through `pyogrio` while every container gets fiona. Left as-is
+for now — a divergence to close deliberately, not silently.
+
+**Next** M0.6 — `LLM_PROVIDER` with the `claude-cli` backend, so the extraction batches
+from M2 onward cost nothing.

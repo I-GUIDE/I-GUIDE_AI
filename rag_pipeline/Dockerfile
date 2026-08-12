@@ -47,8 +47,10 @@ ENV MPLBACKEND=Agg \
     QT_QPA_PLATFORM=offscreen
 
 # Copy requirements and install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt constraints.txt ./
+# -c constraints.txt pins the tested stack; without it a clean build silently
+# resolved pandas 3.0 and an untested langchain triple. See constraints.txt.
+RUN pip install --no-cache-dir -r requirements.txt -c constraints.txt
 
 # Install spaCy model for NLP processing
 RUN python -m spacy download en_core_web_sm

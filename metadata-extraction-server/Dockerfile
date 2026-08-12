@@ -17,8 +17,8 @@ ENV C_INCLUDE_PATH=/usr/include/gdal
 WORKDIR /app
 
 # Copy requirements and install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt constraints.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -c constraints.txt
 
 # Copy application code
 COPY metadata-extraction-server/ ./metadata-extraction-server/
