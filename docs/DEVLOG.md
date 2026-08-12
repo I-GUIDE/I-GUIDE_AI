@@ -155,3 +155,41 @@ suite so a future change to either has to be deliberate.
 
 **Next** M0.3, the eval metric fix. Until `retrieval_success` scores against the full
 expected sets, no later milestone can show an improvement.
+
+---
+
+## 2026-08-07 · M0.3 · retrieval_success scores the full expected set
+
+**Change** `scripts/eval_common.py:342`: `retr` now scores against `full_exp` /
+`full_cov` instead of `meta["primary_ids"]`. Added `retrieval_recall` ("N/M") and kept
+the old value as `primary_retrieval_success`. `task_status` deliberately untouched, so
+this change moves exactly one metric and nothing else.
+
+**Why** `retrieval_success` was computed from a hand-picked subset of each task's
+expected elements, and `full_exp`/`full_cov` were already computed on the two lines
+above and simply unused. The metric therefore read "yes" on every recorded run and was
+structurally incapable of registering a retrieval improvement — which is the metric all
+of M1.2, M3 and M4 are supposed to move.
+
+**Measured** Re-scoring all 11 committed records:
+
+| | before | after |
+|---|---|---|
+| `retrieval_success == "yes"` | **11/11** | **5/11** |
+| aggregate recall over full expected sets | not reported | **25/37 (68%)** |
+
+Per task, worst first: T8 **2/7**, T5 1/3, T4 3/5, T1 2/3, T10 2/3, T9 4/5, then
+T7 3/3, T2 4/4, T3 2/2, T6 1/1, CRIME_HEATMAP 1/1.
+
+**Surprised by** 25/37 here versus the **22/37** BM25 figure recorded in M0.1. Both are
+correct and they measure different things: 22/37 is a single BM25 query per task at k=8,
+25/37 is what the full agent pipeline actually grounded on (several retrieval methods,
+query refinement, and the direct sweep). Worth keeping distinct — the first is the
+retrieval ceiling for one method, the second is end-to-end behavior. `scripts/eval_retrieval.py`
+(M0.4) will report the first properly across methods and k.
+
+Also: no test imports `eval_common`, so this metric had no regression net at all. The
+new `retrieval_recall` field is what M1.2's exit criterion will be read from.
+
+**Next** M0.4 — `scripts/eval_retrieval.py`, so recall@k is measurable per method
+without an LLM in the loop.
