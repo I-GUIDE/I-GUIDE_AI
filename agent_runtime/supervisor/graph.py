@@ -1695,7 +1695,13 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
         if code_exec if code_exec is not None else is_code_exec_enabled():
             from agent_runtime.langchain_exec_tools import make_code_execution_tools
 
-            tools.extend(make_code_execution_tools(default_input_file_ids=input_file_ids))
+            # session_id makes the sandbox workspace persist across calls WITHIN this turn,
+            # so a multi-step analysis can build state. Keyed on the conversation thread so
+            # two conversations never share a workspace.
+            tools.extend(make_code_execution_tools(
+                default_input_file_ids=input_file_ids,
+                session_id=child_thread_id(state.get("thread_id"), "code_exec"),
+            ))
         executor = build_agent_executor(
             llm=llm, preloaded_tools=tools, system_prompt_override=ANALYSIS_WORKFLOW_PROMPT,
             agent_name="analysis_agent", skill_roots=skill_roots,
@@ -1791,7 +1797,13 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         if code_exec if code_exec is not None else is_code_exec_enabled():
             from agent_runtime.langchain_exec_tools import make_code_execution_tools
 
-            tools.extend(make_code_execution_tools(default_input_file_ids=input_file_ids))
+            # session_id makes the sandbox workspace persist across calls WITHIN this turn,
+            # so a multi-step analysis can build state. Keyed on the conversation thread so
+            # two conversations never share a workspace.
+            tools.extend(make_code_execution_tools(
+                default_input_file_ids=input_file_ids,
+                session_id=child_thread_id(state.get("thread_id"), "code_exec"),
+            ))
         executor = build_agent_executor(
             llm=llm, preloaded_tools=tools, system_prompt_override=CODE_PEER_PROMPT,
             agent_name="code_agent", skill_roots=skill_roots,

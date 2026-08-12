@@ -586,3 +586,67 @@ page: it confirms the server behavior the prototype consumes, not the prototype'
 of it.
 
 **Next** M1.1 — the persistent workspace.
+
+---
+
+## 2026-08-07 · M1.1 · Persistent per-session workspace, tiers, incremental artifacts
+
+**Change** `agent_runtime/code_execution.py`: `execute()` takes `session_id` and `tier`. With
+a session the workspace is `<work_root>/sessions/<safe_session_id>/` and **survives** the
+call; without one the old throwaway-and-remove behaviour is kept exactly. Added
+`resolve_tier()` / `EXEC_TIERS` (quick 60s/512m · standard 300s/2g · heavy 900s/6g, gated by
+`AGENT_CODE_EXEC_ALLOW_HEAVY`), `sweep_workspaces()` TTL reclamation, a size cap, and
+`_deps_satisfied`/`_record_deps` so a session installs a dependency once. `build_argv` honours
+tier limits. `make_code_execution_tools(session_id=...)` threads it, and both peers in
+`supervisor/graph.py` pass `child_thread_id(thread_id, "code_exec")`. 32 tests.
+
+**Why** `:279` `mkdtemp()` plus `:309` `shutil.rmtree(work)` in a `finally` destroyed the
+workspace after **every** call. Step 2 could not read step 1's output, so a multi-step
+workflow was inexpressible no matter how capable the model — the hard ceiling this whole
+milestone exists to remove. And 512m/1cpu/60s is a quick-tool budget: a county-level join
+OOMs under it, which teaches the model to avoid real computation.
+
+**Measured** A real 3-step workflow through the tool layer:
+
+```
+step1: ok=True  stdout='stage1 written'                    new_artifacts=['stage1.json']
+step2: ok=True  stdout="read stage1: {'rows':3,'doubled':6}" new_artifacts=['stage2.json']
+step3: ok=True  stdout="final: {'rows':3,'doubled':6}"       new_artifacts=[]
+sessionless: stage1.json present: False
+```
+
+- Cross-call state survival: **0/N → 3/3**.
+- Dependency installs across 3 calls in one session: **3 → 1** (and still 3 without a session).
+- Incremental persistence works visibly: step 2 persisted only `stage2.json`, step 3 nothing.
+- Default tier: **quick → standard** (60s/512m → 300s/2g). Suite **570 passed**, same 3
+  pre-existing failures.
+
+**Surprised by** four things, one of them a security bug.
+
+1. **`_safe_session_id("..")` returned `".."`.** I copied the helper from
+   `qgis_headless_tools.py:153`, whose allowlist `[^A-Za-z0-9_.-]` **permits dots** — so
+   `..` survives sanitisation untouched, `<sessions_root>/..` is the work root itself, and
+   `sweep_workspaces` would eventually `rmtree` it. Found by an adversarial test I wrote on
+   principle, not by reading the code. Fixed here (reject any all-dots name, plus a
+   resolved-path containment check as defence in depth); **the original in
+   `qgis_headless_tools` is still vulnerable** and is spawned as its own task.
+2. **The tier would have been dead on arrival.** `execute_code`'s `timeout_seconds` defaulted
+   to `DEFAULT_TIMEOUT` (60), which is truthy, so it would have overridden every tier's
+   timeout on every call and the tiers would have done nothing. Now `None`.
+3. **Incremental persistence is a correctness requirement, not an optimisation.**
+   `_persist_artifacts` walks sorted paths and stops at `MAX_ARTIFACTS=20`, so the moment a
+   workspace persists, step 1's leftovers consume the budget and step 5's real output is
+   never persisted at all. `test_late_output_is_not_crowded_out_by_early_leftovers` pins it.
+4. **The exit criterion had to be measured differently than planned.** The plan wanted a
+   timed "3 installs → 1". The host's anaconda pip cannot `--target` install at all — it
+   raises `PermissionError` scanning an unreadable `sys.path` entry
+   (`/Users/yfkang/Documents/New OpenCode Project/wildfire-agent/src`), a pre-existing
+   environment fault unrelated to this change. Counting install subprocesses instead gives
+   the same claim without measuring the wrong thing.
+
+Also updated four `_Stub.execute` signatures in `test_code_execution.py` to accept
+`**kwargs`: the executor contract genuinely gained two parameters, and having the tool
+silently omit them for duck-typed executors would hide real wiring bugs.
+
+**Next** M1.3 (agent indices) is blocked on the embedding server. Taking the grounding-audit
+false positive (task #10) next instead, since it degrades every correct answer in the UI.

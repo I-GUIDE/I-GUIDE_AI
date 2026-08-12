@@ -170,7 +170,8 @@ def test_execute_code_tool_with_stub_executor():
     captured = {}
 
     class _Stub:
-        def execute(self, code, language="python", timeout=None, dependencies=None, input_files=None):
+        def execute(self, code, language="python", timeout=None, dependencies=None,
+                    input_files=None, **kwargs):  # **kwargs: session_id / tier (M1.1)
             captured["dependencies"] = dependencies
             captured["input_files"] = input_files
             return ExecResult(exit_code=0, stdout="captured-out", stderr="", backend="stub")
@@ -220,7 +221,8 @@ def test_execute_code_tool_resolves_and_stages_file_specs(monkeypatch, tmp_path)
     captured = {}
 
     class _Stub:
-        def execute(self, code, language="python", timeout=None, dependencies=None, input_files=None):
+        def execute(self, code, language="python", timeout=None, dependencies=None,
+                    input_files=None, **kwargs):  # **kwargs: session_id / tier (M1.1)
             captured["input_files"] = input_files
             return ExecResult(exit_code=0, stdout="", stderr="", backend="stub")
 
@@ -313,7 +315,8 @@ def test_default_and_explicit_union_deduped(monkeypatch, tmp_path):
     captured = {}
 
     class _Stub:
-        def execute(self, code, language="python", timeout=None, dependencies=None, input_files=None):
+        def execute(self, code, language="python", timeout=None, dependencies=None,
+                    input_files=None, **kwargs):  # **kwargs: session_id / tier (M1.1)
             captured["input_files"] = input_files
             return ExecResult(exit_code=0, stdout="", stderr="", backend="stub")
 
@@ -336,7 +339,8 @@ def test_input_file_count_cap_skips_extras(monkeypatch, tmp_path):
     b = create_output_file("b.csv", "y\n")["file_id"]
 
     class _Stub:
-        def execute(self, code, language="python", timeout=None, dependencies=None, input_files=None):
+        def execute(self, code, language="python", timeout=None, dependencies=None,
+                    input_files=None, **kwargs):  # **kwargs: session_id / tier (M1.1)
             return ExecResult(exit_code=0, stdout="", stderr="", backend="stub")
 
     tools = make_code_execution_tools(executor=_Stub(), default_input_file_ids=[a, b])

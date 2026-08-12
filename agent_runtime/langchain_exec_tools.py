@@ -103,25 +103,31 @@ def _build_staging(refs: List[str]) -> Tuple[List[Dict[str, str]], List[Dict[str
 def make_code_execution_tools(
     executor: Optional[Any] = None,
     default_input_file_ids: Optional[List[str]] = None,
+    session_id: Optional[str] = None,
 ) -> List[Any]:
     """Build the `execute_code` StructuredTool (container-per-run sandbox).
 
     ``default_input_file_ids`` are the files attached to the current conversation;
     they are auto-staged into EVERY run so the model can read them without naming
     them, and are unioned (deduped) with any explicit ``input_files`` it passes.
+
+    ``session_id`` makes the sandbox workspace PERSIST across calls within a turn, so a
+    multi-step workflow can build state (step 2 reads what step 1 wrote). Without it every
+    call gets a throwaway directory, which is what made multi-step analysis impossible.
     """
     from langchain_core.tools import StructuredTool
 
-    from agent_runtime.code_execution import DEFAULT_TIMEOUT, get_code_executor
+    from agent_runtime.code_execution import get_code_executor
 
     default_ids = [str(x).strip() for x in (default_input_file_ids or []) if str(x).strip()]
 
     def execute_code(
         code: str,
         language: str = "python",
-        timeout_seconds: int = DEFAULT_TIMEOUT,
+        timeout_seconds: Optional[int] = None,
         dependencies: Optional[List[str]] = None,
         input_files: Optional[List[str]] = None,
+        tier: Optional[str] = None,
     ) -> str:
         ex = executor or get_code_executor()
 
@@ -131,12 +137,17 @@ def make_code_execution_tools(
         refs = list(dict.fromkeys([*default_ids, *explicit]))
         staging, staged_info, input_errors, skipped = _build_staging(refs)
 
+        # timeout_seconds defaults to None, NOT to DEFAULT_TIMEOUT. It used to default to
+        # 60, which is truthy, so it would have overridden the execution tier's timeout on
+        # every single call and the tiers would have had no effect at all.
         result = ex.execute(
             code,
             language=language,
             timeout=timeout_seconds,
             dependencies=dependencies,
             input_files=staging,
+            session_id=session_id,
+            tier=tier,
         )
         payload = result.to_dict()
         if staged_info:
@@ -145,6 +156,14 @@ def make_code_execution_tools(
             payload["input_file_errors"] = input_errors
         if skipped:
             payload["input_files_skipped"] = skipped
+        if session_id:
+            # Tell the model the workspace persists; otherwise it will not use it and will
+            # keep re-deriving state it already computed.
+            payload["workspace"] = {
+                "persistent": True,
+                "note": "Files you write persist for the rest of this conversation; a later "
+                        "execute_code call can read them from the working directory.",
+            }
         return json.dumps(payload, ensure_ascii=True, default=str)
 
     tool = StructuredTool.from_function(
@@ -161,7 +180,15 @@ def make_code_execution_tools(
             "working directory under both their file_id and their original filename (e.g. "
             "open('data.csv') or pd.read_csv('data.csv')). To read any other uploaded file, "
             "add its file_id to `input_files`. Use this to RUN and DEBUG code: run, read "
-            "stdout/stderr, fix, re-run."
+            "stdout/stderr, fix, re-run. "
+            "The working directory PERSISTS across calls in this conversation, so build a "
+            "multi-step analysis incrementally: write an intermediate result to a file in "
+            "one call and read it in the next instead of recomputing it. Installed "
+            "`dependencies` also persist, so ask for them once. "
+            "Set `tier` to size the run: 'quick' (60s/512MB) for a small check, 'standard' "
+            "(300s/2GB, the default) for real analysis, 'heavy' (900s/6GB) for large "
+            "geospatial joins where available. Only pass `timeout_seconds` to override the "
+            "tier deliberately."
         ),
     )
     return [tool]
