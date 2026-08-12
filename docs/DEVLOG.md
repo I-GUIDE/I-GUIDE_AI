@@ -772,3 +772,63 @@ Recording it now so the decision is driven by the number rather than the origina
 
 **Next** the `blocked_by` histogram is doing its job. Continuing to M2's slice builder, then
 per-function promotion in `notebook_extractor`.
+
+---
+
+## 2026-08-07 · M2.2 · Slice builder — and two bugs only *running* the output could find
+
+**Change** `extractors/analysis/slices.py`: `build_unit_slice()` emits a standalone importable
+module for one unit — provenance header, only the required imports verbatim, only the required
+literal consts, the required sibling defs dependency-first, then the unit. Plus `slice_sha()`
+(content address == version), `has_module_side_effects()`, `build_module_source()` moved here
+from the notebook extractor, and framework-decorator stripping. 18 tests.
+
+**Why** A slice must never execute anything at import: no data loads, no API calls, no
+credential prompts. That is the whole safety argument for shipping extracted code, and it is
+why a `needs_globals` unit is *refused* rather than patched — making it run would require
+inlining exactly the statements this module excludes.
+
+**Measured**, slicing every callable unit from the 14 real notebooks and importing each in a
+clean subprocess:
+
+| | |
+|---|---|
+| callable units | 40 |
+| produced a slice | 40 |
+| import side effects | **0** |
+| **imports cleanly** | **39/40** (was 37/40 before the second fix) |
+
+The one remaining failure is honest: `Simulation.run_simulation` needs a local `Viz` module
+that is not installable. That is a requirements fact about the unit, not a slicing defect —
+and the slice correctly declares what it needs rather than pretending.
+
+**Surprised by** two bugs, both of which passed every static check and were caught only by
+importing and calling the output.
+
+1. **Requirements were collected for the target unit only, not its closure.** Slicing `good`
+   (which calls `helper`, which reads the const `THRESH`) emitted `helper` but not `THRESH`,
+   because `good` itself never reads it. The slice parsed, contained no side effects, satisfied
+   every assertion I had written — and would have raised `NameError` on the first call. Fixed
+   by unioning requirements over the transitive closure.
+2. **Annotation-only names were never required.** `def filter_dataframe_by_value(df:
+   pd.DataFrame, ...) -> pd.DataFrame` uses `pd` nowhere in its body, so symtable reported no
+   global read — correctly, since annotations evaluate in the *enclosing* scope at `def` time.
+   But the slice carries the annotation, so it died with `NameError: name 'pd' is not defined`
+   **at import**. Fixed with `annotation_names()`, covering parameter annotations, the return
+   annotation and decorators. Corpus import rate 37/40 → 39/40.
+
+   Deliberately excluded: a *stringized* annotation (`x: 'gpd.GeoDataFrame'`) is not evaluated
+   at def time and so cannot fail an import — requiring an import for it would add a dependency
+   the unit does not actually need.
+
+The methodological point is the one worth keeping. My static checks —
+`has_module_side_effects`, "does it contain the runtime binding", "are dependencies ordered" —
+all passed on both broken slices. **The only check that found either bug was importing the
+artifact and calling it.** That is the same argument as the plan's artifact-re-runs criterion,
+arriving a milestone early, and it is why the corpus import test is now the central test in
+this file rather than a nice-to-have.
+
+Suite **631 passed**, same 3 pre-existing failures.
+
+**Next** per-function promotion in `notebook_extractor`, replacing the all-or-nothing
+`all_parse_ok` gate at `:206`.

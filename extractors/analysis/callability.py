@@ -141,6 +141,46 @@ def _globals_of(table: symtable.SymbolTable) -> Tuple[set, set]:
     return reads, writes
 
 
+def annotation_names(node: ast.AST) -> List[str]:
+    """Root names referenced in a unit's ANNOTATIONS and DECORATORS.
+
+    symtable does not report these as globals of the function scope, and it is right not to:
+    annotations and decorators are evaluated in the *enclosing* scope when the ``def``
+    executes. But a slice carries them, so they must still be satisfied or the slice raises at
+    IMPORT time rather than at call time.
+
+    Measured: ``def filter_dataframe_by_value(df: pd.DataFrame, ...) -> pd.DataFrame`` uses
+    ``pd`` nowhere in its body. The analyzer correctly found no global read, the unit was
+    marked callable, and the emitted slice died with ``NameError: name 'pd' is not defined``
+    the moment it was imported. Caught only by importing the slice for real.
+    """
+    targets: List[ast.AST] = []
+    args = getattr(node, "args", None)
+    if args is not None:
+        for group in ("posonlyargs", "args", "kwonlyargs"):
+            for a in getattr(args, group, []) or []:
+                if a.annotation is not None:
+                    targets.append(a.annotation)
+        for extra in (getattr(args, "vararg", None), getattr(args, "kwarg", None)):
+            if extra is not None and extra.annotation is not None:
+                targets.append(extra.annotation)
+    if getattr(node, "returns", None) is not None:
+        targets.append(node.returns)          # type: ignore[attr-defined]
+    targets.extend(getattr(node, "decorator_list", []) or [])
+
+    names: List[str] = []
+    for t in targets:
+        for sub in ast.walk(t):
+            # The ROOT of an attribute chain is what needs binding: pd.DataFrame -> pd
+            if isinstance(sub, ast.Name) and sub.id not in _BUILTINS:
+                names.append(sub.id)
+            elif isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                # A stringized annotation ('gpd.GeoDataFrame') is NOT evaluated at def time,
+                # so it cannot fail an import; deliberately ignored.
+                continue
+    return sorted(set(names))
+
+
 def iter_units(tree: ast.Module) -> List[Tuple[str, ast.AST]]:
     """(qualified_name, node) for every top-level function and public method."""
     units: List[Tuple[str, ast.AST]] = []
@@ -185,6 +225,9 @@ def analyze_module(source: str) -> Tuple[Dict[str, Callability], ModuleScope, Di
             verdicts[qualname] = c
             continue
         reads, writes = _globals_of(ftable)
+        # Annotations and decorators are evaluated at def time in the enclosing scope, so a
+        # slice must satisfy them too even though symtable does not count them as globals.
+        reads |= set(annotation_names(unit_nodes[qualname]))
         c.global_writes = sorted(writes)
         for name in sorted(reads):
             if name in scope.imports:
@@ -263,4 +306,5 @@ def analyze_unit(source: str, qualified_name: str) -> Callability:
                        reason=summary.get("error") or f"{qualified_name} not found in module")
 
 
-__all__ = ["ModuleScope", "module_scope", "iter_units", "analyze_module", "analyze_unit"]
+__all__ = ["ModuleScope", "module_scope", "iter_units", "annotation_names",
+           "analyze_module", "analyze_unit"]
