@@ -709,3 +709,66 @@ invent a clean result for an audit that did not produce one.
 
 **Next** M1.3 needs the embedding server. Proceeding to the extraction restructure (M2
 prerequisites: `contracts.py` + the callability analyzer) which is unblocked.
+
+---
+
+## 2026-08-07 · M2.1 · Contracts + callability analyzer — and a finding that revises the plan
+
+**Change** Three new pure modules (no I/O, no LLM, no execution): `extractors/contracts.py`
+(`ParamSpec` / `Callability` / `InvariantSpec` / `UnitContract`),
+`extractors/analysis/callability.py` (stdlib `symtable` free-variable analysis), and
+`extractors/analysis/signatures.py` (full-fidelity signatures + type/unit/CRS inference). Plus
+`scripts/measure_callable_units.py` to measure the corpus. 21 tests.
+
+**Why** A function lifted from cell 12 that reads `gdf` from cell 4 imports fine and then
+fails at call time — or silently uses a stale global. That risk is why the extractor promotes
+one whole-notebook entry point instead of per-function units. The analyzer's job is to decide
+which units are safe, and the key distinction is not "reads a global" but *what kind of
+binding it is*: imports, sibling defs and literal consts can be copied into a slice; a value
+produced by executing something cannot.
+
+**Measured** — against the 14 real cached notebooks:
+
+```
+callable ratio: 40 of 41 functions (98%)
+notebooks contributing >=1 callable unit: 9/14 (64%)
+SUPPLY: 4/14 notebooks define ZERO functions (script-style, straight-line cells)
+CONCENTRATION: the top 2 notebooks supply 26/41 units (63%)
+top blockers (hidden-global class): 1x full_gdf, 1x linear_cm
+```
+
+Signature fidelity, on the case the old implementation mangled:
+`def f(p, /, a: int=3, *args: str, k: float=1.0, **kw) -> 'gpd.GeoDataFrame'` — previously
+emitted as `def f(a, *args, **kw)`. Suite **613 passed**, same 3 pre-existing failures.
+
+**Surprised by — and this revises the plan.** I built the analyzer for the hidden-global
+problem. **That problem is almost absent: 1 of 41 units is blocked by it.** The real limiting
+factor is *supply*:
+
+- **4 of 14 notebooks define no function at all.** They are straight-line cell scripts, so
+  per-function promotion has nothing to promote regardless of how clean their globals are.
+- **Two notebooks supply 26 of the 41 units (63%).** The distribution is extremely skewed, so
+  "N callable units" across the corpus will be dominated by a handful of contributors.
+- 9 of 14 notebooks yield at least one unit, so the method library is viable — but thin, and
+  scaling to 133 notebooks will likely yield low hundreds of units, not thousands.
+
+The plan anticipated exactly this branch: *"If that ratio is low, the analyzer is telling the
+truth about the notebooks and the composition story needs the parameterisation work before it
+needs more plumbing."* The ratio is **high** (98%) and the **supply** is low, which is a
+different diagnosis than either branch predicted, and it points somewhere specific:
+
+1. **Raise the priority of the code extractor.** `.py` files define functions by construction;
+   notebooks often do not. 27 code elements are indexed and currently produce nothing callable.
+   This was scheduled late (M7) on a "zero demand signal" reading; the supply number is a
+   stronger argument than the demand one.
+2. **Cell-to-function lifting is the way to reach script-style notebooks** — wrap a
+   straight-line cell as a function whose free variables become parameters. That is real work
+   and should be its own step, justified by this number rather than assumed.
+3. Do **not** invest further in hidden-global handling. It is 1 case in 41.
+
+I am not reordering the roadmap unilaterally on one 14-notebook sample — the measurement
+should be repeated once more notebooks are ingested (M3) before the priority actually moves.
+Recording it now so the decision is driven by the number rather than the original assumption.
+
+**Next** the `blocked_by` histogram is doing its job. Continuing to M2's slice builder, then
+per-function promotion in `notebook_extractor`.
