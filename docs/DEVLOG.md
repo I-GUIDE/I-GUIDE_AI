@@ -880,3 +880,56 @@ Design decisions worth recording:
 **Next** the library emitter (write the slices as an importable package), then mounting it
 into the sandbox. `scripts/measure_callable_units.py` is now redundant with the extractor
 itself and should be folded into a coverage report at M3.
+
+---
+
+## 2026-08-07 · M2.4 · The method library is real, importable code
+
+**Change** `extractors/emitters/library_emitter.py` writes EMIT_LIBRARY units under
+`storage_root()/method_library/` as an `iguide_methods` package — one content-addressed module
+per unit (`v_<slice_sha>.py`), a per-element subpackage re-exporting the current version, a
+`_registry.json`, and per-element `requirements.txt`. `AssetRecord.slice_source` carries the
+emitted source; `_fan_out` gained a `library` branch. `code_execution` mounts the library
+**read-only** at `/opt/iguide_methods` and puts it on `PYTHONPATH`. Plus `NEO4J_ENABLED`.
+15 tests.
+
+**Why** The agent composes extracted methods in Python, not by chaining tool calls. One tool
+per unit would put every ingested function into every prompt — a 24-tool peer already spends
+~3,900 tokens on schemas. A package keeps the tool surface O(1) in the number of units.
+
+**Measured**, building the library from all 14 real notebooks:
+
+| | |
+|---|---|
+| units offered | 40 |
+| modules written | **40** |
+| registry entries | **77** (40 qualified + 37 unique bare aliases) |
+| skipped | 0 |
+
+and, in a clean subprocess with only the library on `sys.path`:
+`M.get('ke__21788323__21788323.get_url')` → `<function get_url>`, with `describe()` returning
+the signature, source element and `slice_sha`. Suite **659 passed**, same 3 pre-existing
+failures.
+
+**Surprised by** a collision bug that only showed up at corpus scale. The first run reported
+**40 modules written but a registry of 37**. I had namespaced the *module path* by element —
+and then keyed the *registry* by bare symbol name, so `generate_random`,
+`generate_random_loc` and `get_url` (each defined by two different notebooks) silently
+overwrote each other. `get("get_url")` would have returned whichever element happened to be
+ingested last.
+
+Fixed by keying on the qualified `<element_pkg>.<symbol>` and adding a bare alias only when
+unambiguous; a colliding bare name becomes an explicit `ambiguous` entry that `get()` raises
+on, listing the candidates. A resolver that guesses is worse than one that refuses — and the
+mismatch between 40 written and 37 registered is exactly the kind of thing a summary number
+catches and a unit test on a two-element fixture would not.
+
+**Neo4j** The updated IP (`149.165.155.195:7687`) is **reachable** — TCP open. But queries
+fail with `Neo.ClientError.Security.Unauthorized`: the host moved and `NEO4J_PASSWORD` in
+`.env` is stale for the new instance. Added `NEO4J_ENABLED` (default on) that short-circuits
+before the driver connects. Honest measurement: with the host reachable this saves nothing
+(0.42s vs 0.39s, since auth fails fast) — its value was the ~30s driver timeout when the host
+was unroutable, which the IP fix already removed. Keeping it for dev machines off the network.
+
+**Next** `kb_method_search` / `get_method_contract` so the agent can find units, then a real
+end-to-end compose through the sandbox mount.

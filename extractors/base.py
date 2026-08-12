@@ -50,6 +50,10 @@ class AssetRecord:
     # A serialized contracts.UnitContract. Mirrors how block/runnable/spatial already ride
     # along, so opensearch_emitter needs no structural change to carry it.
     unit: Optional[Dict[str, Any]] = None
+    # Emitted slice source for EMIT_LIBRARY units. Deliberately a separate field rather than
+    # part of `unit`: `unit` is mirrored into the OpenSearch document, and putting a whole
+    # module's source there would bloat every index doc for no retrieval benefit.
+    slice_source: str = ""
     extracted: Dict[str, Any] = field(default_factory=dict)  # additive metadata mirrored into the OpenSearch `extracted` object
     source_fields: Dict[str, Any] = field(default_factory=dict)  # platform form fields inherited into _source (authors, tags, contributor, abstract, ...)
 

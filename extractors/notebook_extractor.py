@@ -377,6 +377,7 @@ class NotebookExtractor:
                 title=f"{qualname} — {title}",
                 contents=contents,
                 unit=dataclasses.asdict(contract),
+                slice_source=slice_src if is_callable else "",
                 source_fields={**source_fields, "tags": sorted(set(form_tags) | tags)},
                 extracted={"parent_doc_id": nb_doc_id, "parent_type": "Notebook",
                            "callable": is_callable, "unit_name": qualname},

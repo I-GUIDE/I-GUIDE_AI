@@ -1,0 +1,276 @@
+"""Write callable units as an importable Python package: the method library.
+
+    storage_root()/method_library/
+      iguide_methods/
+        __init__.py                     generated: MANIFEST, describe(), get()
+        _registry.json                  symbol -> module, element, contract, requirements
+        ke_cca9b545_chicago_crime/
+          __init__.py                   re-exports the CURRENT version
+          v_ab12cd34.py                 THE SLICE, content-addressed
+          requirements.txt
+
+Why a package rather than more tools
+------------------------------------
+The agent composes extracted methods **in Python**, not by chaining tool calls. Python
+composition is strictly more expressive — loops, conditionals, intermediate values, error
+recovery in-loop — and it keeps the tool schema O(1) in the number of ingested units. Adding
+one tool per unit would put every extracted function into every prompt; measured earlier in
+this project, a 24-tool peer already spends ~3,900 tokens on schemas alone.
+
+Versioning
+----------
+The module filename carries ``slice_sha``, so re-ingesting an unchanged notebook rewrites a
+byte-identical file (an idempotent no-op) while an edited function mints a NEW module and the
+package ``__init__`` repoints to it. Older versions stay importable by sha, which is what
+makes "which version produced this number" a resolvable question rather than a label.
+"""
+
+from __future__ import annotations
+
+import json
+import keyword
+import re
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from ..base import EMIT_LIBRARY
+from ..manifest import UnifiedManifest
+
+PACKAGE_NAME = "iguide_methods"
+_IDENT_RE = re.compile(r"[^0-9a-zA-Z_]+")
+
+
+def _storage_root() -> Path:
+    from agent_runtime.file_store import storage_root
+    return Path(storage_root())
+
+
+def library_root() -> Path:
+    root = _storage_root() / "method_library"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def package_dir() -> Path:
+    p = library_root() / PACKAGE_NAME
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _ident(text: str, *, fallback: str = "x") -> str:
+    """A safe Python identifier fragment. Never let an element title become a path."""
+    s = _IDENT_RE.sub("_", str(text or "")).strip("_").lower()
+    if not s:
+        s = fallback
+    if s[0].isdigit():
+        s = f"_{s}"
+    if keyword.iskeyword(s):
+        s = f"{s}_"
+    return s[:48]
+
+
+def element_package(element_id: str, title: str = "") -> str:
+    """Per-element subpackage name: ``ke_<id8>_<slug>``.
+
+    Namespaced by element id because two notebooks may both define ``load_data``; the id
+    keeps them apart while the slug keeps the import readable.
+    """
+    short = _ident(str(element_id or "unknown")[:8], fallback="unknown")
+    slug = _ident(title, fallback="element")
+    return f"ke_{short}_{slug}" if slug != "element" else f"ke_{short}"
+
+
+def _unit_assets(manifest: UnifiedManifest) -> List[Dict[str, Any]]:
+    out = []
+    for asset in manifest.assets or []:
+        a = asset if isinstance(asset, dict) else getattr(asset, "__dict__", {})
+        if EMIT_LIBRARY not in (a.get("emit_targets") or []):
+            continue
+        if not a.get("unit"):
+            continue
+        out.append(a)
+    return out
+
+
+def _requirements_for(units: List[Dict[str, Any]]) -> List[str]:
+    reqs: set = set()
+    for a in units:
+        for spec in ((a.get("unit") or {}).get("requirements") or {}).get("pip", []) or []:
+            if spec:
+                reqs.add(str(spec))
+    return sorted(reqs)
+
+
+_PKG_INIT = '''"""Validated methods extracted from I-GUIDE knowledge elements.
+
+Generated — do not edit. Regenerate by re-ingesting the source elements.
+
+    from iguide_methods import describe, get
+    describe("load_crime_points")     # contract: params, units, CRS expectation, provenance
+    fn = get("load_crime_points")     # the callable itself
+
+Every symbol here was verified to be *independently callable*: its slice carries the imports,
+constants and helper functions it needs, and contains no module-level statement that executes.
+Importing one has no side effects.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+_REGISTRY_PATH = Path(__file__).with_name("_registry.json")
+
+
+def _registry() -> Dict[str, Any]:
+    try:
+        return json.loads(_REGISTRY_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+MANIFEST = _registry()
+
+
+def symbols() -> list:
+    """Every callable symbol in the library."""
+    return sorted(MANIFEST.keys())
+
+
+def describe(symbol: str) -> Optional[Dict[str, Any]]:
+    """Full contract for *symbol*: signature, params, declared units, CRS expectation,
+    requirements and provenance back to the source element."""
+    return MANIFEST.get(symbol)
+
+
+def get(symbol: str):
+    """Import and return the callable for *symbol*.
+
+    Accepts a bare name when it is unambiguous, or a qualified ``<element_pkg>.<name>``.
+    A bare name defined by more than one element raises rather than guessing.
+    """
+    entry = MANIFEST.get(symbol)
+    if not entry:
+        raise KeyError(f"unknown method {symbol!r}; available: {symbols()[:20]}")
+    if entry.get("ambiguous"):
+        raise KeyError(
+            f"{symbol!r} is defined by more than one element. Use one of: "
+            f"{entry.get('candidates')}"
+        )
+    import importlib
+
+    module = importlib.import_module(entry["module"])
+    return getattr(module, entry["library_symbol"])
+
+
+__all__ = ["MANIFEST", "symbols", "describe", "get"]
+'''
+
+
+def emit(manifest: UnifiedManifest, *, root: Optional[Path] = None,
+         dry_run: bool = False) -> Dict[str, Any]:
+    """Write every EMIT_LIBRARY unit in *manifest* into the method library."""
+    units = _unit_assets(manifest)
+    summary: Dict[str, Any] = {"units": len(units), "written": [], "skipped": [],
+                               "package": PACKAGE_NAME}
+    if not units:
+        return summary
+
+    pkg = Path(root) / PACKAGE_NAME if root else package_dir()
+    pkg.mkdir(parents=True, exist_ok=True)
+
+    by_element: Dict[str, List[Dict[str, Any]]] = {}
+    for a in units:
+        prov = (a.get("unit") or {}).get("provenance") or {}
+        by_element.setdefault(str(prov.get("element_id") or prov.get("parent_doc_id") or "unknown"),
+                              []).append(a)
+
+    registry: Dict[str, Any] = {}
+    registry_path = pkg / "_registry.json"
+    if registry_path.exists() and not dry_run:
+        try:
+            registry = json.loads(registry_path.read_text(encoding="utf-8")) or {}
+        except ValueError:
+            registry = {}
+
+    for element_id, element_units in by_element.items():
+        title = str(element_units[0].get("title") or "").split(" — ")[-1]
+        subpkg_name = element_package(element_id, title)
+        subpkg = pkg / subpkg_name
+        exports: List[str] = []
+
+        for a in element_units:
+            unit = a.get("unit") or {}
+            sha = str(unit.get("slice_sha") or "")
+            source = a.get("slice_source") or ""
+            symbol = str(unit.get("library_symbol") or unit.get("qualified_name") or "")
+            if not (sha and source and symbol):
+                summary["skipped"].append({"unit": unit.get("qualified_name"),
+                                           "reason": "missing slice_sha, source or symbol"})
+                continue
+            module_name = f"v_{sha}"
+            if not dry_run:
+                subpkg.mkdir(parents=True, exist_ok=True)
+                target = subpkg / f"{module_name}.py"
+                # Content-addressed: identical source -> identical bytes -> a no-op rewrite.
+                if not target.exists() or target.read_text(encoding="utf-8") != source:
+                    target.write_text(source, encoding="utf-8")
+            exports.append(f"from .{module_name} import {symbol} as {symbol}")
+            dotted = f"{PACKAGE_NAME}.{subpkg_name}.{module_name}"
+            unit["library_module"] = dotted
+            entry = {
+                "module": dotted,
+                "library_symbol": symbol,
+                "qualified_name": unit.get("qualified_name"),
+                "element_package": subpkg_name,
+                "signature": unit.get("signature"),
+                "doc_summary": unit.get("doc_summary"),
+                "params": unit.get("params"),
+                "returns": unit.get("returns"),
+                "invariants": unit.get("invariants"),
+                "requirements": unit.get("requirements"),
+                "slice_sha": sha,
+                "provenance": unit.get("provenance"),
+            }
+            # The registry is keyed by the FULLY QUALIFIED name, plus a bare alias only when
+            # the short name is unambiguous. Keying by the bare symbol alone silently lost
+            # units: measured on the real corpus, 40 modules produced only 37 registry
+            # entries because `generate_random`, `generate_random_loc` and `get_url` are each
+            # defined by two different notebooks, and the later ingest overwrote the earlier.
+            # A resolver that returns "whichever element was ingested last" is worse than one
+            # that admits the ambiguity.
+            qualified = f"{subpkg_name}.{symbol}"
+            registry[qualified] = entry
+            prior = registry.get(symbol)
+            if prior is None:
+                registry[symbol] = dict(entry, alias_for=qualified)
+            elif prior.get("alias_for") != qualified:
+                registry[symbol] = {
+                    "ambiguous": True,
+                    "library_symbol": symbol,
+                    "candidates": sorted({prior.get("alias_for") or prior.get("module", ""),
+                                          qualified}),
+                    "doc_summary": f"{symbol!r} is defined by more than one element; "
+                                   f"import it by its qualified name.",
+                }
+            summary["written"].append(f"{subpkg_name}/{module_name}.py::{symbol}")
+
+        if exports and not dry_run:
+            (subpkg / "__init__.py").write_text(
+                f'"""Methods extracted from element {element_id}. Generated — do not edit."""\n\n'
+                + "\n".join(sorted(exports)) + "\n",
+                encoding="utf-8")
+            reqs = _requirements_for(element_units)
+            if reqs:
+                (subpkg / "requirements.txt").write_text("\n".join(reqs) + "\n", encoding="utf-8")
+
+    if not dry_run:
+        (pkg / "__init__.py").write_text(_PKG_INIT, encoding="utf-8")
+        registry_path.write_text(json.dumps(registry, indent=2, sort_keys=True), encoding="utf-8")
+    summary["registry_size"] = len(registry)
+    summary["root"] = str(pkg)
+    return summary
+
+
+__all__ = ["emit", "library_root", "package_dir", "element_package", "PACKAGE_NAME"]

@@ -68,6 +68,12 @@ WORK_ROOT_ENV = "AGENT_CODE_EXEC_WORK_ROOT"
 # ceiling on multi-step workflows: no matter how capable the model, "load the data, then
 # join it, then map it" could not be expressed across calls.
 SESSIONS_DIRNAME = "sessions"
+# The extracted method library is mounted READ-ONLY so the agent can
+# `from iguide_methods import ...` and compose validated units in Python instead of chaining
+# tool calls. Read-only because the library is generated from ingested elements: a run must
+# never be able to edit the thing later runs will trust.
+METHOD_LIBRARY_DIRNAME = "method_library"
+METHOD_LIBRARY_MOUNT = "/opt/iguide_methods"
 # Records (mtime_ns, size) per file so a run persists only what it actually produced.
 ARTIFACT_INDEX_FILENAME = ".iguide_artifact_index.json"
 # Reclamation: workspaces are swept by age, and capped in size so one runaway session
@@ -172,6 +178,20 @@ def _record_deps(work: Path, dependencies: List[str]) -> None:
         marker.write_text(json.dumps(sorted(prior | set(dependencies))), encoding="utf-8")
     except OSError:
         pass
+
+
+def method_library_dir() -> Optional[Path]:
+    """Host path of the generated method library, or None when nothing is ingested yet."""
+    override = (os.getenv("AGENT_METHOD_LIBRARY_DIR") or "").strip()
+    if override:
+        p = Path(override).expanduser()
+        return p if p.is_dir() else None
+    try:
+        from agent_runtime.file_store import storage_root
+        p = Path(storage_root()) / METHOD_LIBRARY_DIRNAME
+    except Exception:
+        return None
+    return p if p.is_dir() else None
 
 
 def _dir_size_mb(path: Path) -> float:
@@ -584,9 +604,12 @@ class DockerCodeExecutor(CodeExecutor):
             "--workdir", "/work",
             "--tmpfs", "/tmp:rw,size=64m,exec",
             "--env", "HOME=/tmp",
-            "--env", f"PYTHONPATH=/work/{DEPS_DIRNAME}",
+            "--env", f"PYTHONPATH=/work/{DEPS_DIRNAME}:{METHOD_LIBRARY_MOUNT}",
             "-v", f"{work}:/work:rw",       # only writable mount
         ]
+        lib = method_library_dir()
+        if lib:
+            argv += ["-v", f"{lib}:{METHOD_LIBRARY_MOUNT}:ro"]
         user = _host_user()
         if user:
             argv += ["--user", user]

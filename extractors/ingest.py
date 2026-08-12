@@ -212,6 +212,19 @@ def _fan_out(manifest: UnifiedManifest, targets: Sequence[str]) -> None:
         except Exception as exc:
             manifest.warnings.append(f"[mcp] emit failed: {type(exc).__name__}: {exc}")
 
+    if "library" in targets:
+        try:
+            from .emitters import library_emitter
+            summary = library_emitter.emit(manifest)
+            if summary.get("written"):
+                manifest.warnings.append(
+                    f"[library] wrote {len(summary['written'])} unit module(s); "
+                    f"registry now {summary.get('registry_size')} symbol(s)")
+            if summary.get("skipped"):
+                manifest.warnings.append(f"[library] skipped {len(summary['skipped'])} unit(s)")
+        except Exception as exc:
+            manifest.warnings.append(f"[library] emit failed: {type(exc).__name__}: {exc}")
+
     if "skill" in targets:
         try:
             from .emitters import skill_emitter
