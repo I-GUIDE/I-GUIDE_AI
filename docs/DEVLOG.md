@@ -431,3 +431,54 @@ for now — a divergence to close deliberately, not silently.
 
 **Next** M0.6 — `LLM_PROVIDER` with the `claude-cli` backend, so the extraction batches
 from M2 onward cost nothing.
+
+---
+
+## 2026-08-07 · M0.6 · LLM_PROVIDER=claude-cli (dev/experiments only) · model: sonnet
+
+**Change** New `rag_pipeline/llm_claude_cli.py` and a five-line dispatch in
+`llm_utils.call_llm:58`. `LLM_PROVIDER=claude-cli` routes to `claude -p --output-format json
+--model $CLAUDE_CLI_MODEL` (default **sonnet**). `last_model()` records the model per call;
+`preflight()` + `python -m rag_pipeline.llm_claude_cli` diagnose setup in one command;
+`check_not_deployed()` refuses to run where `AGENT_DEPLOYED` / `KUBERNETES_SERVICE_HOST` /
+`ECS_CONTAINER_METADATA_URI` is present. 21 tests, subprocess stubbed so they need no
+credentials.
+
+**Why** `call_llm` is where the recurring cost of this project sits — the publication
+extractor runs over ~180 elements and the rerank/audit/router paths fire every turn. Routing
+it through the CLI during development makes the M2–M7 batches free. It is deliberately *not*
+wired into `build_default_llm()` (the agent peers): experiments should run on models
+comparable to what is deployed, and using a stronger model there would flatter the eval.
+
+**Measured** 21/21 new tests pass; suite **501 → 522 passed**, same 3 pre-existing failures.
+
+⚠️ **BLOCKED on a credential — the backend cannot authenticate on this machine.** Both paths
+were tested and both are unavailable:
+
+| Path | Result |
+|---|---|
+| `--bare` (needs `ANTHROPIC_API_KEY`) | `Not logged in · Please run /login` — no key in env |
+| no `--bare` (uses the interactive login) | `401 OAuth access token has expired. Re-authenticate to continue.` |
+
+To unblock, **one** of:
+- `export ANTHROPIC_API_KEY=...` — preferred: works with `--bare`, reproducible, and the
+  path Anthropic's terms require for automated use; or
+- run `claude` interactively, `/login`, then set `CLAUDE_CLI_BARE=0`.
+
+**Surprised by** a real design tension in `--bare` that changes how this must be configured.
+`--bare` is what makes a run reproducible — it skips hooks, plugins, auto-memory and
+CLAUDE.md auto-discovery, so this repo's own instructions are not silently prepended to every
+extraction prompt. But its help text states that under `--bare` "Anthropic auth is strictly
+ANTHROPIC_API_KEY … OAuth and keychain are never read". **So `--bare` and subscription auth
+are mutually exclusive**, and the tool itself enforces the boundary the terms describe:
+scripted use wants an API key. `use_bare()` therefore defaults from the credential that is
+actually present rather than being hardcoded on, and the docstring records the trade-off
+(subscription = free but leaks project context into prompts; API key = costs money but is
+reproducible and compliant).
+
+Second, smaller: the CLI **exits non-zero while still emitting the JSON that explains why**.
+My first version judged `returncode` before parsing, which turned "not logged in" into an
+unreadable dump of usage counters. Parsing now precedes the exit-code check, and
+`test_auth_failure_is_actionable_even_on_nonzero_exit` pins it.
+
+**Next** M0.8 — `_fan_out` in `ingest_from_github`, the last M0 item.

@@ -55,6 +55,15 @@ def call_llm(prompt: str) -> str:
             logger.error("LLM call failed: %s", exc)
             return "I could not compose an answer due to a generation error."
     
+    # LLM_PROVIDER=claude-cli routes through the local `claude` executable so extraction
+    # batches and eval sweeps cost nothing during development. Dev-only by contract; the
+    # backend itself refuses to run where a deployment marker is present.
+    from . import llm_claude_cli
+
+    if llm_claude_cli.is_selected():
+        llm_claude_cli.check_not_deployed()
+        return llm_claude_cli.call(prompt)
+
     # Production path: OpenAI-compatible call
     url = _completion_url()
     key = os.getenv("VLLM_API_KEY") or os.getenv("OPENAI_KEY")
