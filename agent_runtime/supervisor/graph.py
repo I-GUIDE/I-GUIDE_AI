@@ -311,6 +311,8 @@ def _distill(state: SupervisorState) -> Dict[str, Any]:
         "action_counts": {c: actions.count(c) for c in ("search", "analyze", "code") if actions.count(c)},
         "search_attempts": state.get("search_attempts", 0),
         "search_exhausted": _search_exhausted(state),
+        # What the decider may actually choose this step (see _available_actions).
+        "available_actions": _available_actions(state),
     }
 
 
@@ -387,6 +389,25 @@ def _heuristic_decision(distilled: Dict[str, Any]) -> str:
     if not distilled.get("has_evidence") and "search" not in distilled.get("actions_taken", []):
         return "search"
     return "done"
+
+
+def _available_actions(state: SupervisorState) -> List[str]:
+    """The actions that are legal RIGHT NOW, in decider-menu order.
+
+    The supervisor already vetoes an exhausted ``search`` and a back-to-back peer
+    repeat *after* the decider answers. Computing the same set here lets the decider
+    be shown what it may actually pick, instead of the full menu plus prose telling
+    it which entries are forbidden — the veto stays as a backstop rather than being
+    the mechanism.
+    """
+    actions: List[str] = []
+    if not _search_exhausted(state):
+        actions.append("search")
+    for cap in ("analyze", "code"):
+        if not _is_unproductive_repeat(cap, state):
+            actions.append(cap)
+    actions.append("done")
+    return actions
 
 
 def _is_unproductive_repeat(nxt: str, state: SupervisorState) -> bool:
@@ -724,6 +745,7 @@ def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
 
     def decide(state: SupervisorState, distilled: Dict[str, Any]) -> str:
         history = _format_chat_history(state.get("chat_history"))
+        available = distilled.get("available_actions") or list(ALLOWED_ACTIONS)
         prompt = (
             "You are the orchestration supervisor for a geospatial research agent.\n"
             "Choose the SINGLE next action. Capabilities are peers you can use in any "
@@ -735,28 +757,19 @@ def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
             "- code: produce and run NEW code for work no existing tool covers\n"
             "- done: stop; a grounded final answer is composed automatically from the "
             "conversation + evidence + analysis results + code\n\n"
-            "ANALYZE BEFORE CODE: for any analysis/GIS/mapping task, pick 'analyze' FIRST — it "
-            "owns the purpose-built tools and is more reliable than writing fresh code. Choose "
-            "'code' only when analyze has already run and could not do it (has_analysis is true "
-            "but the task is unmet, or analyze reported a missing capability), or when the user "
-            "explicitly asks for code/a script. Do not start with 'code' for a task an existing "
-            "tool plausibly covers.\n"
-            "Use the conversation so far for context. If the request refers to something "
-            "ALREADY produced earlier in the conversation (e.g. 'show me the code', 'explain "
-            "that', 'what did you find'), do NOT search again — choose 'done' so the answer is "
-            "composed from the conversation, unless genuinely new external information is needed.\n"
-            "Each peer ITERATES INTERNALLY (the code peer runs AND debugs its own code; search "
-            "issues multiple queries in one pass). So once a peer has produced its result "
-            "(see has_code / has_analysis / has_evidence and action_counts in Progress), do NOT "
-            "pick it again to 'retry' or 'improve' — that just repeats work. Choose 'done' once "
-            "the request is covered; the final answer is composed automatically. Only pick a peer "
-            "again if you genuinely need NEW work it has not done yet.\n"
-            "If 'search_exhausted' is true in Progress, the knowledge base returned nothing new — "
-            "do NOT choose 'search' again. Proceed with analyze/code (which can work on uploaded "
-            "files and prior results) or choose 'done'.\n"
+            f"Actions available this step: {', '.join(available)}. "
+            "Anything else has been ruled out already — a search whose sources are exhausted, or "
+            "a peer that just ran and would only repeat itself.\n"
+            "Each peer iterates internally: the code peer runs and debugs its own code, search "
+            "issues several queries in one pass, and analyze chains its tools. A peer's result "
+            "therefore already reflects the work it could do with the inputs it had.\n"
+            "Use the conversation so far for context: when the request refers to something "
+            "already produced earlier (e.g. 'show me the code', 'explain that', 'what did you "
+            "find'), the answer is composed from that conversation, so 'done' is enough unless "
+            "genuinely new external information is needed.\n"
             "Peers may also REQUEST a capability they need (e.g. code needs evidence); such "
             "requests are fulfilled automatically before you are consulted again.\n\n"
-            "Respond ONLY with JSON: {\"next\": \"search|analyze|code|done\", \"reason\": \"...\"}\n\n"
+            "Respond ONLY with JSON: {\"next\": \"" + "|".join(available) + "\", \"reason\": \"...\"}\n\n"
             + (f"Conversation so far:\n{history}\n\n" if history else "")
             + f"User request:\n{state.get('query', '')}\n\n"
             + f"Progress so far:\n{json.dumps(distilled, ensure_ascii=True)}\n"

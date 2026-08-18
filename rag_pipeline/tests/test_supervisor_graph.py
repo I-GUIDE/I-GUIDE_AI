@@ -1218,8 +1218,14 @@ def test_code_peer_has_qgis_tools(monkeypatch):
     assert "pyqgis_render_map" in captured["tools"]
 
 
-def test_decider_prompt_prefers_analyze_before_code():
-    """The supervisor must try the tool-owning analyze peer before writing fresh code."""
+def test_decider_prompt_distinguishes_analyze_from_code():
+    """The decider must be able to tell the tool-owning peer from the code peer.
+
+    This was previously enforced by an "ANALYZE BEFORE CODE" mandate. The ordering now
+    follows from what each capability IS — analyze owns existing purpose-built tools,
+    code writes new code for work no tool covers — so the decider can reason about it
+    instead of obeying a prohibition it cannot weigh.
+    """
     captured = {}
 
     def llm(prompt):
@@ -1230,9 +1236,33 @@ def test_decider_prompt_prefers_analyze_before_code():
     nxt = default_decide_fn(llm=llm)({"query": "buffer these cities"}, {"has_evidence": True})
     assert nxt == "analyze"
     p = captured["prompt"]
-    assert "ANALYZE BEFORE CODE" in p
     assert "existing purpose-built tools" in p.lower()
-    assert "only when analyze has already run" in p.lower()
+    assert "new code for work no existing tool covers" in p.lower()
+    # States what may be chosen now, rather than listing everything and forbidding some.
+    assert "actions available this step" in p.lower()
+    assert "ANALYZE BEFORE CODE" not in p
+
+
+def test_decider_is_offered_only_the_legal_actions():
+    """Exhausted search / a just-run peer are withheld from the menu, not forbidden in prose."""
+    from agent_runtime.supervisor.graph import _available_actions, _distill, default_decide_fn
+
+    state = {"query": "q", "evidence": [], "actions": ["analyze"], "analysis_results": {"a": 1},
+             "search_attempts": 2, "search_empty_streak": 0}
+    assert _available_actions(state) == ["code", "done"]          # no search, no analyze repeat
+    assert _distill(state)["available_actions"] == ["code", "done"]
+
+    captured = {}
+
+    def llm(prompt):
+        captured["prompt"] = prompt
+        return json.dumps({"next": "done", "reason": "covered"})
+
+    assert default_decide_fn(llm=llm)(state, _distill(state)) == "done"
+    assert "Actions available this step: code, done" in captured["prompt"]
+    # A fresh turn still offers everything.
+    assert _available_actions({"query": "q", "actions": [], "search_attempts": 0}) == [
+        "search", "analyze", "code", "done"]
 
 
 # --- general questions are answered, not refused --------------------------------
