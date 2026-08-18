@@ -71,6 +71,7 @@ export default function App() {
   const pendingFileIds = useRef<string[]>([]);
   const uploadContext = useRef<string>(''); // e.g. 'Uploaded "chicago" covers bbox [...]' — spatial context for the agent
   const layersRef = useRef(layers); layersRef.current = layers;
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => { try { localStorage.setItem('iguide-map-ui', JSON.stringify({ mode, cfg, spatial })); } catch { /* */ } }, [mode, cfg, spatial]);
 
@@ -175,7 +176,9 @@ export default function App() {
     if (spatial && uploadContext.current) hints.push(uploadContext.current);
     const regionHint = hints.length ? `\n\n(${hints.join(' ')})` : '';
     try {
+      abortRef.current = new AbortController();
       const res = await streamChat(text + regionHint, {
+        signal: abortRef.current.signal,
         threadId: threadRef.current, memoryId: memoryRef.current,
         fileIds: pendingFileIds.current, agentDev: true,
         includeMcpTools: spatial,
@@ -216,8 +219,11 @@ export default function App() {
       patch({ html, text: res.error ? `⚠ ${res.error}` : undefined, artifacts: res.downloads, response: res.response, trace: [...trace], streaming: false });
       void loadVectorArtifacts(res.downloads);
     } catch (e: any) {
-      patch({ text: `Request failed: ${e.message}`, streaming: false });
-    } finally { setBusy(false); }
+      const stopped = e?.name === 'AbortError';
+      patch({ text: stopped ? '⏹ Stopped. Anything already on the map stays; ask me something else.'
+                            : `Request failed: ${e.message}`,
+              streaming: false });
+    } finally { setBusy(false); abortRef.current = null; }
   }, [asAgentConfig, putLayer, fitView, resolveUrl, spatial, drawnRegion, loadVectorArtifacts]);
 
   const drawFromToolArgs = useCallback((name: string, args: any) => {
@@ -334,6 +340,7 @@ export default function App() {
           messages={messages} busy={busy} drawMode={drawMode} hasRegion={!!drawnRegion} layers={layers}
           mode={mode} cfg={cfg} spatial={spatial} showSettings={showSettings} resolveUrl={resolveUrl}
           onSend={runAgent}
+        onStop={() => abortRef.current?.abort()}
           onToggleDraw={() => { setDrawMode((d) => !d); firstCorner.current = null; }}
           onClearRegion={() => { setDrawnRegion(null); pushMsg({ role: 'agent', text: 'Region cleared.' }); }}
           onUpload={onUpload}
