@@ -61,6 +61,28 @@ SYNTHESIS_PROMPT = (
     "the map. Simply describe or list them; do not fabricate a map link or a static image."
 )
 
+# The two DISTINCT visualization outcomes. Geographic data belongs on the user's live map
+# (a GeoJSON file the client auto-loads); a PNG is a separate, explicitly-requested export.
+# Without this, every "show it on the map" request produced only a downloadable image.
+VISUALIZATION_ROUTES_RULE = (
+    "TWO VISUALIZATION ROUTES — pick by what the user asked for:\n"
+    "  (A) INTERACTIVE MAP (the DEFAULT for geographic data, and required whenever the user "
+    "says load/show/put/display/plot it ON THE MAP, or asks to explore/visualize a spatial "
+    "dataset): output the data as a GeoJSON FILE. PREFER the `vector_to_geojson` tool — its "
+    "output is registered as a downloadable artifact. Only if that tool is unavailable, write "
+    "the file in execute_code (`gdf.to_file('result.geojson', driver='GeoJSON')`) AND make sure "
+    "it is returned as an output file artifact; a file left only in the sandbox working "
+    "directory reaches neither the user nor the map. Any .geojson artifact you produce is "
+    "AUTOMATICALLY loaded as a layer on the user's interactive map. Reproject to EPSG:4326 "
+    "first. Do NOT claim something is 'displayed interactively on the map' unless you actually "
+    "produced a GeoJSON file this turn.\n"
+    "  (B) STATIC IMAGE (only when the user explicitly asks for an image/figure/plot/chart/PNG, "
+    "a printable or downloadable map, or the data is NOT geographic): save a PNG "
+    "(`plt.savefig(...)`, plot_vector, pyqgis_render_map).\n"
+    "Prefer (A) for geographic data; do not produce a PNG as a substitute for putting data on "
+    "the map, and do not do both unless the user asked for an image too.\n"
+)
+
 ANALYSIS_WORKFLOW_PROMPT = (
     "You are AnalysisAgent. Execute the geospatial / data ANALYSIS WORKFLOW the user "
     "needs using the available tools (QGIS/PyQGIS, spatial operations, statistics). "
@@ -100,7 +122,8 @@ ANALYSIS_WORKFLOW_PROMPT = (
     "visualize a map, reproject_vector / vector_spatial_join / vector_to_geojson to "
     "analyze and export. A TIGER .zip is read directly by file_id; an EXTRACTED shapefile "
     "is several files (.shp/.shx/.dbf/.prj) — just pass the .shp's file_id (or any one "
-    "component); the tool auto-finds the rest among the attached files."
+    "component); the tool auto-finds the rest among the attached files.\n"
+    + VISUALIZATION_ROUTES_RULE
 )
 
 CODE_PEER_PROMPT = (
@@ -158,6 +181,7 @@ CODE_PEER_PROMPT = (
     "has NO network — code cannot call a geocoding API at runtime — and you must not invent "
     "coordinates or ask the user for them. Drop names that come back found=false (organizations "
     "without a location, 'null' rows) and note them in your report."
+    + VISUALIZATION_ROUTES_RULE
 )
 
 # Composed by the synthesizer ONLY in the genuinely-cold case — nothing was retrieved or

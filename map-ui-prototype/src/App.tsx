@@ -110,6 +110,39 @@ export default function App() {
     const l = layersRef.current.find((x) => x.id === id);
     if (l) fitView(l.data);
   }, [fitView]);
+  // Vector artifacts (a .geojson the agent WROTE, e.g. from execute_code) belong on the
+  // interactive map, not just in a download list. Fetch and add each one once. Static
+  // images (PNG plots) stay as attachments — that is the other visualization route.
+  const loadedArtifacts = useRef<Set<string>>(new Set());
+  const loadVectorArtifacts = useCallback(async (files: FileRecord[]) => {
+    if (!spatial) return;
+    for (const f of files) {
+      const name = f.filename || f.download_url || '';
+      if (!/\.(geo)?json$/i.test(name)) continue;
+      const key = f.file_id || f.download_url;
+      if (!key || loadedArtifacts.current.has(key)) continue;
+      loadedArtifacts.current.add(key);
+      try {
+        const res = await fetch(resolveUrl(f.download_url));
+        if (!res.ok) continue;
+        const j = await res.json();
+        const fc: FeatureCollection =
+          j?.type === 'FeatureCollection' ? j
+          : j?.type === 'Feature' ? { type: 'FeatureCollection', features: [j] }
+          : j?.type && j?.coordinates ? { type: 'FeatureCollection', features: [{ type: 'Feature', geometry: j, properties: {} }] }
+          : { type: 'FeatureCollection', features: [] };
+        if (!fc.features.length) continue;
+        const label = (f.filename || 'result').replace(/\.(geo)?json$/i, '');
+        putLayer({
+          kind: 'geojson', id: `artifact-${key}`, source: 'analysis', label: `${label}`,
+          data: fc, fitBounds: true,
+          style: { fill: [201, 138, 26, 110], line: [201, 138, 26, 255], lineWidth: 2, pointRadius: 5 },
+        });
+        fitView(fc);
+      } catch { /* not loadable as GeoJSON — leave it as a download */ }
+    }
+  }, [spatial, resolveUrl, putLayer, fitView]);
+
   const onFeatureClick = useCallback((feature: any, layerId: string) => {
     const props = (feature && feature.properties) || {};
     const layer = layersRef.current.find((l) => l.id === layerId);
@@ -157,7 +190,7 @@ export default function App() {
           const fc = extractFeatures(parsed);
           if (fc.features.length) putLayer({ kind: 'geojson', id: `live-${name}`, source: 'kb', label: `${name} (preview)`, data: fc, style: { fill: [124, 58, 237, 180], line: [255, 255, 255, 255], pointRadius: 6, lineWidth: 2 } });
         },
-        onFile: (files) => patch({ artifacts: files }),
+        onFile: (files) => { patch({ artifacts: files }); void loadVectorArtifacts(files); },
         onMapLayer: (layer) => {
           const green = layer.source === 'overpass';
           putLayer({
@@ -181,10 +214,11 @@ export default function App() {
       }
       const html = res.error ? '' : renderMarkdown(res.answer || '_(no answer text)_', resolveUrl);
       patch({ html, text: res.error ? `⚠ ${res.error}` : undefined, artifacts: res.downloads, response: res.response, trace: [...trace], streaming: false });
+      void loadVectorArtifacts(res.downloads);
     } catch (e: any) {
       patch({ text: `Request failed: ${e.message}`, streaming: false });
     } finally { setBusy(false); }
-  }, [asAgentConfig, putLayer, fitView, resolveUrl, spatial, drawnRegion]);
+  }, [asAgentConfig, putLayer, fitView, resolveUrl, spatial, drawnRegion, loadVectorArtifacts]);
 
   const drawFromToolArgs = useCallback((name: string, args: any) => {
     if (!args || typeof args !== 'object') return;

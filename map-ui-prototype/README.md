@@ -41,3 +41,24 @@ This prototype is deliberately structured so each mock swaps 1:1 for production:
 
 The KB spatial fields (`spatial-centroid`, `spatial-bounding-box`) use the same
 GeoJSON shapes produced by the fixed `../embedding-server/reindex_wkt_spatial.py`.
+
+## Running against a LOCAL agent
+
+```sh
+# from the repo root (this worktree), with the agent's .env present:
+PYTHONPATH="$PWD" PORT=5055 AGENT_CHAT_AUTH_OPTIONAL=1 AGENT_PUBLIC_BASE_URL= python3 api/server.py
+# then point the UI proxy at it:
+AGENT_TARGET=http://localhost:5055 npm run dev
+```
+
+**`AGENT_PUBLIC_BASE_URL=` (empty) matters.** The platform `.env` sets it to the deployed
+host; if you inherit that while running locally, every `download_url` is an absolute URL to
+the deployed server, which does not have your locally-created files — downloads then fail with
+`{"error":"unknown file_id: ..."}`. Empty keeps URLs host-relative so they resolve through the
+Vite proxy.
+
+## Two visualization routes
+
+- **Interactive map** — vector data (GeoJSON) is plotted as a layer. Geometry streamed via the
+  `map_layer` SSE event *and* any `.geojson` file artifact the agent writes are both auto-loaded.
+- **Static image** — a PNG plot stays an attachment/download, for when an image is what was asked for.
