@@ -179,6 +179,34 @@ def _persist_artifacts(work: Path, exclude: set) -> List[Dict[str, Any]]:
     return artifacts
 
 
+# A container killed by a signal exits with a NEGATIVE code and usually writes nothing to
+# stderr. Reported bare, that reads to the model as "it just failed", and it then invents a
+# cause (observed: "failed due to dependency issues") and gives up instead of retrying. Naming
+# the signal — and what usually causes it here — lets the agent choose a real next step.
+_SIGNAL_DIAGNOSIS = {
+    9: ("SIGKILL", "the sandbox hit its memory limit (or was killed). Reduce the data held in "
+                   "memory — read in chunks, downsample, or write results incrementally."),
+    11: ("SIGSEGV", "the sandbox process crashed. This is usually a native-library or memory "
+                    "fault, not your logic; retry once, and if it repeats use smaller inputs or "
+                    "avoid the heavy native dependency (a pure-stdlib or pandas-only version "
+                    "often works)."),
+    6: ("SIGABRT", "a native library aborted the process. Try a simpler approach or fewer "
+                   "third-party dependencies."),
+    15: ("SIGTERM", "the sandbox was terminated (time or resource limit)."),
+}
+
+
+def _diagnose_abnormal_exit(exit_code: Optional[int], stderr: str, error: Optional[str]) -> Optional[str]:
+    """Explain a signal-killed run so the caller gets a cause, not a silent failure."""
+    if error or not isinstance(exit_code, int) or exit_code >= 0:
+        return None
+    name, hint = _SIGNAL_DIAGNOSIS.get(-exit_code, (f"signal {-exit_code}", "the sandbox terminated abnormally."))
+    detail = f"code execution was killed by {name} (exit {exit_code}); {hint}"
+    if not (stderr or "").strip():
+        detail += " No stderr was produced, so nothing was written and no output files exist."
+    return detail
+
+
 def _persist_source(code: str, *, filename: str = "executed_code.py") -> List[Dict[str, Any]]:
     """Save the executed source as a downloadable output artifact."""
     from agent_runtime.file_store import create_output_file
@@ -303,6 +331,8 @@ class CodeExecutor:
                 stderr = (str(stderr or "") + f"\n[ignored unsafe dependencies: {rejected}]").strip()
             if stage_errors:
                 stderr = (str(stderr or "") + f"\n[input file staging errors: {stage_errors}]").strip()
+            # Signal-killed runs carry no stderr; surface a cause so the agent can react.
+            error = error or _diagnose_abnormal_exit(exit_code, stderr, error)
             return ExecResult(exit_code, _clip(stdout), _clip(stderr), timed_out, error,
                               artifacts, self.backend, code=(code or ""), installed=deps)
         finally:

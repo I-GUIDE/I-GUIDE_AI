@@ -54,33 +54,25 @@ SYNTHESIS_PROMPT = (
     "NEVER claim the contributor has or hasn't specified related elements unless the Evidence "
     "explicitly states it — absence of related data in the Evidence means you say NOTHING about "
     "related elements, not that none exist.\n"
-    "7. INTERACTIVE MAP: any geographic geometry returned THIS turn by a geo tool (e.g. "
-    "overpass_search features, or spatial results carrying geometry) is AUTOMATICALLY plotted on "
-    "the user's interactive map next to this chat. So NEVER say you could not produce, render, or "
-    "find a map, and never apologize for a missing map image — the features are already shown on "
-    "the map. Simply describe or list them; do not fabricate a map link or a static image."
+    "7. INTERACTIVE MAP: the user has a live map beside this chat, and any geometry produced this "
+    "turn (geo-tool features, or a GeoJSON artifact) is already plotted on it. Describe or list "
+    "those features as results the user can see and click; a statement that no map could be "
+    "produced would simply be false. A static map image is a separate, optional export."
 )
 
 # The two DISTINCT visualization outcomes. Geographic data belongs on the user's live map
 # (a GeoJSON file the client auto-loads); a PNG is a separate, explicitly-requested export.
 # Without this, every "show it on the map" request produced only a downloadable image.
 VISUALIZATION_ROUTES_RULE = (
-    "TWO VISUALIZATION ROUTES — pick by what the user asked for:\n"
-    "  (A) INTERACTIVE MAP (the DEFAULT for geographic data, and required whenever the user "
-    "says load/show/put/display/plot it ON THE MAP, or asks to explore/visualize a spatial "
-    "dataset): output the data as a GeoJSON FILE. PREFER the `vector_to_geojson` tool — its "
-    "output is registered as a downloadable artifact. Only if that tool is unavailable, write "
-    "the file in execute_code (`gdf.to_file('result.geojson', driver='GeoJSON')`) AND make sure "
-    "it is returned as an output file artifact; a file left only in the sandbox working "
-    "directory reaches neither the user nor the map. Any .geojson artifact you produce is "
-    "AUTOMATICALLY loaded as a layer on the user's interactive map. Reproject to EPSG:4326 "
-    "first. Do NOT claim something is 'displayed interactively on the map' unless you actually "
-    "produced a GeoJSON file this turn.\n"
-    "  (B) STATIC IMAGE (only when the user explicitly asks for an image/figure/plot/chart/PNG, "
-    "a printable or downloadable map, or the data is NOT geographic): save a PNG "
-    "(`plt.savefig(...)`, plot_vector, pyqgis_render_map).\n"
-    "Prefer (A) for geographic data; do not produce a PNG as a substitute for putting data on "
-    "the map, and do not do both unless the user asked for an image too.\n"
+    "HOW YOUR OUTPUT IS DISPLAYED (facts about this environment — choose what fits the request):\n"
+    "  • A GeoJSON artifact is loaded as a live layer on the user's interactive map, which they "
+    "can pan, zoom, toggle and click for attributes. `vector_to_geojson` registers its output as "
+    "an artifact; a file written inside execute_code must be returned as an output file to count "
+    "(one left in the sandbox working directory reaches nobody). Web maps expect EPSG:4326.\n"
+    "  • A PNG artifact is shown and downloadable as a static image — right for a figure, chart, "
+    "printable/exported map, or non-geographic plot, but it cannot be explored.\n"
+    "Both are available every turn; pick by what the user actually wants to do with the result, "
+    "and only claim something is on the interactive map if you produced GeoJSON this turn.\n"
 )
 
 ANALYSIS_WORKFLOW_PROMPT = (

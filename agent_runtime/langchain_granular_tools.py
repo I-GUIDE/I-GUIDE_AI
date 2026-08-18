@@ -548,13 +548,14 @@ def make_langchain_granular_tools(
             func=overpass_search_tool,
             name="overpass_search",
             description=(
-                "THE tool for real-world geographic features. Query LIVE OpenStreetMap and return "
-                "features WITH geometry (points/lines/polygons) + OSM tags: rivers, roads, "
-                "hospitals, schools, parks, dams, power plants, railways, buildings, water bodies, "
-                "etc. ALWAYS use this — never keyword/semantic/KB search, opengeodata_search, or "
-                "any web search — when the user asks WHERE features are, what features are IN / NEAR "
-                "/ INTERSECT a place or an uploaded area/geometry, or wants features plotted on a "
-                "map. The I-GUIDE KB does NOT contain this data. "
+                "Query LIVE OpenStreetMap and return real-world features WITH geometry "
+                "(points/lines/polygons) + OSM tags: rivers, roads, hospitals, schools, parks, "
+                "dams, power plants, railways, buildings, water bodies, etc. This is the only "
+                "source here for ground-truth infrastructure — the I-GUIDE knowledge base holds "
+                "datasets and notebooks ABOUT places, not the features themselves, and catalog/web "
+                "search return records and links rather than geometry. So it is the one that "
+                "answers 'where are the X', 'what X are in / near / intersect this area or upload', "
+                "and requests to see features on a map. "
                 "Args: `feature` — a plain word ('hospital', 'river') or a raw OSM filter "
                 "('amenity=school', 'waterway=river'); and a location — `place` (e.g. 'Chicago, "
                 "Illinois', geocoded automatically) OR `bbox` as 'minLon,minLat,maxLon,maxLat'. "
