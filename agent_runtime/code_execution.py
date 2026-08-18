@@ -207,10 +207,38 @@ def _diagnose_abnormal_exit(exit_code: Optional[int], stderr: str, error: Option
     return detail
 
 
-def _persist_source(code: str, *, filename: str = "executed_code.py") -> List[Dict[str, Any]]:
-    """Save the executed source as a downloadable output artifact."""
+def _describe_code(code: str) -> Optional[str]:
+    """A short slug for what a script does, read from the code itself.
+
+    Several execute_code calls in one turn all produced ``executed_code.py``, so the
+    download list showed the same name three or four times with no way to tell which run
+    was which. Prefer the module docstring / first comment (what the author said it does),
+    then the first function name; give up rather than invent something meaningless.
+    """
+    text = str(code or "")
+    m = re.search(r'^\s*(?:"""|\'\'\')\s*(.+)', text) or re.search(r"^\s*#\s*(.+)", text, re.M)
+    if not m:
+        m = re.search(r"^\s*def\s+([A-Za-z_]\w*)", text, re.M)
+    if not m:
+        return None
+    words = re.findall(r"[A-Za-z0-9]+", m.group(1).lower())[:5]
+    slug = "_".join(words)[:48].strip("_")
+    return slug or None
+
+
+def _persist_source(code: str, *, label: Optional[str] = None,
+                    filename: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Save the executed source as a downloadable output artifact.
+
+    Named for what the script does (caller-supplied ``label``, else derived from the
+    code) so repeated runs in one conversation are distinguishable.
+    """
     from agent_runtime.file_store import create_output_file
 
+    if not filename:
+        stem = re.sub(r"[^A-Za-z0-9]+", "_", str(label or "")).strip("_").lower()[:48]
+        stem = stem or _describe_code(code) or "executed_code"
+        filename = f"{stem}.py"
     try:
         rec = create_output_file(filename, code or "")
         return [{
@@ -297,7 +325,8 @@ class CodeExecutor:
     def execute(self, code: str, *, language: str = "python", timeout: Optional[int] = None,
                 env: Optional[Dict[str, str]] = None,
                 dependencies: Optional[List[Any]] = None,
-                input_files: Optional[List[Dict[str, str]]] = None) -> ExecResult:
+                input_files: Optional[List[Dict[str, str]]] = None,
+                label: Optional[str] = None) -> ExecResult:
         if (language or "python").lower() != "python":
             return ExecResult(exit_code=None, error=f"unsupported language: {language}",
                               backend=self.backend, code=(code or ""))
@@ -326,7 +355,8 @@ class CodeExecutor:
             exit_code, stdout, stderr, timed_out, error = self._run(work, timeout, deps)
             # Output files the run produced, plus the executed source itself (downloadable).
             # Staged input files are excluded so uploads aren't re-persisted as outputs.
-            artifacts = [*_persist_source(code or ""), *_persist_artifacts(work, {"script.py", *staged})]
+            artifacts = [*_persist_source(code or "", label=label),
+                         *_persist_artifacts(work, {"script.py", *staged})]
             if rejected:
                 stderr = (str(stderr or "") + f"\n[ignored unsafe dependencies: {rejected}]").strip()
             if stage_errors:

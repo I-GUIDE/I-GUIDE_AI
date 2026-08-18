@@ -122,6 +122,21 @@ def _stage_vector_source(ref: str, sibling_file_ids: Optional[List[str]],
     return str(path), None
 
 
+def artifact_name(stem: Optional[str], suffix: str, *, source: Optional[str] = None,
+                  default: str = "output") -> str:
+    """A short, purpose-bearing filename: ``<stem>.<suffix>``.
+
+    Every run used to emit the same handful of fixed names (``vector.geojson``,
+    ``vector_plot.png``, ``executed_code.py``), so a conversation ended up with several
+    identical entries in its download list and no way to tell them apart. Prefer a name
+    the caller supplies; otherwise fall back to the input file's own stem, which is
+    already meaningful (``chicago_tracts.zip`` -> ``chicago_tracts.geojson``).
+    """
+    raw = (stem or "").strip() or Path(str(source or "")).stem or default
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", raw).strip("_").lower()[:48] or default
+    return f"{slug}.{suffix.lstrip('.')}"
+
+
 def _epsg(crs: Any) -> Optional[str]:
     if crs is None:
         return None
@@ -342,9 +357,13 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
 
     def plot_vector(file_id: str, column: Optional[str] = None,
                     sibling_file_ids: Optional[List[str]] = None, layer: Optional[str] = None,
-                    max_features: int = 50000, cmap: str = "viridis", title: Optional[str] = None) -> str:
+                    max_features: int = 50000, cmap: str = "viridis", title: Optional[str] = None,
+                    name: Optional[str] = None) -> str:
         """Render a vector dataset to a PNG map and return a downloadable file_id. Pass
-        `column` for a choropleth. Large layers are downsampled to `max_features`. """
+        `column` for a choropleth. Large layers are downsampled to `max_features`.
+        `name` is a short slug describing what the map shows (e.g. "chicago_rivers"); it
+        becomes the download filename, so several maps in one conversation stay tellable
+        apart. Defaults to the input file's own name. """
         tmp = None
         png = None
         try:
@@ -371,7 +390,9 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             os.close(fd)
             fig.savefig(png, bbox_inches="tight", dpi=150)
             plt.close(fig)
-            rec = create_output_file_from_path(png, filename="vector_plot.png")
+            rec = create_output_file_from_path(
+                png, filename=artifact_name(name, "png", source=str(read_path),
+                                            default="vector_plot"))
             return json.dumps({
                 "ok": True, "file_id": rec["file_id"], "filename": rec.get("filename"),
                 "download_url": rec.get("download_url"),
@@ -388,9 +409,12 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                 shutil.rmtree(tmp, ignore_errors=True)
 
     def vector_to_geojson(file_id: str, sibling_file_ids: Optional[List[str]] = None,
-                          layer: Optional[str] = None, target_crs: str = "EPSG:4326") -> str:
+                          layer: Optional[str] = None, target_crs: str = "EPSG:4326",
+                          name: Optional[str] = None) -> str:
         """Convert a vector dataset to GeoJSON (reprojected to target_crs, default WGS84)
-        and return a downloadable file_id. """
+        and return a downloadable file_id. `name` is a short slug describing the contents
+        (e.g. "chicago_rivers"); it becomes the download filename and the map layer label.
+        Defaults to the input file's own name. """
         tmp = None
         out = None
         try:
@@ -401,9 +425,11 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             gdf = read_vector(read_path, layer)
             if target_crs and getattr(gdf, "crs", None) is not None:
                 gdf = gdf.to_crs(target_crs)
-            out = Path(tempfile.mkdtemp(prefix="vec_gj_")) / "vector.geojson"
+            fname = artifact_name(name, "geojson", source=str(read_path),
+                                  default="vector")
+            out = Path(tempfile.mkdtemp(prefix="vec_gj_")) / fname
             gdf.to_file(out, driver="GeoJSON")
-            rec = create_output_file_from_path(out, filename="vector.geojson")
+            rec = create_output_file_from_path(out, filename=fname)
             return json.dumps({
                 "ok": True, "file_id": rec["file_id"], "filename": rec.get("filename"),
                 "download_url": rec.get("download_url"),

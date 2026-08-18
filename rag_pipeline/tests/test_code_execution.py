@@ -383,3 +383,28 @@ def test_unavailable_work_root_returns_tool_error_not_crash(monkeypatch, tmp_pat
     assert res.exit_code is None
     assert "work dir unavailable" in (res.error or "")
     assert "AGENT_CODE_EXEC_WORK_ROOT" in (res.error or "")
+
+
+# --- artifacts are named for their purpose, not a fixed constant -----------------
+
+def test_saved_source_is_named_for_what_the_run_does():
+    """Several runs in one turn used to all arrive as `executed_code.py`."""
+    from agent_runtime.code_execution import _describe_code, _persist_source
+
+    assert _describe_code('"""Convert the uploaded CSV to GeoJSON."""\n') == "convert_the_uploaded_csv_to"
+    assert _describe_code("# buffer the rivers by 2 km\n") == "buffer_the_rivers_by_2"
+    assert _describe_code("def compute_flood_risk(x):\n    return x\n") == "compute_flood_risk"
+    assert _describe_code("import json\nprint(1)\n") is None      # nothing to go on
+
+    assert _persist_source("print(1)", label="CSV to GeoJSON")[0]["filename"] == "csv_to_geojson.py"
+    assert _persist_source('"""Plot rivers."""\n')[0]["filename"] == "plot_rivers.py"
+    assert _persist_source("print(1)")[0]["filename"] == "executed_code.py"   # last resort
+
+
+def test_geo_artifact_name_prefers_caller_then_source():
+    from agent_runtime.langchain_geo_tools import artifact_name
+
+    assert artifact_name("Chicago Rivers", "geojson", source="upload.zip") == "chicago_rivers.geojson"
+    assert artifact_name(None, "geojson", source="chicago_tracts.zip") == "chicago_tracts.geojson"
+    assert artifact_name(None, "png", source=None, default="vector_plot") == "vector_plot.png"
+    assert artifact_name(None, ".png", source="/vsizip//tmp/a/rivers.zip") == "rivers.png"

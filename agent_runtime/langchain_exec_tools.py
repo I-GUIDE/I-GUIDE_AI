@@ -122,6 +122,7 @@ def make_code_execution_tools(
         timeout_seconds: int = DEFAULT_TIMEOUT,
         dependencies: Optional[List[str]] = None,
         input_files: Optional[List[str]] = None,
+        label: Optional[str] = None,
     ) -> str:
         ex = executor or get_code_executor()
 
@@ -131,12 +132,16 @@ def make_code_execution_tools(
         refs = list(dict.fromkeys([*default_ids, *explicit]))
         staging, staged_info, input_errors, skipped = _build_staging(refs)
 
+        # `label` only names the saved source, so pass it optionally: an executor
+        # implementing the older signature (or a test double) still works.
+        extra = {"label": label} if label else {}
         result = ex.execute(
             code,
             language=language,
             timeout=timeout_seconds,
             dependencies=dependencies,
             input_files=staging,
+            **extra,
         )
         payload = result.to_dict()
         if staged_info:
@@ -153,7 +158,7 @@ def make_code_execution_tools(
         description=(
             "Execute code in an isolated, sandboxed container and return JSON with "
             "exit_code, stdout, stderr, timed_out, the executed `code`, `installed`, and "
-            "`artifacts` (the source is saved as a downloadable `executed_code.py`, plus "
+            "`artifacts` (the source is saved as a downloadable .py named from `label`, plus "
             "any files the run wrote). Pass `dependencies` (a list of pip specs, e.g. "
             "[\"numpy\", \"pandas==2.2\"]) to install third-party packages before running — "
             "they are installed with network in a separate step, then the code runs with NO "
@@ -161,7 +166,11 @@ def make_code_execution_tools(
             "working directory under both their file_id and their original filename (e.g. "
             "open('data.csv') or pd.read_csv('data.csv')). To read any other uploaded file, "
             "add its file_id to `input_files`. Use this to RUN and DEBUG code: run, read "
-            "stdout/stderr, fix, re-run."
+            "stdout/stderr, fix, re-run. `label` is a short slug for what this particular run "
+            "does (e.g. \"csv_to_geojson\", \"rivers_buffer\") and becomes the saved source's "
+            "filename — several runs in one conversation otherwise arrive as identically-named "
+            "downloads; name the files your code writes for their contents too, for the same "
+            "reason."
         ),
     )
     return [tool]
