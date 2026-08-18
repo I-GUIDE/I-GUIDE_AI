@@ -23,8 +23,17 @@ export interface StreamHandlers {
   onToolCall?: (name: string, args: any) => void;      // e.g. spatial_search({bbox})
   onToolResult?: (name: string, parsed: any, raw: any) => void;
   onFile?: (files: FileRecord[]) => void;              // artifacts as they appear (deduped)
+  onMapLayer?: (layer: MapLayerEvent) => void;         // untruncated geometry to plot live
   onAnswerChunk?: (text: string) => void;              // answer text when it arrives
   onIds?: (ids: { threadId?: string; memoryId?: string }) => void;
+}
+
+export interface MapLayerEvent {
+  id: string;
+  source: string;
+  label: string;
+  count?: number;
+  geojson: import('geojson').FeatureCollection;
 }
 
 export interface StreamResult {
@@ -194,6 +203,19 @@ export async function streamChat(
       case 'answer': {
         const t = p.final_answer || p.answer || p.detail?.final_answer || p.detail?.answer;
         if (t) { state.answer = t; h.onAnswerChunk?.(t); }
+        break;
+      }
+      case 'map_layer': {
+        const layer = (p.geojson ? p : p.detail) || {};
+        if (layer.geojson && Array.isArray(layer.geojson.features)) {
+          h.onMapLayer?.({
+            id: layer.id || 'agent-layer',
+            source: layer.source || 'analysis',
+            label: layer.label || 'Agent layer',
+            count: layer.count,
+            geojson: layer.geojson,
+          });
+        }
         break;
       }
       case 'response':

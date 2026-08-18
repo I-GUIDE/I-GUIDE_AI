@@ -108,6 +108,18 @@ export default function App() {
           if (fc.features.length) putLayer({ kind: 'geojson', id: `live-${name}`, source: 'kb', label: `${name} (preview)`, data: fc, style: { fill: [124, 58, 237, 180], line: [255, 255, 255, 255], pointRadius: 6, lineWidth: 2 } });
         },
         onFile: (files) => patch({ artifacts: files }),
+        onMapLayer: (layer) => {
+          const green = layer.source === 'overpass';
+          putLayer({
+            kind: 'geojson', id: layer.id, source: (layer.source as any) || 'analysis', label: layer.label,
+            data: layer.geojson, fitBounds: true,
+            style: green
+              ? { fill: [16, 185, 129, 120], line: [16, 185, 129, 255], lineWidth: 3, pointRadius: 5 }
+              : { fill: [124, 58, 237, 120], line: [124, 58, 237, 255], lineWidth: 2, pointRadius: 6 },
+          });
+          fitView(layer.geojson);
+          addTrace({ text: `map: +${layer.count ?? layer.geojson.features.length} feature(s) — ${layer.label}`, kind: 'tool' });
+        },
         onIds: ({ threadId, memoryId }) => { if (threadId) threadRef.current = threadId; if (memoryId) memoryRef.current = memoryId; },
       });
       pendingFileIds.current = []; // attached to the thread server-side now
