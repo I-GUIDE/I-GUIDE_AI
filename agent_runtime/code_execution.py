@@ -344,6 +344,32 @@ def _session_workspace(session: Optional[str]) -> Optional[Path]:
         return None
 
 
+def session_workspace_listing(session: Optional[str], *, limit: int = 25) -> List[Dict[str, Any]]:
+    """What earlier runs in this conversation left behind: ``[{name, size_bytes}]``.
+
+    A durable workspace is only useful if the model knows what is in it. Without this,
+    a steer like "now do a heatmap of that" makes the peer rebuild the dataset it already
+    has on disk — or claim it cannot, because nothing told it the file is there.
+    """
+    ws = _session_workspace(session)
+    if ws is None:
+        return []
+    items: List[Dict[str, Any]] = []
+    for p in sorted(ws.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(ws)
+        if rel.parts and rel.parts[0] in {"__pycache__", DEPS_DIRNAME, PIPTMP_DIRNAME}:
+            continue
+        try:
+            items.append({"name": str(rel), "size_bytes": p.stat().st_size})
+        except OSError:
+            continue
+        if len(items) >= limit:
+            break
+    return items
+
+
 def _stat_map(directory: Path) -> Dict[str, Tuple[int, int]]:
     """(size, mtime_ns) per relative path — used to tell new/changed files from carried ones."""
     out: Dict[str, Tuple[int, int]] = {}

@@ -1847,6 +1847,19 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
             parts.append(
                 f"Analysis results:\n{json.dumps(state['analysis_results'], ensure_ascii=True, default=str)[:1500]}"
             )
+        # What earlier runs in this conversation left on disk. Without this the peer
+        # rebuilds work it already has — especially after the user steers ("now a heatmap
+        # of that"), where "that" is a file the previous step wrote.
+        try:
+            from agent_runtime.code_execution import session_workspace_listing
+            existing = session_workspace_listing(child_thread_id(state.get("thread_id"), "codeexec"))
+            if existing:
+                parts.append(
+                    "Already in this conversation's working directory (open them directly in "
+                    "execute_code; no need to rebuild):\n"
+                    + "\n".join(f"- {f['name']} ({f['size_bytes']} bytes)" for f in existing))
+        except Exception:
+            pass
         # See analyze peer: continuity is owned by this peer's checkpointed thread,
         # so chat_history is not re-fed here (avoids double-replay on re-runs).
         resp = invoke_agent_with_payload_fallback(
