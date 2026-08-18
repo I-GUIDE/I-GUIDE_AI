@@ -53,7 +53,12 @@ SYNTHESIS_PROMPT = (
     "NOT add related-element sections to other answers (e.g. an explain/describe request), and "
     "NEVER claim the contributor has or hasn't specified related elements unless the Evidence "
     "explicitly states it — absence of related data in the Evidence means you say NOTHING about "
-    "related elements, not that none exist."
+    "related elements, not that none exist.\n"
+    "7. INTERACTIVE MAP: any geographic geometry returned THIS turn by a geo tool (e.g. "
+    "overpass_search features, or spatial results carrying geometry) is AUTOMATICALLY plotted on "
+    "the user's interactive map next to this chat. So NEVER say you could not produce, render, or "
+    "find a map, and never apologize for a missing map image — the features are already shown on "
+    "the map. Simply describe or list them; do not fabricate a map link or a static image."
 )
 
 ANALYSIS_WORKFLOW_PROMPT = (

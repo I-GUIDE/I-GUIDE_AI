@@ -465,11 +465,14 @@ def make_langchain_qgis_tools(*, session_id: Optional[str] = None) -> List[Any]:
                 func=pyqgis_render_map,
                 name="pyqgis_render_map",
                 description=(
-                    "Render vector/raster layer paths to a PNG using standalone headless PyQGIS in an isolated "
-                    "per-session job directory. layers_json may contain uploaded file_id strings or objects with "
-                    "path/layer_path, optional name, and provider ('ogr' for vector or 'gdal' for raster). Set "
-                    "basemap='osm' to draw an OpenStreetMap XYZ background under the data. Returns managed_output "
-                    "with file_id and download_url when rendering succeeds."
+                    "Render vector/raster layer FILES to a static PNG using standalone headless PyQGIS. Use ONLY "
+                    "when the user explicitly wants a downloadable/exported map image or a styled cartographic "
+                    "figure of layer FILES (uploads/rasters). Do NOT use it to 'show a map' of features from "
+                    "overpass_search or other geo tools — that geometry is already plotted live on the user's "
+                    "interactive map, so a static render is redundant (and will fail without a layer file). "
+                    "layers_json may contain uploaded file_id strings or objects with path/layer_path, optional "
+                    "name, and provider ('ogr' for vector or 'gdal' for raster). Set basemap='osm' for an "
+                    "OpenStreetMap background. Returns managed_output with file_id and download_url on success."
                 ),
                 metadata={"category": "spatial_analysis"},
             ),
@@ -557,6 +560,8 @@ def make_langchain_granular_tools(
                 "Illinois', geocoded automatically) OR `bbox` as 'minLon,minLat,maxLon,maxLat'. "
                 "For an UPLOADED file, pass the file's bounding box as `bbox` (read it first with a "
                 "geo/file tool or execute_code if you don't already have it). "
+                "The geometry you get back is plotted AUTOMATICALLY on the user's interactive map — do "
+                "NOT also call a map-rendering tool (e.g. pyqgis_render_map) for it. "
                 "Returns JSON: {count, features:[{name, lat, lon, feature_type, tags, geometry}]}."
             ),
             metadata={"category": "retrieval_external"},
