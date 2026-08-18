@@ -29,6 +29,9 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+# Above this, a GeoJSON is too bulky to ship and parquet is written instead.
+_GEOJSON_MAX_FEATURES = int(os.getenv("AGENT_GEOJSON_MAX_FEATURES", "60000"))
+
 _SELF_CONTAINED = {".geojson", ".json", ".gpkg", ".parquet", ".geoparquet", ".fgb", ".kml"}
 # Components of an (extracted) ESRI shapefile set — any one of these is enough to reference it.
 _SHAPE_PARTS = {".shp", ".shx", ".dbf", ".prj", ".cpg", ".qix", ".sbn", ".sbx", ".qpj", ".aih", ".ain"}
@@ -252,6 +255,18 @@ def read_vector(read_path: Any, layer: Optional[str] = None) -> Any:
     import geopandas as gpd
 
     gdf = None
+    # GDAL (read_file) cannot open (geo)parquet, and these tools WRITE parquet —
+    # vector_spatial_join / reproject_vector emit it — so without this branch a tool's own
+    # output is unreadable by every other tool in the set: an observed spatial join produced
+    # 128,464 joined features that inspect_vector, plot_vector and pyqgis_layer_summary all
+    # then refused as "not recognized as being in a supported file format".
+    if str(read_path).lower().endswith((".parquet", ".geoparquet")):
+        try:
+            return gpd.read_parquet(read_path)
+        except Exception:
+            import pandas as pd
+
+            return dataframe_to_points(pd.read_parquet(read_path))
     try:
         gdf = gpd.read_file(read_path, layer=layer) if layer else gpd.read_file(read_path)
     except Exception as exc:
@@ -307,6 +322,21 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
         try:
             import pyogrio
             read_path, tmp = _stage(file_id, sibling_file_ids)
+            # pyogrio/GDAL cannot open (geo)parquet, but these tools WRITE it and this
+            # docstring promises to accept it — read those through geopandas instead of
+            # reporting a tool's own output as an unsupported format.
+            if str(read_path).lower().endswith((".parquet", ".geoparquet")):
+                gdf = read_vector(read_path, layer)
+                geom_types = sorted({str(t) for t in gdf.geometry.geom_type.unique()}) if hasattr(gdf, "geometry") else []
+                tb = gdf.total_bounds
+                return json.dumps({
+                    "ok": True, "driver": "Parquet", "layers": [],
+                    "feature_count": int(len(gdf)),
+                    "geometry_type": geom_types[0] if len(geom_types) == 1 else (geom_types or None),
+                    "crs": _epsg(getattr(gdf, "crs", None)),
+                    "columns": [{"name": str(c), "dtype": str(gdf[c].dtype)} for c in gdf.columns],
+                    "bounds": [float(x) for x in tb],
+                }, default=str)
             try:
                 layers = [str(n) for n in (pyogrio.list_layers(read_path)[:, 0])]
             except Exception:
@@ -477,7 +507,8 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
     def vector_spatial_join(left_file_id: str, right_file_id: str, how: str = "inner",
                             predicate: str = "intersects",
                             left_siblings: Optional[List[str]] = None,
-                            right_siblings: Optional[List[str]] = None) -> str:
+                            right_siblings: Optional[List[str]] = None,
+                            name: Optional[str] = None) -> str:
         """Spatial-join two vector datasets (e.g. points-in-TIGER-polygons). how:
         inner|left|right; predicate: intersects|within|contains. Returns a downloadable
         GeoParquet file_id of the joined result. """
@@ -498,11 +529,21 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             else:
                 note = "one or both inputs lack a CRS; join performed without reprojection"
             joined = gpd.sjoin(left, right, how=how, predicate=predicate)
-            out = Path(tempfile.mkdtemp(prefix="vec_sj_")) / "spatial_join.parquet"
-            joined.to_parquet(out)
-            rec = create_output_file_from_path(out, filename="spatial_join.parquet")
+            # GeoJSON unless the result is big enough that parquet earns its keep: a
+            # .geojson artifact is readable by every other tool AND auto-loads on the
+            # user's map, whereas parquet is a dead end for both.
+            as_geojson = len(joined) <= _GEOJSON_MAX_FEATURES
+            suffix = "geojson" if as_geojson else "parquet"
+            fname = artifact_name(name, suffix, source=str(lp), default="spatial_join")
+            out = Path(tempfile.mkdtemp(prefix="vec_sj_")) / fname
+            if as_geojson:
+                joined.to_crs("EPSG:4326").to_file(out, driver="GeoJSON")
+            else:
+                joined.to_parquet(out)
+            rec = create_output_file_from_path(out, filename=fname)
             res = {"ok": True, "file_id": rec["file_id"], "filename": rec.get("filename"),
-                   "download_url": rec.get("download_url"),
+                   "download_url": rec.get("download_url"), "format": suffix,
+                   "on_map": as_geojson,
                    "feature_count": int(len(joined)), "crs": _epsg(getattr(joined, "crs", None))}
             if note:
                 res["note"] = note
