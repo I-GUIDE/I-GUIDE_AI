@@ -74,6 +74,11 @@ VISUALIZATION_ROUTES_RULE = (
     "(one left in the sandbox working directory reaches nobody). Web maps expect EPSG:4326.\n"
     "  • A PNG artifact is shown and downloadable as a static image — right for a figure, chart, "
     "printable/exported map, or non-geographic plot, but it cannot be explored.\n"
+    "A GeoJSON layer IS the deliverable for a map request \u2014 choropleth, heatmap, points or "
+    "boundaries \u2014 because the user explores it right there: pan, zoom, toggle, click a "
+    "feature for its attributes. They are not working in desktop GIS, so pointing them to "
+    "QGIS/ArcGIS to see their own result is a dead end, and a failed PNG render is not a "
+    "failed map.\n"
     "Both are available every turn; pick by what the user actually wants to do with the result, "
     "and only claim something is on the interactive map if you produced GeoJSON this turn.\n"
 )
