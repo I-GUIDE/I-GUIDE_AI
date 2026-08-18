@@ -134,8 +134,13 @@ export default function App() {
           : { type: 'FeatureCollection', features: [] };
         if (!fc.features.length) continue;
         const label = (f.filename || 'result').replace(/\.(geo)?json$/i, '');
+        // Key the LAYER by filename, not file_id: when the agent regenerates the same
+        // output (a retry, or a second pass over the same step) it gets a new file_id but
+        // the same name, and the user should see one updated layer rather than two
+        // identical ones stacked on the map.
+        const layerId = `artifact-${label.toLowerCase().replace(/[^a-z0-9]+/g, '_')}`;
         putLayer({
-          kind: 'geojson', id: `artifact-${key}`, source: 'analysis', label: `${label}`,
+          kind: 'geojson', id: layerId, source: 'analysis', label: `${label}`,
           data: fc, fitBounds: true,
           style: { fill: [201, 138, 26, 110], line: [201, 138, 26, 255], lineWidth: 2, pointRadius: 5 },
         });
