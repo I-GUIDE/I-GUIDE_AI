@@ -171,6 +171,17 @@ def opengeodata_search_tool(query: str, limit: int = 8, session_context_json: Op
     return _build_payload(hits, source="opengeodata")
 
 
+def overpass_search_tool(feature: str, place: str = "", bbox: str = "", limit: int = 60) -> str:
+    """Query live OpenStreetMap features of a given type inside a place or bbox.
+
+    Returns JSON with real geometry (points/lines/polygons) + OSM tags per feature.
+    """
+    from rag_pipeline.search.overpass import overpass_search
+
+    result = overpass_search(feature, place=place or None, bbox=bbox or None, limit=limit)
+    return json.dumps(result, ensure_ascii=True, default=str)
+
+
 def web_search_tool(query: str, limit: int = 6, recency_days: Optional[int] = None) -> str:
     """Open-web search: METADATA ONLY (title, url, snippet). Reading a page is a separate step."""
     result = run_web_search(
@@ -499,6 +510,22 @@ def make_langchain_granular_tools(
             metadata={"category": "retrieval_external"},
         ),
         StructuredTool.from_function(
+            func=overpass_search_tool,
+            name="overpass_search",
+            description=(
+                "Query LIVE OpenStreetMap for real-world features and return them WITH geometry "
+                "(points/lines/polygons) + OSM tags — ground-truth infrastructure the I-GUIDE KB "
+                "does NOT hold: rivers, roads, hospitals, schools, parks, dams, power plants, "
+                "railways, buildings, water bodies, etc. Args: `feature` (a plain word like "
+                "'hospital' or 'river', or a raw OSM filter like 'amenity=school'/'waterway=river') "
+                "and a location — either `place` (e.g. 'Cook County, Illinois', geocoded here) or "
+                "`bbox` as 'minLon,minLat,maxLon,maxLat'. Use for 'where are the X in Y', for "
+                "features that intersect an uploaded area, or to get plottable geometry for a map. "
+                "Returns JSON: {count, features:[{name, lat, lon, feature_type, tags, geometry}]}."
+            ),
+            metadata={"category": "retrieval_external"},
+        ),
+        StructuredTool.from_function(
             func=web_search_tool,
             name="web_search",
             description=(
@@ -584,6 +611,7 @@ __all__ = [
     "spatial_search_tool",
     "opengeodata_search_tool",
     "web_search_tool",
+    "overpass_search_tool",
     "web_fetch_tool",
     "pyqgis_layer_summary_tool",
     "pyqgis_render_map_tool",
