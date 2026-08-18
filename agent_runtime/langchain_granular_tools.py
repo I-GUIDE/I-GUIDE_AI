@@ -174,11 +174,43 @@ def opengeodata_search_tool(query: str, limit: int = 8, session_context_json: Op
 def overpass_search_tool(feature: str, place: str = "", bbox: str = "", limit: int = 60) -> str:
     """Query live OpenStreetMap features of a given type inside a place or bbox.
 
-    Returns JSON with real geometry (points/lines/polygons) + OSM tags per feature.
+    Returns JSON with real geometry (points/lines/polygons) + OSM tags per feature
+    AND an evidence-shaped ``documents`` list, so the found features count as grounding
+    evidence for the answer (not just as map geometry).
     """
     from rag_pipeline.search.overpass import overpass_search
 
     result = overpass_search(feature, place=place or None, bbox=bbox or None, limit=limit)
+
+    # Project features into evidence documents so the synthesis/grounding audit treats
+    # "these features exist here" as grounded. Dedupe by name (rivers/roads come back as
+    # many segments sharing one name) and cap to keep the evidence set focused.
+    query = result.get("query") or {}
+    where = query.get("place") or (f"bbox {query.get('bbox')}" if query.get("bbox") else "the requested area")
+    documents: List[Dict[str, Any]] = []
+    seen_names: set = set()
+    for feat in result.get("features") or []:
+        name = str(feat.get("name") or "(unnamed)")
+        ftype = str(feat.get("feature_type") or feature)
+        key = f"{name}|{ftype}"
+        if key in seen_names:
+            continue
+        seen_names.add(key)
+        osm_ref = f"{feat.get('osm_type', 'osm')}/{feat.get('osm_id', '')}"
+        documents.append({
+            "doc_id": f"osm:{osm_ref}",
+            "title": name,
+            "contents": f"{name} — OpenStreetMap {ftype} located in {where} (lat {feat.get('lat')}, lon {feat.get('lon')}).",
+            "source": "overpass",
+            "element_type": "osm_feature",
+            "url": f"https://www.openstreetmap.org/{osm_ref}" if feat.get("osm_id") else "",
+        })
+        if len(documents) >= 40:
+            break
+
+    result["source"] = "overpass"
+    result["documents"] = documents
+    result["citation_ids"] = [d["doc_id"] for d in documents]
     return json.dumps(result, ensure_ascii=True, default=str)
 
 
