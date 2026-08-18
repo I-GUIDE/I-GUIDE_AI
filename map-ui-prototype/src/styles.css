@@ -9,12 +9,63 @@ html, body, #root { margin: 0; height: 100%; }
 body { background: var(--bg); color: var(--ink); font: 15px/1.6 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
 a { color: var(--link); }
 
-/* layout: map + chat, progressive */
-.app { display: flex; height: 100vh; width: 100vw; overflow: hidden; }
+/* layout: top nav + workspace (left panel + map + chat), progressive */
+.app { display: flex; flex-direction: column; height: 100vh; width: 100vw; overflow: hidden; }
+.workspace { flex: 1; display: flex; min-height: 0; position: relative; }
 .mapwrap { flex: 1; position: relative; min-width: 0; }
 .app.chat-only .mapwrap { display: none; }
-.chat { height: 100%; width: 460px; flex: none; background: var(--bg); border-left: 1px solid var(--line); display: flex; flex-direction: column; z-index: 10; }
+.chat { height: 100%; width: 460px; flex: none; background: var(--bg); border-left: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
 .app.chat-only .chat { flex: 1; width: auto; max-width: 900px; margin: 0 auto; border-left: none; }
+
+/* top nav bar (reference chrome; nav items are placeholders) */
+.bar { padding: 12px 16px 6px; }
+.bar-inner { max-width: 1400px; margin: 0 auto; background: #fff; border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); display: flex; align-items: center; gap: 18px; padding: 8px 16px; }
+.brand { display: flex; align-items: center; gap: 9px; font-weight: 700; }
+.brand .caret, .top .caret { color: #9aa0a6; font-size: 11px; }
+.top { display: flex; gap: 20px; font-weight: 600; color: #2b2f36; font-size: 14px; }
+.top span { cursor: default; white-space: nowrap; }
+.grow { flex: 1; }
+.navsearch { display: flex; align-items: center; gap: 8px; background: #f1f2f3; border-radius: 999px; padding: 7px 14px; color: #9aa0a6; min-width: 180px; }
+.navsearch .mag { font-size: 15px; }
+.navsearch input { border: 0; background: transparent; outline: 0; color: var(--ink); width: 100%; font-size: 14px; }
+.navbtn { font-size: 12px; padding: 5px 11px; }
+.navbtn.gear { border: 0; box-shadow: none; background: none; font-size: 16px; color: var(--muted); }
+.jpy { width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--line); display: grid; place-items: center; font-size: 11px; color: #f37726; font-weight: 700; }
+.avatar { width: 34px; height: 34px; border-radius: 50%; background: linear-gradient(135deg, #7a8b3a, #c9b15a); border: 2px solid #fff; box-shadow: 0 0 0 1px var(--line); }
+@media (max-width: 900px) { .top, .navsearch { display: none; } }
+
+/* left panel: layer manager + feature inspector — floats over the map so it never
+   steals the map's width (standard map-app pattern). */
+.leftpanel { position: absolute; top: 12px; left: 12px; z-index: 5; width: 288px; max-height: calc(100% - 24px);
+  background: #fff; border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow);
+  display: flex; flex-direction: column; overflow-y: auto; }
+.leftpanel section { padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.leftpanel h3 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: #6b7280; display: flex; align-items: center; gap: 8px; }
+.leftpanel h3 .cnt { background: var(--soft); border-radius: 10px; padding: 0 7px; font-size: 11px; color: #9aa0a6; font-weight: 600; }
+.leftpanel h3 .x { margin-left: auto; }
+.lp-hint { font-size: 12px; color: #9aa0a6; margin: 0; }
+.lp-layers ul { list-style: none; margin: 0; padding: 0; }
+.lp-layers li { display: flex; align-items: center; gap: 7px; padding: 5px 0; }
+.lp-layers li.off .lname, .lp-layers li.off .dot { opacity: .4; }
+.lp-layers .eye { border: 0; background: none; box-shadow: none; padding: 0 2px; font-size: 13px; cursor: pointer; }
+.lp-layers .lname { flex: 1; border: 0; background: none; box-shadow: none; text-align: left; padding: 0; font-size: 13px; color: #2f3437; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.lp-layers .lname:hover { text-decoration: underline; }
+.lp-layers .cnt { font-size: 11px; color: #9aa0a6; background: var(--soft); border-radius: 8px; padding: 0 6px; }
+.leftpanel .x { border: 0; background: none; box-shadow: none; color: #b7bcc2; font-size: 15px; line-height: 1; padding: 0 3px; cursor: pointer; }
+.leftpanel .x:hover { color: #d1495b; }
+.fdetail .ftitle { font-size: 14px; font-weight: 700; color: #2f3437; }
+.fdetail .fsub { font-size: 11px; color: #9aa0a6; margin-bottom: 6px; }
+.ftable { width: 100%; border-collapse: collapse; font-size: 12px; }
+.ftable th { text-align: left; color: #6b7280; font-weight: 600; padding: 3px 8px 3px 0; vertical-align: top; white-space: nowrap; }
+.ftable td { color: #2f3437; padding: 3px 0; word-break: break-word; }
+.ftable tr { border-top: 1px dashed var(--line); }
+
+/* composer attach + footer */
+.circle.attach { color: #6b7280; }
+.footline { display: flex; align-items: center; gap: 10px; margin-top: 8px; flex-wrap: wrap; }
+.footline .conn { border: 0; background: none; box-shadow: none; color: #9aa0a6; font-size: 12px; padding: 0; cursor: pointer; }
+.footline .conn:hover { text-decoration: underline; background: none; }
+.footline .terms { flex: 1; text-align: center; color: #b7bcc2; font-size: 11.5px; }
 
 /* header */
 .chat header { display: flex; align-items: center; gap: 10px; padding: 14px 18px 8px; }

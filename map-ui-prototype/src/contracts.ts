@@ -35,6 +35,7 @@ export type LayerArtifact =
       render?: 'geojson' | 'heatmap' | 'points';
       legend?: Legend[];
       fitBounds?: boolean;
+      visible?: boolean;
     };
 
 export interface MapUpdate {

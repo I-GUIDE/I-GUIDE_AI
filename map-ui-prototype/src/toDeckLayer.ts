@@ -26,6 +26,7 @@ export function toDeckLayer(a: LayerArtifact) {
       .map((c) => ({ position: c, weight: 1 }));
     return new HeatmapLayer({
       id: a.id,
+      visible: a.visible !== false,
       data: pts,
       getPosition: (d: any) => d.position,
       getWeight: (d: any) => d.weight,
@@ -39,6 +40,7 @@ export function toDeckLayer(a: LayerArtifact) {
   return new GeoJsonLayer({
     id: a.id,
     data: a.data,
+    visible: a.visible !== false,
     pickable: true,
     stroked: true,
     filled: true,

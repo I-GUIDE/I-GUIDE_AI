@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Feature, FeatureCollection, Polygon, Geometry } from 'geojson';
 import { AgentMap } from './components/AgentMap';
 import { ChatPanel, type ChatMessage, type Mode, type AgentCfg } from './components/ChatPanel';
+import { TopNav } from './components/TopNav';
+import { LeftPanel, type SelectedFeature } from './components/LeftPanel';
 import type { LayerArtifact } from './contracts';
 import { parseIntent } from './agentBrain';
 import { searchKb, kbHitsToFeatureCollections, type KbHit } from './mockKb';
@@ -58,6 +60,8 @@ export default function App() {
   const [cfg, setCfg] = useState<AgentCfg>(init.cfg);
   const [spatial, setSpatial] = useState<boolean>(init.spatial);
   const [mapVisible, setMapVisible] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [selected, setSelected] = useState<SelectedFeature | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([
     { role: 'agent', text: "Hi — I'm the I-GUIDE agent. Ask me anything. Turn on Spatial tools (⚙) to search geodata and draw regions; the map opens on its own when I return geometry." },
   ]);
@@ -93,6 +97,24 @@ export default function App() {
   const fitView = useCallback((fc: FeatureCollection) => {
     const m = (window as any).__map; if (!m || !fc.features.length) return;
     try { const [w, s, e, n] = layerBBox(fc); m.fitBounds([[w, s], [e, n]], { padding: 80, duration: 800, maxZoom: 14 }); } catch { /* */ }
+  }, []);
+
+  // --- layer management + feature inspection (left panel) ---
+  const toggleLayer = useCallback((id: string) => {
+    setLayers((prev) => prev.map((l) => (l.id === id ? { ...l, visible: !(l.visible !== false) } : l)));
+  }, []);
+  const removeLayerById = useCallback((id: string) => {
+    setLayers((prev) => prev.filter((l) => l.id !== id));
+  }, []);
+  const fitLayer = useCallback((id: string) => {
+    const l = layersRef.current.find((x) => x.id === id);
+    if (l) fitView(l.data);
+  }, [fitView]);
+  const onFeatureClick = useCallback((feature: any, layerId: string) => {
+    const props = (feature && feature.properties) || {};
+    const layer = layersRef.current.find((l) => l.id === layerId);
+    const name = props.name || props.title || props.id || props.doc_id || '(feature)';
+    setSelected({ name: String(name), layerLabel: layer?.label || layerId, properties: props });
   }, []);
 
   const onMapClick = useCallback((lng: number, lat: number) => {
@@ -258,21 +280,34 @@ export default function App() {
 
   return (
     <div className={`app ${mapVisible ? 'map-on' : 'chat-only'}`}>
-      <div className="mapwrap">
-        <AgentMap layers={layers} drawnRegion={drawnRegion} drawPreview={drawPreview} drawMode={drawMode} onMapClick={onMapClick} onHover={() => {}} />
-      </div>
-      <ChatPanel
-        messages={messages} busy={busy} drawMode={drawMode} hasRegion={!!drawnRegion} layers={layers}
-        mode={mode} cfg={cfg} spatial={spatial} mapVisible={mapVisible} resolveUrl={resolveUrl}
-        onSend={runAgent}
-        onToggleDraw={() => { setDrawMode((d) => !d); firstCorner.current = null; }}
-        onClearRegion={() => { setDrawnRegion(null); pushMsg({ role: 'agent', text: 'Region cleared.' }); }}
-        onUpload={onUpload}
-        onClearAll={() => { setLayers([]); pushMsg({ role: 'agent', text: 'Cleared all layers.' }); }}
-        onSetMode={setMode} onSetCfg={setCfg}
-        onSetSpatial={setSpatial}
+      <TopNav
+        mode={mode} mapVisible={mapVisible} hasLayers={layers.length > 0}
         onToggleMap={() => setMapVisible((v) => !v)}
+        onToggleSettings={() => setShowSettings((s) => !s)}
       />
+      <div className="workspace">
+        {mapVisible && (
+          <LeftPanel
+            layers={layers} selected={selected}
+            onToggleLayer={toggleLayer} onRemoveLayer={removeLayerById}
+            onFitLayer={fitLayer} onClearSelection={() => setSelected(null)}
+          />
+        )}
+        <div className="mapwrap">
+          <AgentMap layers={layers} drawnRegion={drawnRegion} drawPreview={drawPreview} drawMode={drawMode} onMapClick={onMapClick} onHover={() => {}} onFeatureClick={onFeatureClick} />
+        </div>
+        <ChatPanel
+          messages={messages} busy={busy} drawMode={drawMode} hasRegion={!!drawnRegion} layers={layers}
+          mode={mode} cfg={cfg} spatial={spatial} showSettings={showSettings} resolveUrl={resolveUrl}
+          onSend={runAgent}
+          onToggleDraw={() => { setDrawMode((d) => !d); firstCorner.current = null; }}
+          onClearRegion={() => { setDrawnRegion(null); pushMsg({ role: 'agent', text: 'Region cleared.' }); }}
+          onUpload={onUpload}
+          onSetMode={setMode} onSetCfg={setCfg}
+          onSetSpatial={setSpatial}
+          onToggleSettings={() => setShowSettings((s) => !s)}
+        />
+      </div>
     </div>
   );
 }

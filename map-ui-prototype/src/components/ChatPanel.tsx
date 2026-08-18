@@ -27,22 +27,18 @@ interface Props {
   mode: Mode;
   cfg: AgentCfg;
   spatial: boolean;
-  mapVisible: boolean;
+  showSettings: boolean;
   resolveUrl: (u: string) => string;
   onSend: (text: string) => void;
   onToggleDraw: () => void;
   onClearRegion: () => void;
   onUpload: (files: File[]) => void;
-  onClearAll: () => void;
   onSetMode: (m: Mode) => void;
   onSetCfg: (c: AgentCfg) => void;
   onSetSpatial: (v: boolean) => void;
-  onToggleMap: () => void;
+  onToggleSettings: () => void;
 }
 
-const SOURCE_COLORS: Record<string, string> = {
-  kb: '#7c3aed', overpass: '#1aa37a', upload: '#d1495b', analysis: '#c98a1a',
-};
 const GROUP_LABEL: Record<SourceGroup, string> = {
   internal: 'I-GUIDE knowledge base', external: 'External open-data catalogs', web: 'Open web',
 };
@@ -64,8 +60,7 @@ function Sources({ response }: { response: any }) {
             const snip = String(s.abstract || s.snippet || s.contents || '').trim();
             return (
               <div key={i} className="it">
-                <div className="t">{/^https?:\/\//i.test(url)
-                  ? <a href={url} target="_blank" rel="noopener noreferrer">{title}</a> : title}</div>
+                <div className="t">{/^https?:\/\//i.test(url) ? <a href={url} target="_blank" rel="noopener noreferrer">{title}</a> : title}</div>
                 {snip && <div className="sn">{snip.length > 260 ? snip.slice(0, 260) + '…' : snip}</div>}
               </div>
             );
@@ -92,8 +87,7 @@ function AgentTurn({ m, resolveUrl }: { m: ChatMessage; resolveUrl: (u: string) 
       )}
       {(hasBody || imgs.length > 0 || m.response) && (
         <div className="answer-card">
-          {m.html ? <div className="md" dangerouslySetInnerHTML={{ __html: m.html }} />
-            : m.text ? <div className="md"><p>{m.text}</p></div> : null}
+          {m.html ? <div className="md" dangerouslySetInnerHTML={{ __html: m.html }} /> : m.text ? <div className="md"><p>{m.text}</p></div> : null}
           {m.streaming && !m.html && <span className="cursor">▋</span>}
           {imgs.length > 0 && (
             <div className="art-imgs">
@@ -105,13 +99,8 @@ function AgentTurn({ m, resolveUrl }: { m: ChatMessage; resolveUrl: (u: string) 
               ))}
             </div>
           )}
-          {files.length > 0 && (
-            <div className="files">{files.map((f) => <a key={f.file_id} href={resolveUrl(f.download_url)} target="_blank" rel="noopener noreferrer">{f.filename}</a>)}</div>
-          )}
+          {files.length > 0 && <div className="files">{files.map((f) => <a key={f.file_id} href={resolveUrl(f.download_url)} target="_blank" rel="noopener noreferrer">{f.filename}</a>)}</div>}
           {m.response && <Sources response={m.response} />}
-          {m.layers && m.layers.length > 0 && (
-            <div className="mlayers">{m.layers.map((l) => <span key={l.id} className="pill"><span className="dot" style={{ background: SOURCE_COLORS[l.source] ?? '#888' }} />{l.label}</span>)}</div>
-          )}
         </div>
       )}
     </div>
@@ -120,7 +109,6 @@ function AgentTurn({ m, resolveUrl }: { m: ChatMessage; resolveUrl: (u: string) 
 
 export function ChatPanel(p: Props) {
   const [text, setText] = useState('');
-  const [showSettings, setShowSettings] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -130,15 +118,8 @@ export function ChatPanel(p: Props) {
   const send = (t: string) => { const v = t.trim(); if (!v || p.busy) return; setText(''); p.onSend(v); };
 
   return (
-    <aside className="chat">
-      <header>
-        <h1>I-GUIDE Agent</h1>
-        <span className={`tag ${p.mode}`}>{p.mode === 'live' ? 'live' : 'demo'}</span>
-        {p.layers.length > 0 && <button className="mapbtn" onClick={p.onToggleMap}>{p.mapVisible ? '🗺 hide map' : '🗺 show map'}</button>}
-        <button className="gear" onClick={() => setShowSettings((s) => !s)} title="Settings">⚙</button>
-      </header>
-
-      {showSettings && (
+    <section className="chat">
+      {p.showSettings && (
         <div className="settings">
           <div className="grid">
             <label>Mode
@@ -148,28 +129,23 @@ export function ChatPanel(p: Props) {
               </select>
             </label>
             <label>API key
-              <input type="password" value={p.cfg.apiKey} placeholder="X-API-KEY (if required)"
-                onChange={(e) => p.onSetCfg({ ...p.cfg, apiKey: e.target.value })} />
+              <input type="password" value={p.cfg.apiKey} placeholder="X-API-KEY (if required)" onChange={(e) => p.onSetCfg({ ...p.cfg, apiKey: e.target.value })} />
             </label>
             <label className="wide">Chat endpoint
               <input value={p.cfg.endpoint} onChange={(e) => p.onSetCfg({ ...p.cfg, endpoint: e.target.value })} />
             </label>
           </div>
-          <label className="chk">
-            <input type="checkbox" checked={p.spatial} onChange={(e) => p.onSetSpatial(e.target.checked)} />
-            Spatial tools (maps, OSM/Overpass, geo search) — off = pure chat
-          </label>
+          <label className="chk"><input type="checkbox" checked={p.spatial} onChange={(e) => p.onSetSpatial(e.target.checked)} /> Spatial tools (maps, OSM/Overpass, geo search) — off = pure chat</label>
         </div>
       )}
 
-      <div className="toolbar">
-        <button className={p.drawMode ? 'active' : ''} onClick={p.onToggleDraw} disabled={!p.spatial}>{p.drawMode ? 'Click 2 corners…' : '▭ Region'}</button>
-        <button onClick={p.onClearRegion} disabled={!p.hasRegion}>Clear</button>
-        <label className="filebtn">＋ files
-          <input type="file" multiple style={{ display: 'none' }} onChange={(e) => { const fs = Array.from(e.target.files || []); if (fs.length) p.onUpload(fs); }} />
-        </label>
-        <span className={p.spatial ? 'rstat on' : 'rstat'}>{p.spatial ? (p.hasRegion ? '● region set' : '◇ spatial on') : '○ chat only'}</span>
-      </div>
+      {p.spatial && (
+        <div className="toolbar">
+          <button className={p.drawMode ? 'active' : ''} onClick={p.onToggleDraw}>{p.drawMode ? 'Click 2 corners…' : '▭ Region'}</button>
+          <button onClick={p.onClearRegion} disabled={!p.hasRegion}>Clear</button>
+          <span className={p.hasRegion ? 'rstat on' : 'rstat'}>{p.hasRegion ? '● region set' : '◇ spatial on'}</span>
+        </div>
+      )}
 
       <div className="transcript" ref={scrollRef}
         onDragOver={(e) => e.preventDefault()}
@@ -189,16 +165,23 @@ export function ChatPanel(p: Props) {
 
       <div className="composer">
         <div className="box">
+          <label className="circle attach" title="Attach files">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.5l-8.5 8.5a5 5 0 01-7-7l9-9a3.5 3.5 0 015 5l-9 9a2 2 0 01-3-3l8-8" /></svg>
+            <input type="file" multiple style={{ display: 'none' }} onChange={(e) => { const fs = Array.from(e.target.files || []); if (fs.length) p.onUpload(fs); (e.target as HTMLInputElement).value = ''; }} />
+          </label>
           <textarea value={text}
-            placeholder={p.mode === 'live' ? 'Ask the I-GUIDE agent…' : 'Ask the mock… “show rivers here”'}
+            placeholder={p.mode === 'live' ? 'Ask me anything…' : 'Ask the mock… “show rivers here”'}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(text); } }} />
           <button className="circle send" onClick={() => send(text)} disabled={p.busy || !text.trim()} title="Send" aria-label="Send">
             <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M7 11l5-5 5 5M12 6v12" /></svg>
           </button>
         </div>
-        <div className="foot"><span>{p.layers.length} layer(s){p.mapVisible ? ' · map on' : ''}</span><button className="linkbtn" onClick={p.onClearAll} disabled={!p.layers.length}>clear layers</button></div>
+        <div className="footline">
+          <button className="conn" onClick={p.onToggleSettings}>⚙ Connection</button>
+          <span className="terms">I-GUIDE Platform Terms of Use apply. Smart Search can make mistakes. Always double-check.</span>
+        </div>
       </div>
-    </aside>
+    </section>
   );
 }

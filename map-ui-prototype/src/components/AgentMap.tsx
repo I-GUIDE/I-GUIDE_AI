@@ -30,9 +30,10 @@ function getTooltip({ object }: any) {
   return { text: `${name}${extra}${score}` };
 }
 
-function DeckOverlay({ layers }: { layers: any[] }) {
-  const overlay = useControl(() => new MapboxOverlay({ interleaved: true, layers, getTooltip }));
-  (overlay as MapboxOverlay).setProps({ layers, getTooltip });
+function DeckOverlay({ layers, onFeatureClick }: { layers: any[]; onFeatureClick: (feature: any, layerId: string) => void }) {
+  const onClick = (info: any) => { if (info && info.object) onFeatureClick(info.object, info.layer?.id ?? ''); };
+  const overlay = useControl(() => new MapboxOverlay({ interleaved: true, layers, getTooltip, onClick }));
+  (overlay as MapboxOverlay).setProps({ layers, getTooltip, onClick });
   return null;
 }
 
@@ -43,9 +44,10 @@ interface Props {
   drawMode: boolean;
   onMapClick: (lng: number, lat: number) => void;
   onHover: (info: any) => void;
+  onFeatureClick: (feature: any, layerId: string) => void;
 }
 
-export function AgentMap({ layers, drawnRegion, drawPreview, drawMode, onMapClick, onHover }: Props) {
+export function AgentMap({ layers, drawnRegion, drawPreview, drawMode, onMapClick, onHover, onFeatureClick }: Props) {
   const deckLayers = useMemo(
     () => layers.map((a) => toDeckLayer(a)),
     [layers],
@@ -67,7 +69,7 @@ export function AgentMap({ layers, drawnRegion, drawPreview, drawMode, onMapClic
       onMouseMove={() => {}}
       style={{ position: 'absolute', inset: 0 }}
     >
-      <DeckOverlay layers={deckLayers} />
+      <DeckOverlay layers={deckLayers} onFeatureClick={onFeatureClick} />
 
       {regionFeature && (
         <Source id="drawn-region" type="geojson" data={regionFeature}>
