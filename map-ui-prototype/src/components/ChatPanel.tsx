@@ -11,7 +11,7 @@ export interface ChatMessage {
   trace?: TraceLine[];
   artifacts?: FileRecord[];
   layers?: { id: string; label: string; source: string }[];
-  response?: any;        // terminal result payload -> "Sources used"
+  response?: any;
   streaming?: boolean;
 }
 
@@ -41,7 +41,7 @@ interface Props {
 }
 
 const SOURCE_COLORS: Record<string, string> = {
-  kb: '#7c3aed', overpass: '#10b981', upload: '#ef4444', analysis: '#f59e0b',
+  kb: '#7c3aed', overpass: '#1aa37a', upload: '#d1495b', analysis: '#c98a1a',
 };
 const GROUP_LABEL: Record<SourceGroup, string> = {
   internal: 'I-GUIDE knowledge base', external: 'External open-data catalogs', web: 'Open web',
@@ -77,6 +77,47 @@ function Sources({ response }: { response: any }) {
   );
 }
 
+function AgentTurn({ m, resolveUrl }: { m: ChatMessage; resolveUrl: (u: string) => string }) {
+  const imgs = (m.artifacts || []).filter(isImg).filter((f) => !(m.html || '').includes(f.file_id));
+  const files = (m.artifacts || []).filter((f) => !isImg(f));
+  const hasBody = m.html || m.text;
+  return (
+    <div className="turn">
+      <div className="ai-label">I-GUIDE AI{m.streaming && <span className="spin" />}</div>
+      {m.trace && m.trace.length > 0 && (
+        <details className="reason" open={m.streaming}>
+          <summary>Reasoning<span className="tally">{m.streaming ? 'thinking…' : `${m.trace.length} steps`}</span><span className="chev">▾</span></summary>
+          <div className="body">{m.trace.map((t, j) => <div key={j} className={`ln ${t.kind || ''}`}>{t.text}</div>)}</div>
+        </details>
+      )}
+      {(hasBody || imgs.length > 0 || m.response) && (
+        <div className="answer-card">
+          {m.html ? <div className="md" dangerouslySetInnerHTML={{ __html: m.html }} />
+            : m.text ? <div className="md"><p>{m.text}</p></div> : null}
+          {m.streaming && !m.html && <span className="cursor">▋</span>}
+          {imgs.length > 0 && (
+            <div className="art-imgs">
+              {imgs.map((f) => (
+                <figure className="art" key={f.file_id}>
+                  <a href={resolveUrl(f.download_url)} target="_blank" rel="noopener noreferrer"><img src={resolveUrl(f.download_url)} alt={f.filename} loading="lazy" /></a>
+                  <figcaption><span className="nm">{f.filename}</span></figcaption>
+                </figure>
+              ))}
+            </div>
+          )}
+          {files.length > 0 && (
+            <div className="files">{files.map((f) => <a key={f.file_id} href={resolveUrl(f.download_url)} target="_blank" rel="noopener noreferrer">{f.filename}</a>)}</div>
+          )}
+          {m.response && <Sources response={m.response} />}
+          {m.layers && m.layers.length > 0 && (
+            <div className="mlayers">{m.layers.map((l) => <span key={l.id} className="pill"><span className="dot" style={{ background: SOURCE_COLORS[l.source] ?? '#888' }} />{l.label}</span>)}</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ChatPanel(p: Props) {
   const [text, setText] = useState('');
   const [showSettings, setShowSettings] = useState(false);
@@ -92,106 +133,71 @@ export function ChatPanel(p: Props) {
     <aside className="chat">
       <header>
         <h1>I-GUIDE Agent</h1>
-        <span className={`tag ${p.mode}`}>{p.mode === 'live' ? 'live agent' : 'local demo'}</span>
-        {p.layers.length > 0 && (
-          <button className="mapbtn" onClick={p.onToggleMap} title="Show/hide map">
-            {p.mapVisible ? '🗺 hide' : '🗺 map'}
-          </button>
-        )}
+        <span className={`tag ${p.mode}`}>{p.mode === 'live' ? 'live' : 'demo'}</span>
+        {p.layers.length > 0 && <button className="mapbtn" onClick={p.onToggleMap}>{p.mapVisible ? '🗺 hide map' : '🗺 show map'}</button>}
         <button className="gear" onClick={() => setShowSettings((s) => !s)} title="Settings">⚙</button>
       </header>
 
       {showSettings && (
         <div className="settings">
-          <label>Mode
-            <select value={p.mode} onChange={(e) => p.onSetMode(e.target.value as Mode)}>
-              <option value="live">Live agent (real backend)</option>
-              <option value="local">Local demo (mock, offline)</option>
-            </select>
-          </label>
+          <div className="grid">
+            <label>Mode
+              <select value={p.mode} onChange={(e) => p.onSetMode(e.target.value as Mode)}>
+                <option value="live">Live agent (real backend)</option>
+                <option value="local">Local demo (mock, offline)</option>
+              </select>
+            </label>
+            <label>API key
+              <input type="password" value={p.cfg.apiKey} placeholder="X-API-KEY (if required)"
+                onChange={(e) => p.onSetCfg({ ...p.cfg, apiKey: e.target.value })} />
+            </label>
+            <label className="wide">Chat endpoint
+              <input value={p.cfg.endpoint} onChange={(e) => p.onSetCfg({ ...p.cfg, endpoint: e.target.value })} />
+            </label>
+          </div>
           <label className="chk">
             <input type="checkbox" checked={p.spatial} onChange={(e) => p.onSetSpatial(e.target.checked)} />
-            Spatial tools (maps, OSM/Overpass, geo search)
+            Spatial tools (maps, OSM/Overpass, geo search) — off = pure chat
           </label>
-          <label>API key
-            <input type="password" value={p.cfg.apiKey} placeholder="X-API-KEY (if required)"
-              onChange={(e) => p.onSetCfg({ ...p.cfg, apiKey: e.target.value })} />
-          </label>
-          <label>Chat endpoint
-            <input value={p.cfg.endpoint} onChange={(e) => p.onSetCfg({ ...p.cfg, endpoint: e.target.value })} />
-          </label>
-          <p className="hint">Spatial off = pure chat (no map, no geo tools — faster). The map appears on its own when the agent returns geometry.</p>
         </div>
       )}
 
       <div className="toolbar">
-        <button className={p.drawMode ? 'primary active' : ''} onClick={p.onToggleDraw} disabled={!p.spatial}>
-          {p.drawMode ? 'Click 2 corners…' : '▭ Region'}
-        </button>
-        <button onClick={p.onClearRegion} disabled={!p.hasRegion}>Clear region</button>
+        <button className={p.drawMode ? 'active' : ''} onClick={p.onToggleDraw} disabled={!p.spatial}>{p.drawMode ? 'Click 2 corners…' : '▭ Region'}</button>
+        <button onClick={p.onClearRegion} disabled={!p.hasRegion}>Clear</button>
         <label className="filebtn">＋ files
-          <input type="file" multiple style={{ display: 'none' }}
-            onChange={(e) => { const fs = Array.from(e.target.files || []); if (fs.length) p.onUpload(fs); }} />
+          <input type="file" multiple style={{ display: 'none' }} onChange={(e) => { const fs = Array.from(e.target.files || []); if (fs.length) p.onUpload(fs); }} />
         </label>
-        <span className={p.spatial ? 'rstat on' : 'rstat'}>{p.spatial ? (p.hasRegion ? '● region' : '◇ spatial') : '○ chat only'}</span>
+        <span className={p.spatial ? 'rstat on' : 'rstat'}>{p.spatial ? (p.hasRegion ? '● region set' : '◇ spatial on') : '○ chat only'}</span>
       </div>
 
       <div className="transcript" ref={scrollRef}
         onDragOver={(e) => e.preventDefault()}
         onDrop={(e) => { e.preventDefault(); const fs = Array.from(e.dataTransfer.files || []); if (fs.length) p.onUpload(fs); }}>
-        {p.messages.map((m, i) => (
-          <div key={i} className={`msg ${m.role}`}>
-            <div className="bubble">
-              {m.trace && m.trace.length > 0 && (
-                <details className="trace" open={m.streaming}>
-                  <summary>{m.streaming ? 'thinking…' : `reasoning (${m.trace.length})`}</summary>
-                  {m.trace.map((t, j) => <div key={j} className={`tl ${t.kind || ''}`}>{t.text}</div>)}
-                </details>
-              )}
-              {m.html
-                ? <div className="md" dangerouslySetInnerHTML={{ __html: m.html }} />
-                : m.text && <div className="txt">{m.text}</div>}
-              {m.streaming && !m.html && <span className="cursor">▋</span>}
-              {m.artifacts && m.artifacts.filter(isImg).filter((f) => !(m.html || '').includes(f.file_id)).length > 0 && (
-                <div className="arts">
-                  {m.artifacts.filter(isImg).filter((f) => !(m.html || '').includes(f.file_id)).map((f) => (
-                    <a key={f.file_id} href={p.resolveUrl(f.download_url)} target="_blank" rel="noopener noreferrer">
-                      <img src={p.resolveUrl(f.download_url)} alt={f.filename} loading="lazy" />
-                    </a>
-                  ))}
-                </div>
-              )}
-              {m.response && <Sources response={m.response} />}
-              {m.layers && m.layers.length > 0 && (
-                <div className="mlayers">
-                  {m.layers.map((l) => (
-                    <span key={l.id} className="pill"><span className="dot" style={{ background: SOURCE_COLORS[l.source] ?? '#888' }} />{l.label}</span>
-                  ))}
-                </div>
-              )}
-            </div>
+        {p.messages.map((m, i) => m.role === 'user' ? (
+          <div className="turn user" key={i}>
+            <div className="who you">You</div>
+            <div className="row right"><div className="bubble user">{m.text}</div></div>
           </div>
-        ))}
-        {p.busy && !p.messages.some((m) => m.streaming) && <div className="msg agent"><div className="bubble typing">…</div></div>}
+        ) : <AgentTurn key={i} m={m} resolveUrl={p.resolveUrl} />)}
+        {p.busy && !p.messages.some((m) => m.streaming) && <div className="turn"><div className="ai-label">I-GUIDE AI<span className="spin" /></div></div>}
       </div>
 
       {p.messages.length <= 1 && (
-        <div className="suggest">
-          {SUGGESTIONS.map((s) => <button key={s} className="chip" onClick={() => send(s)}>{s}</button>)}
-        </div>
+        <div className="suggest">{SUGGESTIONS.map((s) => <button key={s} className="chip" onClick={() => send(s)}>{s}</button>)}</div>
       )}
 
-      <div className="inputbar">
-        <textarea value={text}
-          placeholder={p.mode === 'live' ? 'Ask the I-GUIDE agent…' : 'Ask the mock… “show rivers here”'}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(text); } }} />
-        <button className="primary" onClick={() => send(text)} disabled={p.busy || !text.trim()}>Send</button>
-      </div>
-
-      <div className="foot">
-        <span>{p.layers.length} layer(s){p.mapVisible ? ' · map on' : ''}</span>
-        <button className="small" onClick={p.onClearAll} disabled={!p.layers.length}>clear layers</button>
+      <div className="composer">
+        <div className="box">
+          <textarea value={text}
+            placeholder={p.mode === 'live' ? 'Ask the I-GUIDE agent…' : 'Ask the mock… “show rivers here”'}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(text); } }} />
+          <button className="circle send" onClick={() => send(text)} disabled={p.busy || !text.trim()} title="Send" aria-label="Send">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M7 11l5-5 5 5M12 6v12" /></svg>
+          </button>
+        </div>
+        <div className="foot"><span>{p.layers.length} layer(s){p.mapVisible ? ' · map on' : ''}</span><button className="linkbtn" onClick={p.onClearAll} disabled={!p.layers.length}>clear layers</button></div>
       </div>
     </aside>
   );
