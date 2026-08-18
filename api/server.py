@@ -1907,6 +1907,11 @@ def agent_chat_stream():
                     if event_name == "artifact":
                         yield _sse_event("file", {"type": "artifact", "agent": str(agent_role or ""), "detail": payload})
 
+                    if event_name == "map_layer":
+                        # Untruncated plottable geometry from a geo tool (overpass_search, ...).
+                        # Forwarded verbatim so a map client can add it as a live layer.
+                        yield _sse_event("map_layer", payload)
+
                     if event_name == "completed":
                         yield _sse_event(
                             "answer",
