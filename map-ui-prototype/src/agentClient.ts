@@ -117,6 +117,8 @@ export interface StreamOpts {
   agentDev?: boolean;
   signal?: AbortSignal;
   conversationName?: string;
+  includeMcpTools?: boolean;              // spatial toggle -> MCP geo tools on/off
+  enabledSearchMethods?: string[] | null; // spatial toggle -> restrict retrieval tools
 }
 
 export async function streamChat(
@@ -133,10 +135,11 @@ export async function streamChat(
     tool_strategy: 'granular',
     use_persistent_memory: true,
     smart_tool_routing: true,
-    include_mcp_tools: true,
+    include_mcp_tools: opts.includeMcpTools ?? true,
     code_exec: true,
     agent_dev: opts.agentDev ?? true, // detailed trace so the map can react to tool events
     file_ids: (opts.fileIds || []).filter((id) => id && !id.startsWith('tmp:')),
+    enabled_search_methods: opts.enabledSearchMethods ?? null,
     verbose: false,
   };
 

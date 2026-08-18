@@ -19,12 +19,16 @@ const DEFAULT_CFG: AgentCfg = {
   apiKey: '',
 };
 
-function loadCfg(): { mode: Mode; cfg: AgentCfg } {
+// Retrieval tools that do NOT touch geography — used when the "Spatial tools" toggle
+// is off so a pure-chat turn stays fast and never opens the map.
+const CHAT_ONLY_METHODS = ['keyword_search', 'semantic_search', 'neo4j_search', 'web_search', 'agent_kb_search', 'get_kb_block'];
+
+function loadCfg(): { mode: Mode; cfg: AgentCfg; spatial: boolean } {
   try {
     const raw = localStorage.getItem('iguide-map-ui');
-    if (raw) { const j = JSON.parse(raw); return { mode: j.mode || 'live', cfg: { ...DEFAULT_CFG, ...j.cfg } }; }
+    if (raw) { const j = JSON.parse(raw); return { mode: j.mode || 'live', cfg: { ...DEFAULT_CFG, ...j.cfg }, spatial: j.spatial !== false }; }
   } catch { /* */ }
-  return { mode: 'live', cfg: DEFAULT_CFG };
+  return { mode: 'live', cfg: DEFAULT_CFG, spatial: true };
 }
 
 function bboxPolygon(a: [number, number], b: [number, number]): Polygon {
@@ -52,8 +56,10 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [mode, setMode] = useState<Mode>(init.mode);
   const [cfg, setCfg] = useState<AgentCfg>(init.cfg);
+  const [spatial, setSpatial] = useState<boolean>(init.spatial);
+  const [mapVisible, setMapVisible] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([
-    { role: 'agent', text: "Hi — I'm the I-GUIDE agent. Ask me to find datasets, pull map data, or run spatial analysis. In Live mode I stream the real backend; drop files with ＋ and I'll use them." },
+    { role: 'agent', text: "Hi — I'm the I-GUIDE agent. Ask me anything. Turn on Spatial tools (⚙) to search geodata and draw regions; the map opens on its own when I return geometry." },
   ]);
 
   const threadRef = useRef<string>(newThreadId());
@@ -61,7 +67,20 @@ export default function App() {
   const pendingFileIds = useRef<string[]>([]);
   const layersRef = useRef(layers); layersRef.current = layers;
 
-  useEffect(() => { try { localStorage.setItem('iguide-map-ui', JSON.stringify({ mode, cfg })); } catch { /* */ } }, [mode, cfg]);
+  useEffect(() => { try { localStorage.setItem('iguide-map-ui', JSON.stringify({ mode, cfg, spatial })); } catch { /* */ } }, [mode, cfg, spatial]);
+
+  // Progressive map: auto-reveal ONCE the first time a layer appears, then respect the
+  // manual show/hide toggle (don't fight the user). Re-arm after layers are cleared.
+  const autoRevealed = useRef(false);
+  useEffect(() => {
+    if (layers.length && !autoRevealed.current) { autoRevealed.current = true; setMapVisible(true); }
+    if (!layers.length) autoRevealed.current = false;
+  }, [layers.length]);
+  useEffect(() => {
+    if (!mapVisible) return;
+    const m = (window as any).__map;
+    requestAnimationFrame(() => { try { m?.resize(); } catch { /* */ } });
+  }, [mapVisible]);
 
   const asAgentConfig = useCallback((): AgentConfig => ({ ...cfg }), [cfg]);
   const resolveUrl = useCallback((u: string) => absoluteUrl(u, asAgentConfig()), [asAgentConfig]);
@@ -93,10 +112,17 @@ export default function App() {
     const trace: TraceLine[] = [];
     const addTrace = (t: TraceLine) => { trace.push(t); patch({ trace: [...trace] }); };
     setBusy(true);
+    // A drawn region becomes spatial context for the agent (the API has no geometry
+    // field, so it rides along in the prompt). The user bubble keeps the original text.
+    const regionHint = spatial && drawnRegion
+      ? `\n\n(Focus on this geographic area — bbox [${polygonBBox(drawnRegion).map((n) => n.toFixed(4)).join(', ')}] as minLon,minLat,maxLon,maxLat in EPSG:4326.)`
+      : '';
     try {
-      const res = await streamChat(text, {
+      const res = await streamChat(text + regionHint, {
         threadId: threadRef.current, memoryId: memoryRef.current,
         fileIds: pendingFileIds.current, agentDev: true,
+        includeMcpTools: spatial,
+        enabledSearchMethods: spatial ? null : CHAT_ONLY_METHODS,
       }, asAgentConfig(), {
         onTrace: (l) => addTrace(l),
         onToolCall: (name, args) => {
@@ -130,11 +156,11 @@ export default function App() {
         fitView(authoritative);
       }
       const html = res.error ? '' : renderMarkdown(res.answer || '_(no answer text)_', resolveUrl);
-      patch({ html, text: res.error ? `⚠ ${res.error}` : undefined, artifacts: res.downloads, trace: [...trace], streaming: false });
+      patch({ html, text: res.error ? `⚠ ${res.error}` : undefined, artifacts: res.downloads, response: res.response, trace: [...trace], streaming: false });
     } catch (e: any) {
       patch({ text: `Request failed: ${e.message}`, streaming: false });
     } finally { setBusy(false); }
-  }, [asAgentConfig, putLayer, fitView, resolveUrl]);
+  }, [asAgentConfig, putLayer, fitView, resolveUrl, spatial, drawnRegion]);
 
   const drawFromToolArgs = useCallback((name: string, args: any) => {
     if (!args || typeof args !== 'object') return;
@@ -227,17 +253,21 @@ export default function App() {
   }, [mode, asAgentConfig, putLayer, fitView, pushMsg]);
 
   return (
-    <div className="app">
-      <AgentMap layers={layers} drawnRegion={drawnRegion} drawPreview={drawPreview} drawMode={drawMode} onMapClick={onMapClick} onHover={() => {}} />
+    <div className={`app ${mapVisible ? 'map-on' : 'chat-only'}`}>
+      <div className="mapwrap">
+        <AgentMap layers={layers} drawnRegion={drawnRegion} drawPreview={drawPreview} drawMode={drawMode} onMapClick={onMapClick} onHover={() => {}} />
+      </div>
       <ChatPanel
         messages={messages} busy={busy} drawMode={drawMode} hasRegion={!!drawnRegion} layers={layers}
-        mode={mode} cfg={cfg} resolveUrl={resolveUrl}
+        mode={mode} cfg={cfg} spatial={spatial} mapVisible={mapVisible} resolveUrl={resolveUrl}
         onSend={runAgent}
         onToggleDraw={() => { setDrawMode((d) => !d); firstCorner.current = null; }}
         onClearRegion={() => { setDrawnRegion(null); pushMsg({ role: 'agent', text: 'Region cleared.' }); }}
         onUpload={onUpload}
         onClearAll={() => { setLayers([]); pushMsg({ role: 'agent', text: 'Cleared all layers.' }); }}
         onSetMode={setMode} onSetCfg={setCfg}
+        onSetSpatial={setSpatial}
+        onToggleMap={() => setMapVisible((v) => !v)}
       />
     </div>
   );

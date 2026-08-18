@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import type { FeatureCollection } from 'geojson';
 import type { LayerArtifact } from '../contracts';
 import type { FileRecord, TraceLine } from '../agentClient';
 import { SUGGESTIONS } from '../agentBrain';
+import { groupedSources, type SourceGroup } from '../answerFormat';
 
 export interface ChatMessage {
   role: 'user' | 'agent';
@@ -11,6 +11,7 @@ export interface ChatMessage {
   trace?: TraceLine[];
   artifacts?: FileRecord[];
   layers?: { id: string; label: string; source: string }[];
+  response?: any;        // terminal result payload -> "Sources used"
   streaming?: boolean;
 }
 
@@ -25,6 +26,8 @@ interface Props {
   layers: LayerArtifact[];
   mode: Mode;
   cfg: AgentCfg;
+  spatial: boolean;
+  mapVisible: boolean;
   resolveUrl: (u: string) => string;
   onSend: (text: string) => void;
   onToggleDraw: () => void;
@@ -33,12 +36,46 @@ interface Props {
   onClearAll: () => void;
   onSetMode: (m: Mode) => void;
   onSetCfg: (c: AgentCfg) => void;
+  onSetSpatial: (v: boolean) => void;
+  onToggleMap: () => void;
 }
 
 const SOURCE_COLORS: Record<string, string> = {
   kb: '#7c3aed', overpass: '#10b981', upload: '#ef4444', analysis: '#f59e0b',
 };
+const GROUP_LABEL: Record<SourceGroup, string> = {
+  internal: 'I-GUIDE knowledge base', external: 'External open-data catalogs', web: 'Open web',
+};
 const isImg = (f: FileRecord) => f.kind === 'image' || /\.(png|jpe?g|gif|webp|bmp|avif)$/i.test(f.filename || f.download_url || '');
+
+function Sources({ response }: { response: any }) {
+  const groups = groupedSources(response);
+  const order: SourceGroup[] = ['internal', 'external', 'web'];
+  if (!order.some((k) => groups[k].length)) return null;
+  return (
+    <div className="srcs">
+      <h4>Sources used</h4>
+      {order.filter((k) => groups[k].length).map((k) => (
+        <div key={k} className="grp">
+          <div className="hd">{GROUP_LABEL[k]}<span className="n">{groups[k].length} item{groups[k].length === 1 ? '' : 's'}</span></div>
+          {groups[k].slice(0, 12).map((s, i) => {
+            const title = String(s.title || s.doc_id || '(untitled)');
+            const url = String(s.url || '');
+            const snip = String(s.abstract || s.snippet || s.contents || '').trim();
+            return (
+              <div key={i} className="it">
+                <div className="t">{/^https?:\/\//i.test(url)
+                  ? <a href={url} target="_blank" rel="noopener noreferrer">{title}</a> : title}</div>
+                {snip && <div className="sn">{snip.length > 260 ? snip.slice(0, 260) + '…' : snip}</div>}
+              </div>
+            );
+          })}
+          {groups[k].length > 12 && <div className="sn">+{groups[k].length - 12} more not shown</div>}
+        </div>
+      ))}
+    </div>
+  );
+}
 
 export function ChatPanel(p: Props) {
   const [text, setText] = useState('');
@@ -56,6 +93,11 @@ export function ChatPanel(p: Props) {
       <header>
         <h1>I-GUIDE Agent</h1>
         <span className={`tag ${p.mode}`}>{p.mode === 'live' ? 'live agent' : 'local demo'}</span>
+        {p.layers.length > 0 && (
+          <button className="mapbtn" onClick={p.onToggleMap} title="Show/hide map">
+            {p.mapVisible ? '🗺 hide' : '🗺 map'}
+          </button>
+        )}
         <button className="gear" onClick={() => setShowSettings((s) => !s)} title="Settings">⚙</button>
       </header>
 
@@ -67,6 +109,10 @@ export function ChatPanel(p: Props) {
               <option value="local">Local demo (mock, offline)</option>
             </select>
           </label>
+          <label className="chk">
+            <input type="checkbox" checked={p.spatial} onChange={(e) => p.onSetSpatial(e.target.checked)} />
+            Spatial tools (maps, OSM/Overpass, geo search)
+          </label>
           <label>API key
             <input type="password" value={p.cfg.apiKey} placeholder="X-API-KEY (if required)"
               onChange={(e) => p.onSetCfg({ ...p.cfg, apiKey: e.target.value })} />
@@ -74,12 +120,12 @@ export function ChatPanel(p: Props) {
           <label>Chat endpoint
             <input value={p.cfg.endpoint} onChange={(e) => p.onSetCfg({ ...p.cfg, endpoint: e.target.value })} />
           </label>
-          <p className="hint">Live mode streams the real agent (SSE). Local mode uses the in-browser mock.</p>
+          <p className="hint">Spatial off = pure chat (no map, no geo tools — faster). The map appears on its own when the agent returns geometry.</p>
         </div>
       )}
 
       <div className="toolbar">
-        <button className={p.drawMode ? 'primary active' : ''} onClick={p.onToggleDraw}>
+        <button className={p.drawMode ? 'primary active' : ''} onClick={p.onToggleDraw} disabled={!p.spatial}>
           {p.drawMode ? 'Click 2 corners…' : '▭ Region'}
         </button>
         <button onClick={p.onClearRegion} disabled={!p.hasRegion}>Clear region</button>
@@ -87,7 +133,7 @@ export function ChatPanel(p: Props) {
           <input type="file" multiple style={{ display: 'none' }}
             onChange={(e) => { const fs = Array.from(e.target.files || []); if (fs.length) p.onUpload(fs); }} />
         </label>
-        <span className={p.hasRegion ? 'rstat on' : 'rstat'}>{p.hasRegion ? '● region' : '○ no region'}</span>
+        <span className={p.spatial ? 'rstat on' : 'rstat'}>{p.spatial ? (p.hasRegion ? '● region' : '◇ spatial') : '○ chat only'}</span>
       </div>
 
       <div className="transcript" ref={scrollRef}
@@ -115,6 +161,7 @@ export function ChatPanel(p: Props) {
                   ))}
                 </div>
               )}
+              {m.response && <Sources response={m.response} />}
               {m.layers && m.layers.length > 0 && (
                 <div className="mlayers">
                   {m.layers.map((l) => (
@@ -143,7 +190,7 @@ export function ChatPanel(p: Props) {
       </div>
 
       <div className="foot">
-        <span>{p.layers.length} layer(s) on map</span>
+        <span>{p.layers.length} layer(s){p.mapVisible ? ' · map on' : ''}</span>
         <button className="small" onClick={p.onClearAll} disabled={!p.layers.length}>clear layers</button>
       </div>
     </aside>
