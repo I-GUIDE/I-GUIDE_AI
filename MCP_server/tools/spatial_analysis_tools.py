@@ -207,15 +207,18 @@ def generate_crime_map(title: str = "Crime Counts by Community Area", crime_type
 
 @mcp_tool(category="retrieval_external")
 def search_geospatial_resources(topic: str, resource_type: str) -> list:
-    """
-    Searches for geospatial resources like datasets, notebooks, or publications on a given topic.
+    """DEPRECATED web search. Runs a plain DuckDuckGo query and returns web LINKS ONLY —
+    no datasets, no files, and NO geometry. Prefer `web_search`/`web_fetch` for the open web
+    and `opengeodata_search` for external open-data catalogs. Do NOT use this to find or map
+    real-world features (rivers, roads, hospitals, parks, dams, ...): use `overpass_search`,
+    which returns actual geometry. Kept only for backward compatibility.
 
     Args:
-        topic: The geospatial topic to search for.
-        resource_type: The type of resource to find ('datasets', 'notebooks', or 'publications').
+        topic: The topic to web-search.
+        resource_type: 'datasets', 'notebooks', or 'publications' (only shapes the web query).
 
     Returns:
-        A list of search results with titles, links, and snippets.
+        A list of web results (title, link, snippet) — links only, not data.
     """
     query_map = {
         "datasets": f"geospatial open data {topic}",

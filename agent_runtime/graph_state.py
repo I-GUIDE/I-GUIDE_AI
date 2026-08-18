@@ -38,7 +38,11 @@ ANALYSIS_TOOL_NAMES: set[str] = {
 
 DISCOVERY_TOOL_NAMES: set[str] = {
     "rag_tool",
-    "mcp_search_geospatial_resources",
+    # NOTE: mcp_search_geospatial_resources was removed here on purpose. Despite its name it is
+    # a plain DuckDuckGo web search (links only, no geometry) that out-competed the real geo
+    # tools for anything "geospatial". web_search/web_fetch + opengeodata_search cover discovery;
+    # overpass_search covers real-world features. Leaving it out of every policy set keeps the
+    # smart-routing path from selecting it.
     "mcp_search_publications",
 }
 

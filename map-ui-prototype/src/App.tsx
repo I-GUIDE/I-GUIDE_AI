@@ -65,6 +65,7 @@ export default function App() {
   const threadRef = useRef<string>(newThreadId());
   const memoryRef = useRef<string | null>(null);
   const pendingFileIds = useRef<string[]>([]);
+  const uploadContext = useRef<string>(''); // e.g. 'Uploaded "chicago" covers bbox [...]' — spatial context for the agent
   const layersRef = useRef(layers); layersRef.current = layers;
 
   useEffect(() => { try { localStorage.setItem('iguide-map-ui', JSON.stringify({ mode, cfg, spatial })); } catch { /* */ } }, [mode, cfg, spatial]);
@@ -114,9 +115,10 @@ export default function App() {
     setBusy(true);
     // A drawn region becomes spatial context for the agent (the API has no geometry
     // field, so it rides along in the prompt). The user bubble keeps the original text.
-    const regionHint = spatial && drawnRegion
-      ? `\n\n(Focus on this geographic area — bbox [${polygonBBox(drawnRegion).map((n) => n.toFixed(4)).join(', ')}] as minLon,minLat,maxLon,maxLat in EPSG:4326.)`
-      : '';
+    const hints: string[] = [];
+    if (spatial && drawnRegion) hints.push(`Focus on this drawn area — bbox [${polygonBBox(drawnRegion).map((n) => n.toFixed(4)).join(', ')}] (minLon,minLat,maxLon,maxLat, EPSG:4326).`);
+    if (spatial && uploadContext.current) hints.push(uploadContext.current);
+    const regionHint = hints.length ? `\n\n(${hints.join(' ')})` : '';
     try {
       const res = await streamChat(text + regionHint, {
         threadId: threadRef.current, memoryId: memoryRef.current,
@@ -238,6 +240,8 @@ export default function App() {
           const name = f.name.replace(/\.(geo)?json$/i, '');
           putLayer({ kind: 'geojson', id: `upload-${name}`, source: 'upload', label: `Upload: ${name}`, data: fc, style: { fill: [239, 68, 68, 90], line: [239, 68, 68, 255], pointRadius: 6 }, fitBounds: true });
           fitView(fc);
+          // Remember the upload's extent so the agent can bound Overpass by "the geojson I uploaded".
+          try { const bb = layerBBox(fc); uploadContext.current = `The uploaded file "${name}" covers bbox [${bb.map((x) => x.toFixed(4)).join(', ')}] (minLon,minLat,maxLon,maxLat, EPSG:4326).`; } catch { /* */ }
         } catch { /* not parseable geojson */ }
       }
     }

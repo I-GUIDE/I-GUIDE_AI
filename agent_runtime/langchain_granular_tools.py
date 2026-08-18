@@ -513,14 +513,18 @@ def make_langchain_granular_tools(
             func=overpass_search_tool,
             name="overpass_search",
             description=(
-                "Query LIVE OpenStreetMap for real-world features and return them WITH geometry "
-                "(points/lines/polygons) + OSM tags — ground-truth infrastructure the I-GUIDE KB "
-                "does NOT hold: rivers, roads, hospitals, schools, parks, dams, power plants, "
-                "railways, buildings, water bodies, etc. Args: `feature` (a plain word like "
-                "'hospital' or 'river', or a raw OSM filter like 'amenity=school'/'waterway=river') "
-                "and a location — either `place` (e.g. 'Cook County, Illinois', geocoded here) or "
-                "`bbox` as 'minLon,minLat,maxLon,maxLat'. Use for 'where are the X in Y', for "
-                "features that intersect an uploaded area, or to get plottable geometry for a map. "
+                "THE tool for real-world geographic features. Query LIVE OpenStreetMap and return "
+                "features WITH geometry (points/lines/polygons) + OSM tags: rivers, roads, "
+                "hospitals, schools, parks, dams, power plants, railways, buildings, water bodies, "
+                "etc. ALWAYS use this — never keyword/semantic/KB search, opengeodata_search, or "
+                "any web search — when the user asks WHERE features are, what features are IN / NEAR "
+                "/ INTERSECT a place or an uploaded area/geometry, or wants features plotted on a "
+                "map. The I-GUIDE KB does NOT contain this data. "
+                "Args: `feature` — a plain word ('hospital', 'river') or a raw OSM filter "
+                "('amenity=school', 'waterway=river'); and a location — `place` (e.g. 'Chicago, "
+                "Illinois', geocoded automatically) OR `bbox` as 'minLon,minLat,maxLon,maxLat'. "
+                "For an UPLOADED file, pass the file's bounding box as `bbox` (read it first with a "
+                "geo/file tool or execute_code if you don't already have it). "
                 "Returns JSON: {count, features:[{name, lat, lon, feature_type, tags, geometry}]}."
             ),
             metadata={"category": "retrieval_external"},
