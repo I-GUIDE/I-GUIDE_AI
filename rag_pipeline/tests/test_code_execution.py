@@ -422,3 +422,44 @@ def test_signal_deaths_are_diagnosed_in_both_conventions():
     assert diagnose(1, "Traceback ...", None) is None
     assert diagnose(0, "", None) is None
     assert diagnose(137, "", "already diagnosed") is None
+
+
+# --- a conversation's code keeps its workspace between runs -----------------------
+
+def test_session_workspace_is_per_conversation_and_opt_in(tmp_path, monkeypatch):
+    from agent_runtime.code_execution import _session_workspace
+
+    monkeypatch.setenv("AGENT_CODE_EXEC_WORK_ROOT", str(tmp_path))
+    assert _session_workspace(None) is None          # no session -> throwaway run, as before
+    assert _session_workspace("") is None
+    a1 = _session_workspace("thread-a")
+    a2 = _session_workspace("thread-a")
+    b = _session_workspace("thread-b")
+    assert a1 == a2 and a1.is_dir()                  # stable across runs
+    assert b != a1                                   # conversations don't share a workspace
+    assert _session_workspace("../../etc/passwd").name.startswith("agentws_")  # path-safe
+
+
+def test_carried_files_are_not_re_persisted_unless_changed(tmp_path):
+    """A file carried in from a previous run is not an output of THIS run."""
+    import time
+    from agent_runtime.code_execution import _copy_tree, _stat_map
+
+    ws, work = tmp_path / "ws", tmp_path / "work"
+    ws.mkdir(); work.mkdir()
+    (ws / "project.txt").write_text("step 1")
+    (ws / ".deps").mkdir(); (ws / ".deps" / "junk.py").write_text("x")
+
+    _copy_tree(ws, work)
+    carried = _stat_map(work)
+    assert "project.txt" in carried
+    assert not (work / ".deps").exists()             # dep/cache dirs are never carried
+
+    (work / "new.geojson").write_text("{}")          # this run's real output
+    time.sleep(0.01)
+    (work / "project.txt").write_text("step 1 + 2")  # and a modified carry-in
+
+    now = _stat_map(work)
+    unchanged = {rel for rel, sig in now.items() if carried.get(rel) == sig}
+    assert unchanged == set()                        # project.txt changed -> counts as output
+    assert "new.geojson" in now

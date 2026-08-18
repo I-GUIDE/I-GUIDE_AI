@@ -322,6 +322,56 @@ def _work_root() -> Optional[str]:
         return None
 
 
+def _session_workspace(session: Optional[str]) -> Optional[Path]:
+    """The durable working directory for a conversation's code, or None.
+
+    Each run gets a throwaway dir and an ``--rm`` container, so a follow-up run used to
+    start from an empty directory: the file the previous step wrote was gone, and the only
+    way to continue a piece of work was to re-upload it by file_id. The CONTAINER stays
+    ephemeral (that is the sandbox), but the workspace persists per conversation, so
+    "now add a heatmap of that GeoJSON" can build on what the last step produced.
+    """
+    key = str(session or "").strip()
+    if not key:
+        return None
+    root = _work_root() or tempfile.gettempdir()
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", key)[:64]
+    try:
+        path = Path(root) / f"agentws_{safe}"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+    except OSError:
+        return None
+
+
+def _stat_map(directory: Path) -> Dict[str, Tuple[int, int]]:
+    """(size, mtime_ns) per relative path — used to tell new/changed files from carried ones."""
+    out: Dict[str, Tuple[int, int]] = {}
+    for p in directory.rglob("*"):
+        if p.is_file():
+            try:
+                st = p.stat()
+                out[str(p.relative_to(directory))] = (st.st_size, st.st_mtime_ns)
+            except OSError:
+                continue
+    return out
+
+
+def _copy_tree(src: Path, dst: Path, *, skip: Optional[set] = None) -> None:
+    for p in src.rglob("*"):
+        if not p.is_file():
+            continue
+        rel = str(p.relative_to(src))
+        if (skip and rel in skip) or rel.split(os.sep)[0] in {"__pycache__", DEPS_DIRNAME, PIPTMP_DIRNAME}:
+            continue
+        target = dst / rel
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(p, target)
+        except OSError:
+            continue
+
+
 def _host_user() -> Optional[str]:
     getuid = getattr(os, "getuid", None)
     getgid = getattr(os, "getgid", None)
@@ -343,7 +393,8 @@ class CodeExecutor:
                 env: Optional[Dict[str, str]] = None,
                 dependencies: Optional[List[Any]] = None,
                 input_files: Optional[List[Dict[str, str]]] = None,
-                label: Optional[str] = None) -> ExecResult:
+                label: Optional[str] = None,
+                session: Optional[str] = None) -> ExecResult:
         if (language or "python").lower() != "python":
             return ExecResult(exit_code=None, error=f"unsupported language: {language}",
                               backend=self.backend, code=(code or ""))
@@ -362,6 +413,12 @@ class CodeExecutor:
                 backend=self.backend, code=(code or ""),
             )
         try:
+            # Continue this conversation's work: bring forward what earlier runs left.
+            workspace = _session_workspace(session)
+            carried = {}
+            if workspace:
+                _copy_tree(workspace, work)
+                carried = _stat_map(work)
             (work / "script.py").write_text(code or "", encoding="utf-8")
             # Stage uploaded/input files into the work dir so the code can read them.
             staged, stage_errors = _stage_inputs(work, input_files)
@@ -372,8 +429,12 @@ class CodeExecutor:
             exit_code, stdout, stderr, timed_out, error = self._run(work, timeout, deps)
             # Output files the run produced, plus the executed source itself (downloadable).
             # Staged input files are excluded so uploads aren't re-persisted as outputs.
+            unchanged = {rel for rel, sig in _stat_map(work).items()
+                         if carried.get(rel) == sig}  # carried in and untouched -> not an output
             artifacts = [*_persist_source(code or "", label=label),
-                         *_persist_artifacts(work, {"script.py", *staged})]
+                         *_persist_artifacts(work, {"script.py", *staged, *unchanged})]
+            if workspace:
+                _copy_tree(work, workspace, skip={"script.py", *staged})
             if rejected:
                 stderr = (str(stderr or "") + f"\n[ignored unsafe dependencies: {rejected}]").strip()
             if stage_errors:

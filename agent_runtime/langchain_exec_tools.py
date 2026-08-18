@@ -103,6 +103,7 @@ def _build_staging(refs: List[str]) -> Tuple[List[Dict[str, str]], List[Dict[str
 def make_code_execution_tools(
     executor: Optional[Any] = None,
     default_input_file_ids: Optional[List[str]] = None,
+    session_id: Optional[str] = None,
 ) -> List[Any]:
     """Build the `execute_code` StructuredTool (container-per-run sandbox).
 
@@ -135,6 +136,8 @@ def make_code_execution_tools(
         # `label` only names the saved source, so pass it optionally: an executor
         # implementing the older signature (or a test double) still works.
         extra = {"label": label} if label else {}
+        if session_id:
+            extra["session"] = session_id   # durable workspace across runs in this conversation
         result = ex.execute(
             code,
             language=language,
@@ -166,7 +169,9 @@ def make_code_execution_tools(
             "working directory under both their file_id and their original filename (e.g. "
             "open('data.csv') or pd.read_csv('data.csv')). To read any other uploaded file, "
             "add its file_id to `input_files`. Use this to RUN and DEBUG code: run, read "
-            "stdout/stderr, fix, re-run. `label` is a short slug for what this particular run "
+            "stdout/stderr, fix, re-run. Files you write persist in this conversation's working "
+            "directory, so a later run can open what an earlier one produced and keep building "
+            "on it (the container itself is fresh each time). `label` is a short slug for what this particular run "
             "does (e.g. \"csv_to_geojson\", \"rivers_buffer\") and becomes the saved source's "
             "filename — several runs in one conversation otherwise arrive as identically-named "
             "downloads; name the files your code writes for their contents too, for the same "
