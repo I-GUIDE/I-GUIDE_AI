@@ -1733,6 +1733,38 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
     return fn
 
 
+_CODE_FENCE_RE = re.compile(r"^```[\w+-]*\s*$", re.M)
+
+
+def _has_execution_record(artifacts: Dict[str, Any]) -> bool:
+    """Whether this peer run actually called ``execute_code``."""
+    for key in ("tool_calls", "tool_results"):
+        for item in artifacts.get(key) or []:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("name") or item.get("tool_name") or "") == "execute_code":
+                return True
+    return False
+
+
+def _ships_unrun_code(answer: str) -> bool:
+    """Whether an answer hands back a code block as its result."""
+    return bool(_CODE_FENCE_RE.search(str(answer or "")))
+
+
+# The prompt used to carry this as a threat ("an answer that only pastes code … is a
+# FAILURE") with nothing checking it, which is the shape most likely to backfire: a model
+# told that not running code is a failure will claim it ran when the sandbox dies. Verify
+# instead, and hand the peer the observation so it can act on it.
+_CODE_NOT_RUN_OBSERVATION = (
+    "Your previous reply returned code, but this turn has no execute_code record — so the "
+    "code was never run, its output is unverified, and any files it would have written do "
+    "not exist for the user. Run it with execute_code, read stdout/stderr, fix what the "
+    "sandbox reports and re-run until it works; then report the result. If it genuinely "
+    "cannot be run here, say so and why."
+)
+
+
 def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str]] = None,
                     code_exec: Optional[bool] = None,
                     input_file_ids: Optional[List[str]] = None) -> CodeFn:
@@ -1827,6 +1859,30 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
             "tool_results": artifacts.get("tool_results") or [],
         }
         caps = list(dict.fromkeys(r["capability"] for r in requests))
+
+        # Verify the peer actually ran what it wrote. A peer that asked for another
+        # capability is stopping legitimately, so it is left alone; otherwise give it one
+        # chance to run the code, with the observation that it did not.
+        exec_available = code_exec if code_exec is not None else is_code_exec_enabled()
+        executed = _has_execution_record(artifacts)
+        if exec_available and not executed and not caps and _ships_unrun_code(result["answer"]):
+            emit_trace_event(
+                "code_not_executed",
+                {"stage": "code", "message": "code returned without an execute_code record; retrying once"},
+                node="code",
+            )
+            resp_retry = invoke_agent_with_payload_fallback(
+                executor, query=_CODE_NOT_RUN_OBSERVATION, chat_history=None,
+                config=agent_config(child_thread_id(state.get("thread_id"), "code")),
+            )
+            retry_artifacts = extract_search_artifacts(resp_retry)
+            executed = _has_execution_record(retry_artifacts)
+            result["answer"] = extract_final_answer(resp_retry) or result["answer"]
+            result["tool_calls"] = [*result["tool_calls"], *(retry_artifacts.get("tool_calls") or [])]
+            result["tool_results"] = [*result["tool_results"], *(retry_artifacts.get("tool_results") or [])]
+            caps = list(dict.fromkeys(r["capability"] for r in requests))
+        # Carry the fact downstream so synthesis can describe the code honestly.
+        result["executed"] = bool(executed)
         if caps:
             result["needs"] = caps  # model-driven request(s)
         return result

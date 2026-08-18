@@ -1318,3 +1318,59 @@ def test_retrieval_request_with_no_evidence_still_refuses_honestly():
     )
     assert "couldn't find" in state["final_answer"].lower()
     assert "GENERAL" not in state["final_answer"]
+
+
+# --- the code peer VERIFIES execution instead of being told not to skip it ---------
+
+def _stub_code_peer(monkeypatch, responses):
+    """Run default_code_fn with a scripted executor; returns the recorded prompts."""
+    import agent_runtime.executor_factory as ef
+    from agent_runtime.supervisor.graph import default_code_fn
+
+    seen = []
+
+    def fake_invoke(executor, query=None, chat_history=None, config=None, **kw):
+        seen.append(query)
+        return responses[min(len(seen) - 1, len(responses) - 1)]
+
+    monkeypatch.setattr(ef, "build_agent_executor", lambda **kw: object())
+    monkeypatch.setattr(ef, "invoke_agent_with_payload_fallback", fake_invoke)
+    monkeypatch.setattr("agent_runtime.code_execution.is_code_exec_enabled", lambda: True)
+    out = default_code_fn(code_exec=True)("write a script", [], {"thread_id": "t"})
+    return out, seen
+
+
+def _resp(answer, tool_names=()):
+    """Shape extract_search_artifacts/extract_final_answer read: a messages payload."""
+    from langchain_core.messages import AIMessage
+    calls = [{"name": n, "args": {}, "id": f"c{i}"} for i, n in enumerate(tool_names)]
+    msgs = [AIMessage(content="", tool_calls=calls)] if calls else []
+    msgs.append(AIMessage(content=answer))
+    return {"messages": msgs}
+
+
+def test_code_peer_retries_once_when_code_was_never_run(monkeypatch):
+    """Unrun code triggers ONE retry carrying the observation — not a prompt threat."""
+    first = _resp("Here you go:\n```python\nprint(1)\n```")          # no execute_code
+    second = _resp("Ran it; output was 42.", tool_names=["execute_code"])
+    out, seen = _stub_code_peer(monkeypatch, [first, second])
+
+    assert len(seen) == 2, "should re-invoke exactly once"
+    assert "no execute_code record" in seen[1]
+    assert out["executed"] is True
+    assert out["answer"] == "Ran it; output was 42."
+
+
+def test_code_peer_does_not_retry_when_it_already_ran(monkeypatch):
+    out, seen = _stub_code_peer(
+        monkeypatch, [_resp("Ran it:\n```python\nprint(1)\n```", tool_names=["execute_code"])])
+    assert len(seen) == 1
+    assert out["executed"] is True
+
+
+def test_code_peer_reports_unexecuted_when_retry_also_skips(monkeypatch):
+    """The fact travels downstream instead of being asserted as success."""
+    unrun = _resp("Here is the code:\n```python\nprint(1)\n```")
+    out, seen = _stub_code_peer(monkeypatch, [unrun, unrun])
+    assert len(seen) == 2
+    assert out["executed"] is False
