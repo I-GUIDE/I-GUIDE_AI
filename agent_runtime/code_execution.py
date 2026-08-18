@@ -34,12 +34,18 @@ from typing import Any, Dict, List, Optional, Tuple
 DEFAULT_IMAGE = os.getenv("AGENT_CODE_EXEC_IMAGE", "python:3.11-slim")
 DEFAULT_TIMEOUT = int(os.getenv("AGENT_CODE_EXEC_TIMEOUT", "60"))
 DEFAULT_INSTALL_TIMEOUT = int(os.getenv("AGENT_CODE_EXEC_INSTALL_TIMEOUT", "300"))
-DEFAULT_MEMORY = os.getenv("AGENT_CODE_EXEC_MEMORY", "512m")
-# The deps-install phase needs more headroom than execution: building/installing
-# the scientific stack (numpy/pandas/scipy) under the 512m exec limit was getting
-# OOM-killed (exit 137). Give install its own, larger budget.
-DEFAULT_INSTALL_MEMORY = os.getenv("AGENT_CODE_EXEC_INSTALL_MEMORY", "1g")
-DEFAULT_CPUS = os.getenv("AGENT_CODE_EXEC_CPUS", "1.0")
+# Per-run sandbox budget. 512m was too small for the real work this agent is asked to do:
+# a city-scale incident CSV (~130k rows) through pandas + geopandas, a KDE/hexbin heatmap, or
+# a spatial join all exceed it and die as an OOM kill with no useful stderr. 4g is generous
+# for that class of job while still bounding a runaway loop far below a real server's RAM —
+# raise AGENT_CODE_EXEC_MEMORY on a big host (a 60 GB box can comfortably afford 8g-16g).
+DEFAULT_MEMORY = os.getenv("AGENT_CODE_EXEC_MEMORY", "4g")
+# The deps-install phase needs headroom of its own: building/installing the scientific stack
+# (numpy/pandas/scipy/geopandas) was getting OOM-killed (exit 137) under the old exec limit.
+DEFAULT_INSTALL_MEMORY = os.getenv("AGENT_CODE_EXEC_INSTALL_MEMORY", "2g")
+# 1 CPU serializes pandas/geopandas work that is trivially parallel; 2 keeps a single run
+# responsive without letting one job monopolize a shared host.
+DEFAULT_CPUS = os.getenv("AGENT_CODE_EXEC_CPUS", "2.0")
 DEFAULT_PIDS = os.getenv("AGENT_CODE_EXEC_PIDS", "256")
 MAX_OUTPUT_CHARS = 20_000
 MAX_ARTIFACTS = 20
@@ -197,10 +203,21 @@ _SIGNAL_DIAGNOSIS = {
 
 
 def _diagnose_abnormal_exit(exit_code: Optional[int], stderr: str, error: Optional[str]) -> Optional[str]:
-    """Explain a signal-killed run so the caller gets a cause, not a silent failure."""
-    if error or not isinstance(exit_code, int) or exit_code >= 0:
+    """Explain a signal-killed run so the caller gets a cause, not a silent failure.
+
+    Two conventions reach us: a negative code when the docker CLI itself is signalled, and
+    128+N when the CONTAINER is signalled (docker's own convention — an OOM kill is 137).
+    Both used to surface as a bare non-zero exit with empty stderr.
+    """
+    if error or not isinstance(exit_code, int) or exit_code == 0:
         return None
-    name, hint = _SIGNAL_DIAGNOSIS.get(-exit_code, (f"signal {-exit_code}", "the sandbox terminated abnormally."))
+    if exit_code < 0:
+        signo = -exit_code
+    elif 128 < exit_code < 160:
+        signo = exit_code - 128
+    else:
+        return None  # an ordinary non-zero exit: the traceback in stderr is the explanation
+    name, hint = _SIGNAL_DIAGNOSIS.get(signo, (f"signal {signo}", "the sandbox terminated abnormally."))
     detail = f"code execution was killed by {name} (exit {exit_code}); {hint}"
     if not (stderr or "").strip():
         detail += " No stderr was produced, so nothing was written and no output files exist."

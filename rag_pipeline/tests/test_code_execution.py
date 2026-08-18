@@ -408,3 +408,17 @@ def test_geo_artifact_name_prefers_caller_then_source():
     assert artifact_name(None, "geojson", source="chicago_tracts.zip") == "chicago_tracts.geojson"
     assert artifact_name(None, "png", source=None, default="vector_plot") == "vector_plot.png"
     assert artifact_name(None, ".png", source="/vsizip//tmp/a/rivers.zip") == "rivers.png"
+
+
+def test_signal_deaths_are_diagnosed_in_both_conventions():
+    """A signalled run must name its cause: docker reports 128+N, subprocess reports -N."""
+    from agent_runtime.code_execution import _diagnose_abnormal_exit as diagnose
+
+    assert "SIGKILL" in diagnose(137, "", None) and "memory limit" in diagnose(137, "", None)
+    assert "SIGSEGV" in diagnose(139, "", None)      # container segfault
+    assert "SIGSEGV" in diagnose(-11, "", None)      # docker CLI killed
+    assert "nothing was written" in diagnose(137, "", None)
+    # An ordinary failure explains itself through stderr; don't editorialize over it.
+    assert diagnose(1, "Traceback ...", None) is None
+    assert diagnose(0, "", None) is None
+    assert diagnose(137, "", "already diagnosed") is None
