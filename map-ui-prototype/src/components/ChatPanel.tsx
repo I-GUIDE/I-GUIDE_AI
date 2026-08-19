@@ -28,7 +28,6 @@ const RS_ACTIONS = [
 interface Props {
   messages: ChatMessage[];
   busy: boolean;
-  drawMode: boolean;
   hasRegion: boolean;
   layers: LayerArtifact[];
   mode: Mode;
@@ -38,7 +37,6 @@ interface Props {
   resolveUrl: (u: string) => string;
   onSend: (text: string) => void;
   onStop: () => void;
-  onToggleDraw: () => void;
   onClearRegion: () => void;
   onUpload: (files: File[]) => void;
   onSetMode: (m: Mode) => void;
@@ -150,7 +148,9 @@ export function ChatPanel(p: Props) {
       {p.spatial && (
         <>
           <div className="toolbar">
-            <button className={p.drawMode ? 'active' : ''} onClick={p.onToggleDraw}>{p.drawMode ? 'Click 2 corners…' : '▭ Region'}</button>
+            {/* No draw MODE any more: right-drag on the map always selects (rs-embed demo
+                behaviour), so this is a hint rather than a toggle. */}
+            <span className="hint">▭ Right-drag the map to select a region</span>
             <button onClick={p.onClearRegion} disabled={!p.hasRegion}>Clear</button>
             <span className={p.hasRegion ? 'rstat on' : 'rstat'}>{p.hasRegion ? '● region set' : '◇ spatial on'}</span>
           </div>

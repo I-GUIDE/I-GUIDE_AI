@@ -52,10 +52,8 @@ function polygonBBox(poly: Polygon): [number, number, number, number] {
 export default function App() {
   const init = loadCfg();
   const [layers, setLayers] = useState<LayerArtifact[]>([]);
-  const [drawMode, setDrawMode] = useState(false);
   const [drawnRegion, setDrawnRegion] = useState<Polygon | null>(null);
-  const [drawPreview] = useState<Feature | null>(null);
-  const firstCorner = useRef<[number, number] | null>(null);
+  const [drawPreview, setDrawPreview] = useState<Feature | null>(null);
   const [busy, setBusy] = useState(false);
   const [mode, setMode] = useState<Mode>(init.mode);
   const [cfg, setCfg] = useState<AgentCfg>(init.cfg);
@@ -218,15 +216,20 @@ export default function App() {
     setSelected({ name: String(name), layerLabel: layer?.label || layerId, properties: props });
   }, []);
 
-  const onMapClick = useCallback((lng: number, lat: number) => {
-    if (!drawMode) return;
-    if (!firstCorner.current) { firstCorner.current = [lng, lat]; }
-    else {
-      const region = bboxPolygon(firstCorner.current, [lng, lat]); firstCorner.current = null;
-      setDrawMode(false); setDrawnRegion(region);
-      pushMsg({ role: 'agent', text: `Region set (≈ ${areaKm2(region).toLocaleString(undefined, { maximumFractionDigits: 0 })} km²).` });
-    }
-  }, [drawMode, pushMsg]);
+  // Region selection is RIGHT-DRAG on the map (matching the rs-embed demo): press the right
+  // button, sweep a box, release. A right-click that barely moves becomes a small box, so a
+  // single click still selects somewhere. Left-click stays free for inspecting features.
+  const onRegionPreview = useCallback((poly: Polygon | null) => {
+    setDrawPreview(poly ? { type: 'Feature', geometry: poly, properties: {} } : null);
+  }, []);
+  const onRegionDrawn = useCallback((poly: Polygon, viaClick: boolean) => {
+    setDrawnRegion(poly);
+    const km2 = areaKm2(poly).toLocaleString(undefined, { maximumFractionDigits: 0 });
+    pushMsg({ role: 'agent', text: viaClick
+      ? `Region set around that point (≈ ${km2} km²) — right-drag to sweep a bigger box.`
+      : `Region set (≈ ${km2} km²).` });
+  }, [pushMsg]);
+  const onMapClick = useCallback((_lng: number, _lat: number) => { /* left-click inspects features */ }, []);
 
   // ---- LIVE: drive the real agent over SSE, updating the map from events ----
   const runLive = useCallback(async (text: string) => {
@@ -444,7 +447,7 @@ export default function App() {
           <div className="mapwrap" ref={mapBoxRef}>
             {mapBoxReady && (
               <AgentMap
-                layers={layers} drawnRegion={drawnRegion} drawPreview={drawPreview} drawMode={drawMode}
+                layers={layers} drawnRegion={drawnRegion} drawPreview={drawPreview}
                 onMapClick={onMapClick} onHover={() => {}} onFeatureClick={onFeatureClick}
                 onReady={() => {
                   const fc = pendingFit.current;
@@ -452,21 +455,17 @@ export default function App() {
                   if (fc) fitView(fc);
                 }}
                 onResize={refitAfterResize}
+                onRegionPreview={onRegionPreview}
+                onRegionDrawn={onRegionDrawn}
               />
             )}
           </div>
         )}
         <ChatPanel
-          messages={messages} busy={busy} drawMode={drawMode} hasRegion={!!drawnRegion} layers={layers}
+          messages={messages} busy={busy} hasRegion={!!drawnRegion} layers={layers}
           mode={mode} cfg={cfg} spatial={spatial} showSettings={showSettings} resolveUrl={resolveUrl}
           onSend={runAgent}
         onStop={() => abortRef.current?.abort()}
-          onToggleDraw={() => {
-            // Drawing needs somewhere to draw: entering draw mode opens the map. Without
-            // this the button says "Click 2 corners…" over a closed map and nothing happens.
-            setDrawMode((d) => { const next = !d; if (next) setMapVisible(true); return next; });
-            firstCorner.current = null;
-          }}
           onClearRegion={() => { setDrawnRegion(null); pushMsg({ role: 'agent', text: 'Region cleared.' }); }}
           onUpload={onUpload}
           onSetMode={setMode} onSetCfg={setCfg}
