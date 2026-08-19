@@ -39,6 +39,8 @@ export interface MapLayerEvent {
   styleBy?: string;             // numeric property to shade by
   sampled?: boolean;            // true when the layer is a subset of the data
   total?: number;               // full population size when sampled
+  bounds?: [number, number, number, number];  // raster footprint [minLon,minLat,maxLon,maxLat]
+  opacity?: number;             // raster draping opacity
 }
 
 export interface StreamResult {
@@ -221,6 +223,10 @@ export async function streamChat(
             label: layer.label || 'Agent layer', count: layer.count,
             url: layer.url, render: layer.render, styleBy: layer.style_by ?? layer.styleBy,
             sampled: !!layer.sampled, total: layer.total,
+            // A raster layer is an image + its footprint; without bounds it cannot be placed.
+            bounds: Array.isArray(layer.bounds) && layer.bounds.length === 4
+              ? (layer.bounds.map(Number) as [number, number, number, number]) : undefined,
+            opacity: typeof layer.opacity === 'number' ? layer.opacity : undefined,
           });
         } else if (layer.geojson && Array.isArray(layer.geojson.features)) {
           h.onMapLayer?.({

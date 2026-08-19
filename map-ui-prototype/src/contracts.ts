@@ -26,6 +26,21 @@ export interface DeckStyle {
 
 export type LayerArtifact =
   | {
+      // A georeferenced image draped over a geographic extent — e.g. the PCA-RGB picture of
+      // a remote-sensing embedding, or a k-means segmentation mask. It carries no features:
+      // there is nothing to click, and `bounds` is what makes it land in the right place.
+      kind: 'raster';
+      id: string;
+      source: string;
+      label: string;
+      url: string;                                  // image the client fetches
+      bounds: [number, number, number, number];     // [minLon, minLat, maxLon, maxLat]
+      opacity?: number;
+      legend?: Legend[];
+      fitBounds?: boolean;
+      visible?: boolean;
+    }
+  | {
       kind: 'geojson';
       id: string;
       source: string;            // provenance: 'kb' | 'overpass' | 'upload' | 'analysis'
