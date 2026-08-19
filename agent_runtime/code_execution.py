@@ -49,6 +49,10 @@ DEFAULT_CPUS = os.getenv("AGENT_CODE_EXEC_CPUS", "2.0")
 DEFAULT_PIDS = os.getenv("AGENT_CODE_EXEC_PIDS", "256")
 MAX_OUTPUT_CHARS = 20_000
 MAX_ARTIFACTS = 20
+# Above this, an output file is called out in the run result. Cost was invisible: a 37 MB CSV
+# was converted into an 89 MB intermediate GeoJSON and then immediately downsampled, every
+# turn, with nothing in the transcript hinting that it had happened.
+LARGE_ARTIFACT_MB = float(os.getenv("AGENT_LARGE_ARTIFACT_MB", "25"))
 MAX_DEPS = 50
 # Deps install under this dir inside the work dir; added to PYTHONPATH for the run.
 DEPS_DIRNAME = ".deps"
@@ -222,6 +226,20 @@ _SIGNAL_DIAGNOSIS = {
                    "third-party dependencies."),
     15: ("SIGTERM", "the sandbox was terminated (time or resource limit)."),
 }
+
+
+
+def _size_report(artifacts: List[Dict[str, Any]]) -> Optional[str]:
+    """Name the run's output sizes when they are big enough to matter."""
+    sized = [(a.get("filename") or "?", int(a.get("size_bytes") or 0)) for a in artifacts]
+    big = [(n, b) for n, b in sized if b >= LARGE_ARTIFACT_MB * 1024 * 1024]
+    if not big:
+        return None
+    total_mb = sum(b for _, b in sized) / 1024 / 1024
+    listed = ", ".join(f"{n} {b / 1024 / 1024:.1f} MB" for n, b in big)
+    return (f"[large output: {listed}; {total_mb:.1f} MB written this run. If it is an intermediate, "
+            f"the geo tools read the ORIGINAL upload directly (CSV/shapefile/GeoPackage/GeoParquet), "
+            f"so converting first is usually avoidable; otherwise write only the columns you need.]")
 
 
 def _diagnose_abnormal_exit(exit_code: Optional[int], stderr: str, error: Optional[str]) -> Optional[str]:
@@ -491,6 +509,9 @@ class CodeExecutor:
             if auto:
                 stderr = (str(stderr or "")
                           + f"\n[installed imports you did not declare: {auto}]").strip()
+            size_note = _size_report(artifacts)
+            if size_note:
+                stderr = (str(stderr or "") + "\n" + size_note).strip()
             if stage_errors:
                 stderr = (str(stderr or "") + f"\n[input file staging errors: {stage_errors}]").strip()
             # Signal-killed runs carry no stderr; surface a cause so the agent can react.

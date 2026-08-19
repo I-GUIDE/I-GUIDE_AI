@@ -630,6 +630,7 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                    "on_map": True,
                    # Consumed by agent_runtime.map_layers.build_map_layer -> `map_layer` SSE event.
                    "sampled": bool(sampled), "features_total": total,
+                   "size_bytes": rec.get("size_bytes"),
                    "map_layer": {"url": rec.get("download_url"), "label": label, "render": mode,
                                  "style_by": column, "source": "analysis",
                                  "count": int(len(gdf)),

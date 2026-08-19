@@ -156,6 +156,32 @@ def _extract_function_source(code: str, fname: str) -> Optional[str]:
     return None
 
 
+
+def _nearest_blocks(*terms: str, limit: int = 5) -> dict:
+    """Real KB blocks resembling a doc_id that does not exist.
+
+    A bare "block not found" is a dead end: the model had guessed a plausible-sounding id
+    (observed: load_chicago_crime_data, in 3 of 3 runs) and, told only that it was wrong,
+    burned a turn before falling back to writing code. Naming the nearest REAL blocks turns
+    the failure into a next step.
+    """
+    try:
+        from rag_pipeline.search.agent_kb import agent_kb_search
+
+        query = " ".join(t for t in terms if t)
+        res = agent_kb_search(query, size=limit) or {}
+        cands = [{"doc_id": d.get("doc_id"), "title": d.get("title")}
+                 for d in (res.get("documents") or [])[:limit] if d.get("doc_id")]
+        if not cands:
+            return {"hint": "No similar KB block exists. Search first with agent_kb_search, "
+                            "or do the work with execute_code instead of guessing an id."}
+        return {"candidates": cands,
+                "hint": "These real blocks are the closest matches — pass one of THEIR doc_ids, "
+                        "or use execute_code if none fit."}
+    except Exception:
+        return {"hint": "Search agent_kb_search for a real block id; do not guess one."}
+
+
 def kb_run_geofunction(doc_id: str, function_name: str, args_json: str = "{}") -> str:
     """Execute an extracted spatial function from a KB block via file handles.
 
@@ -167,11 +193,16 @@ def kb_run_geofunction(doc_id: str, function_name: str, args_json: str = "{}") -
     from rag_pipeline.search.agent_kb import get_kb_block
     blk = get_kb_block(doc_id)
     if not blk.get("found"):
-        return json.dumps({"error": f"block not found: {doc_id}"})
+        return json.dumps({"error": f"block not found: {doc_id}",
+                            **_nearest_blocks(doc_id, function_name)})
     code = ((blk.get("source") or {}).get("extracted") or {}).get("block", {}).get("code", "")
     func_src = _extract_function_source(code, function_name)
     if not func_src:
-        return json.dumps({"error": f"{function_name} not defined in {doc_id}"})
+        # Say what the block DOES define, so the caller can pick instead of guessing again.
+        import re as _re
+        defined = _re.findall(r"^\s*def\s+([A-Za-z_]\w*)", code or "", _re.M)
+        return json.dumps({"error": f"{function_name} not defined in {doc_id}",
+                            "functions_in_block": defined[:20]})
     ns: dict = {}
     try:
         exec(_GEO_PRELUDE + func_src, ns)

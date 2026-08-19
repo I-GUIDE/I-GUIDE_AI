@@ -463,3 +463,14 @@ def test_carried_files_are_not_re_persisted_unless_changed(tmp_path):
     unchanged = {rel for rel, sig in now.items() if carried.get(rel) == sig}
     assert unchanged == set()                        # project.txt changed -> counts as output
     assert "new.geojson" in now
+
+
+def test_large_outputs_are_called_out_in_the_result():
+    """An 89MB intermediate was written every turn with nothing in the transcript saying so."""
+    from agent_runtime.code_execution import _size_report
+
+    assert _size_report([{"filename": "small.geojson", "size_bytes": 2_000_000}]) is None
+    note = _size_report([{"filename": "incidents.geojson", "size_bytes": 89_184_842},
+                         {"filename": "run.py", "size_bytes": 437}])
+    assert "incidents.geojson" in note and "85.1 MB" in note
+    assert "ORIGINAL upload" in note          # says how to avoid it, not just that it happened
