@@ -201,6 +201,19 @@ def kb_select_rows(df_file_id: str, column: str, values_csv: str) -> str:
         return json.dumps({"error": f"{type(exc).__name__}: {exc}"})
 
 
+def _read_any_vector(ref: str):
+    """Load a points/polygons file for the image tools.
+
+    These handles went through a parquet-only reader, so a .geojson the agent had just
+    produced failed with "Parquet magic bytes not found" — observed when an on-the-map
+    request tried the image tool first. Read whatever the file actually is.
+    """
+    from agent_runtime.langchain_geo_tools import _resolve, read_vector
+
+    path, _rec = _resolve(str(ref))
+    return read_vector(str(path))
+
+
 def heatmap_image(points_file_id: str, title: str = "Density heat map") -> str:
     """Draw a hexbin point-density heat map as a STATIC PNG PICTURE from a points file.
 

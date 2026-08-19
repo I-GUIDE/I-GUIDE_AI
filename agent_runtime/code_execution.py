@@ -115,6 +115,28 @@ def _sanitize_deps(dependencies: Optional[List[Any]]) -> Tuple[List[str], List[s
     return allowed[:MAX_DEPS], rejected
 
 
+# The sandbox image ships no third-party packages, so code that imports pandas dies with
+# ModuleNotFoundError unless `dependencies` was passed. Observed in every data task: the model
+# omits it, burns a container run, reads the traceback, then retries the byte-identical code
+# with dependencies set. Infer the obvious ones from the source instead of charging the user a
+# failed run for a detail the code already states.
+_IMPORT_TO_PIP = {
+    "pandas": "pandas", "geopandas": "geopandas", "numpy": "numpy", "shapely": "shapely",
+    "matplotlib": "matplotlib", "scipy": "scipy", "sklearn": "scikit-learn", "pyproj": "pyproj",
+    "fiona": "fiona", "rasterio": "rasterio", "seaborn": "seaborn", "statsmodels": "statsmodels",
+    "pyarrow": "pyarrow", "networkx": "networkx", "folium": "folium", "mapclassify": "mapclassify",
+    "requests": "requests", "bs4": "beautifulsoup4", "PIL": "pillow", "openpyxl": "openpyxl",
+}
+
+
+def _infer_deps(code: str, declared: List[str]) -> List[str]:
+    """pip names for third-party modules the code imports but nobody declared."""
+    imported = set(re.findall(r"^[ \t]*(?:import|from)[ \t]+([A-Za-z_][\w.]*)", str(code or ""), re.M))
+    tops = {name.split(".")[0] for name in imported}
+    have = {re.split(r"[<>=!~\[]", d)[0].strip().lower() for d in declared}
+    return [pip for mod, pip in _IMPORT_TO_PIP.items() if mod in tops and pip.lower() not in have]
+
+
 def is_code_exec_enabled() -> bool:
     """Whether code execution is enabled. **On by default**; set ``AGENT_CODE_EXEC`` to a falsy
     value (0/false/no/off) to disable the sandboxed ``execute_code`` tool."""
@@ -426,6 +448,9 @@ class CodeExecutor:
                               backend=self.backend, code=(code or ""))
         timeout = int(timeout or DEFAULT_TIMEOUT)
         deps, rejected = _sanitize_deps(dependencies)
+        auto = _infer_deps(code, deps)
+        if auto:
+            deps = [*deps, *auto]
         try:
             work = Path(tempfile.mkdtemp(prefix="agentexec_", dir=_work_root()))
         except OSError as exc:
@@ -463,6 +488,9 @@ class CodeExecutor:
                 _copy_tree(work, workspace, skip={"script.py", *staged})
             if rejected:
                 stderr = (str(stderr or "") + f"\n[ignored unsafe dependencies: {rejected}]").strip()
+            if auto:
+                stderr = (str(stderr or "")
+                          + f"\n[installed imports you did not declare: {auto}]").strip()
             if stage_errors:
                 stderr = (str(stderr or "") + f"\n[input file staging errors: {stage_errors}]").strip()
             # Signal-killed runs carry no stderr; surface a cause so the agent can react.

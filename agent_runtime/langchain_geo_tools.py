@@ -31,6 +31,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # Above this, a GeoJSON is too bulky to ship and parquet is written instead.
 _GEOJSON_MAX_FEATURES = int(os.getenv("AGENT_GEOJSON_MAX_FEATURES", "60000"))
+# Attributes carried on a density layer so clicking a point still says something.
+_HEATMAP_KEEP_COLUMNS = int(os.getenv("AGENT_HEATMAP_KEEP_COLUMNS", "6"))
 
 _SELF_CONTAINED = {".geojson", ".json", ".gpkg", ".parquet", ".geoparquet", ".fgb", ".kml"}
 # Components of an (extracted) ESRI shapefile set — any one of these is enough to reference it.
@@ -593,8 +595,12 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                                        "numeric_columns": numeric[:40]})
                 gdf = gdf[[column, "geometry"]]
             elif mode == "heatmap":
+                # Keep a few attributes: the map lets the user click a feature, and a layer
+                # whose properties are all {} shows an empty panel. Trim to a handful so a
+                # 50k-point layer stays small enough to fetch.
                 keep = [c for c in gdf.columns if c == "geometry" or c == column]
-                gdf = gdf[keep] if len(keep) > 1 else gdf[["geometry"]]
+                extra = [c for c in gdf.columns if c not in keep][:_HEATMAP_KEEP_COLUMNS]
+                gdf = gdf[[*keep, *extra]] if extra else gdf[keep]
             # A heat map reads the same from a large sample, and the browser has to fetch this.
             note = None
             if len(gdf) > max_points and mode in {"heatmap", "points"}:
