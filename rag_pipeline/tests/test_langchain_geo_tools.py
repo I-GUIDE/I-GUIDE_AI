@@ -59,7 +59,7 @@ def shapefile(monkeypatch, tmp_path):
 def test_factory_shape():
     tools = _tools()
     assert set(tools) == {"inspect_vector", "plot_vector", "vector_to_geojson",
-                          "reproject_vector", "vector_spatial_join"}
+                          "reproject_vector", "vector_spatial_join", "add_map_layer"}
     assert all(getattr(t, "metadata", {}).get("category") == "geo" for t in tools.values())
 
 
@@ -198,3 +198,34 @@ def test_lone_shp_without_sidecars_fails_clearly(shapefile):
     tools = _tools_with([shapefile["shp_id"]])  # only the .shp is "attached"
     r = json.loads(tools["inspect_vector"].invoke({"file_id": shapefile["shp_id"]}))
     assert r["ok"] is False and r.get("hint")
+
+
+# --- add_map_layer: the interactive-map delivery path ----------------------------
+
+def test_add_map_layer_describes_a_layer_for_the_client(shapefile):
+    """The tool must return a map_layer descriptor build_map_layer can forward."""
+    import json
+    from agent_runtime.map_layers import build_map_layer
+
+    out = _tools()["add_map_layer"].func(file_id=shapefile["zip_id"], render="auto", name="parcels")
+    res = json.loads(out)
+    assert res["ok"], res
+    assert res["filename"].endswith(".geojson")     # GeoJSON, never parquet: the client reads it
+    assert res["on_map"] is True
+    ml = res["map_layer"]
+    assert ml["url"] and ml["render"] in {"points", "shapes", "heatmap"}
+
+    layer = build_map_layer("add_map_layer", out)   # -> the `map_layer` SSE event
+    assert layer["kind"] == "map_layer"
+    assert layer["url"] == ml["url"]
+    assert layer["label"] == "parcels"
+
+
+def test_choropleth_reports_the_numeric_columns_when_the_column_is_wrong(shapefile):
+    """An arbitrary first-N column list hid the very column being looked for."""
+    import json
+
+    res = json.loads(_tools()["add_map_layer"].func(
+        file_id=shapefile["zip_id"], render="choropleth", column="does_not_exist"))
+    assert res["ok"] is False
+    assert "numeric_columns" in res          # candidates, not a truncated slice of everything
