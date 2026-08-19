@@ -1490,3 +1490,42 @@ def test_map_delivery_is_detected_from_a_nested_tool_record():
     assert _map_layer_was_delivered({"code_result": {"tool_results": [{"name": "add_map_layer"}]}})
     assert _map_layer_was_delivered({"analysis_results": [{"steps": [{"result": {"on_map": True}}]}]})
     assert not _map_layer_was_delivered({"analysis_results": {"tool_calls": [{"name": "heatmap_image"}]}})
+
+
+def test_map_delivery_is_seen_inside_a_json_string_tool_result():
+    """Tool results arrive as JSON STRINGS. A real 2 km buffer_layer delivery was missed by a
+    dict-only walk, so nine artifacts and four map layers still drew a 'hallucinated claims
+    about buffering and map display' caveat."""
+    import json as _json
+    from agent_runtime.supervisor.graph import _map_layer_was_delivered
+
+    payload = _json.dumps({"ok": True, "on_map": True, "buffer_km": 2.0,
+                           "map_layer": {"url": "/agent/files/x/download", "render": "shapes"}})
+    ctx = {"analysis_results": {"summary": "buffered", "tool_results": [
+        {"name": "buffer_layer", "content": payload}]}}
+    assert _map_layer_was_delivered(ctx)
+
+    # A PNG-only turn must still read as undelivered.
+    png = {"analysis_results": {"tool_results": [
+        {"name": "heatmap_image", "content": _json.dumps({"ok": True, "file_id": "f"})}]}}
+    assert not _map_layer_was_delivered(png)
+
+
+def test_toolkit_layers_count_as_delivery_for_the_analyze_peer(monkeypatch):
+    """buffer_layer/aggregate_to_grid deliver layers without being named add_map_layer."""
+    import json as _json
+    from langchain_core.messages import AIMessage
+
+    from langchain_core.messages import ToolMessage
+
+    payload = _json.dumps({"ok": True, "on_map": True, "map_layer": {"render": "shapes"}})
+    resp = {"messages": [
+        AIMessage(content="", tool_calls=[{"name": "buffer_layer", "args": {}, "id": "c0"}]),
+        ToolMessage(content=payload, tool_call_id="c0", name="buffer_layer"),
+        AIMessage(content="Buffered and shown on your map."),
+    ]}
+
+    out, seen = _stub_analyze_peer(monkeypatch, [resp],
+                                   query="buffer the hotspot by 2 km and show it on the map")
+    assert len(seen) == 1, "a delivered toolkit layer must not trigger the retry"
+    assert out["on_map"] is True

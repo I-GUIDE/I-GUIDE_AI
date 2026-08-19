@@ -509,11 +509,21 @@ _MAP_CLAIM_MARKERS = (
 )
 
 
+# A tool result usually arrives as a JSON STRING, not a parsed dict, so a structural walk
+# alone misses the delivery: the spatial toolkit (buffer_layer, aggregate_to_grid,
+# cluster_points, …) reports on_map/map_layer inside that string and is not named
+# add_map_layer, which is how a genuinely-delivered 2 km buffer still drew a
+# "hallucinated claims about buffering and map display" caveat over nine real artifacts.
+# Match the payload itself rather than enumerating tool names, so new layer-emitting tools
+# are covered the day they are added.
+_MAP_DELIVERY_RE = re.compile(r'"map_layer"\s*:\s*\{|"on_map"\s*:\s*true', re.I)
+
+
 def _map_layer_was_delivered(execution_context: Optional[Dict[str, Any]]) -> bool:
     """Whether this turn actually put a layer on the user's map."""
     def walk(obj: Any) -> bool:
         if isinstance(obj, dict):
-            if obj.get("on_map") is True:
+            if obj.get("on_map") is True or isinstance(obj.get("map_layer"), dict):
                 return True
             if str(obj.get("name") or obj.get("tool_name") or "") in _MAP_LAYER_TOOLS:
                 return True
@@ -522,7 +532,14 @@ def _map_layer_was_delivered(execution_context: Optional[Dict[str, Any]]) -> boo
             return any(walk(v) for v in obj)
         return False
 
-    return walk(execution_context)
+    if walk(execution_context):
+        return True
+    try:
+        blob = json.dumps(execution_context, default=str)
+    except Exception:
+        blob = str(execution_context)
+    # Un-escape so a payload nested as a JSON string matches the same pattern.
+    return bool(_MAP_DELIVERY_RE.search(blob.replace('\\"', '"')))
 
 
 def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
@@ -1829,7 +1846,9 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
         # the map (or the answer says it is there) and no layer-emitting tool ran, hand the
         # peer that observation once. A peer that asked for another capability is stopping
         # legitimately, so it is left alone. Only meaningful when geo tools were loaded.
-        on_map = _called_tool(artifacts, _MAP_LAYER_TOOLS)
+        # Any tool that reports a map_layer/on_map counts — not just add_map_layer, or the
+        # spatial toolkit's own layers (buffer_layer, aggregate_to_grid, …) would look undelivered.
+        on_map = _called_tool(artifacts, _MAP_LAYER_TOOLS) or _map_layer_was_delivered(artifacts)
         wants_map = bool(_WANTS_MAP_RE.search(query or "")
                          or _CLAIMS_MAP_RE.search(result["summary"] or ""))
         if input_file_ids and wants_map and not on_map and not caps:
@@ -1844,7 +1863,8 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
                 config=agent_config(child_thread_id(thread_id, "analysis")),
             )
             retry_artifacts = extract_search_artifacts(resp_retry)
-            on_map = _called_tool(retry_artifacts, _MAP_LAYER_TOOLS)
+            on_map = (_called_tool(retry_artifacts, _MAP_LAYER_TOOLS)
+                      or _map_layer_was_delivered(retry_artifacts))
             result["summary"] = extract_final_answer(resp_retry) or result["summary"]
             result["tool_calls"] = [*result["tool_calls"], *(retry_artifacts.get("tool_calls") or [])]
             result["tool_results"] = [*result["tool_results"], *(retry_artifacts.get("tool_results") or [])]

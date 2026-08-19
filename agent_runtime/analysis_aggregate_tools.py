@@ -356,6 +356,56 @@ def _label_for(name: Optional[str], rec: Dict[str, Any]) -> str:
     return (name or Path(str(rec.get("filename") or "layer")).stem).replace("_", " ")
 
 
+# Attribute selection — the plainest GIS operation there is, and the one the toolkit was
+# missing. Asked to "buffer the busiest cell", the analyze peer had no way to isolate one
+# feature, so it buffered all 708 grid cells (4,504 overlapping polygons covering the city)
+# and reported it as a buffer "around the busiest grid cell".
+_SELECT_OPS = ("==", "!=", ">", ">=", "<", "<=", "in", "not_in", "contains", "between",
+               "isnull", "notnull")
+
+
+def _apply_predicate(gdf: Any, column: str, op: str, value: Any,
+                     notes: List[str]) -> Tuple[Optional[Any], str]:
+    """Filter *gdf* by ``column op value``. Returns (selection, human criterion)."""
+    import pandas as pd
+
+    col = gdf[column]
+    key = str(op).strip().lower()
+    if key in ("isnull", "notnull"):
+        mask = col.isna() if key == "isnull" else col.notna()
+        return gdf[mask], f"{column} {key}"
+    if key in ("in", "not_in"):
+        wanted = value if isinstance(value, (list, tuple, set)) else [value]
+        as_str = col.astype(str)
+        mask = as_str.isin([str(v) for v in wanted])
+        return gdf[mask if key == "in" else ~mask], f"{column} {key} {list(wanted)!r}"
+    if key == "contains":
+        mask = col.astype(str).str.contains(str(value), case=False, na=False)
+        return gdf[mask], f"{column} contains {value!r}"
+    if key == "between":
+        pair = list(value) if isinstance(value, (list, tuple)) else []
+        if len(pair) != 2:
+            notes.append("between needs value=[low, high]")
+            return gdf.iloc[0:0], f"{column} between {value!r}"
+        lo, hi = sorted(pd.to_numeric(pd.Series(pair), errors="coerce").tolist())
+        num = pd.to_numeric(col, errors="coerce")
+        return gdf[num.between(lo, hi)], f"{column} between {lo} and {hi}"
+    if key not in _SELECT_OPS:
+        return None, f"{column} {op} {value!r}"
+
+    # Compare numerically when both sides are numbers, textually otherwise, so
+    # value="12" against an int column still matches instead of silently returning nothing.
+    num_col = pd.to_numeric(col, errors="coerce")
+    num_val = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    if num_col.notna().any() and pd.notna(num_val):
+        left, right = num_col, num_val
+    else:
+        left, right = col.astype(str), str(value)
+    mask = {"==": left == right, "!=": left != right, ">": left > right,
+            ">=": left >= right, "<": left < right, "<=": left <= right}[key]
+    return gdf[mask.fillna(False) if hasattr(mask, "fillna") else mask], f"{column} {key} {value!r}"
+
+
 def make_aggregate_tools(default_input_file_ids: Optional[List[str]] = None) -> List[Any]:
     """Build the aggregation / proximity / pattern StructuredTools.
 
@@ -1094,8 +1144,112 @@ def make_aggregate_tools(default_input_file_ids: Optional[List[str]] = None) -> 
         except Exception as exc:
             return _fail(exc, _SIB)
 
+    def select_by_attribute(file_id: str, column: Optional[str] = None, op: str = "==",
+                            value: Optional[Any] = None, top_n: Optional[int] = None,
+                            ascending: bool = False, render: str = "auto",
+                            style_by: Optional[str] = None, name: Optional[str] = None,
+                            sibling_file_ids: Optional[List[str]] = None,
+                            layer: Optional[str] = None) -> str:
+        """Keep only the features matching an attribute test, or the top/bottom N by a column.
+
+        `column` + `top_n` ranks (ascending=True for the smallest); `column` + `op` + `value`
+        compares. Returns the selection as its own layer plus a CSV, so it can be fed straight
+        into buffer_layer / clip_layer instead of operating on the whole input.
+        """
+        try:
+            with _open(file_id, sibling_file_ids, layer) as gdf:
+                source = _source_stem(file_id)
+                notes: List[str] = []
+                total_in = int(len(gdf))
+                if column is not None and column not in gdf.columns:
+                    return _missing_column("attribute", column, gdf, numeric=False)
+
+                if top_n is not None:
+                    if column is None:
+                        return _bad("top_n needs a `column` to rank by.",
+                                    "Pass the column holding the value to rank on.",
+                                    numeric_columns=_numeric_columns(gdf))
+                    series = _numeric_series(gdf, column, notes)
+                    if series is None:
+                        return _missing_column("ranking", column, gdf, numeric=True)
+                    n = max(int(top_n), 1)
+                    order = series.sort_values(ascending=bool(ascending), na_position="last")
+                    selected = gdf.loc[order.index[:n]]
+                    criterion = f"{'bottom' if ascending else 'top'} {n} by {column}"
+                else:
+                    if column is None or (value is None
+                                          and str(op).lower() not in ("isnull", "notnull")):
+                        return _bad("select_by_attribute needs `column` plus either a `value` "
+                                    "(with `op`) or `top_n`.",
+                                    "Example: column='point_count', op='>=', value=50 — or "
+                                    "column='point_count', top_n=1 for the single busiest feature.",
+                                    columns=_attribute_columns(gdf),
+                                    accepted_ops=list(_SELECT_OPS))
+                    selected, criterion = _apply_predicate(gdf, column, str(op), value, notes)
+                    if selected is None:
+                        return _bad(f"unsupported op {op!r}.",
+                                    "Use one of the accepted comparisons.",
+                                    accepted_ops=list(_SELECT_OPS))
+
+                if not len(selected):
+                    # Never hand back an empty layer: say what the column actually holds so the
+                    # next attempt can be right instead of mapping nothing.
+                    probe: Dict[str, Any] = {"matched": 0}
+                    if column in gdf.columns:
+                        col = gdf[column]
+                        numeric = _numeric_series(gdf, column, [])
+                        if numeric is not None and len(numeric.dropna()):
+                            probe["range"] = [_num(numeric.min()), _num(numeric.max())]
+                        probe["example_values"] = [str(v) for v in col.dropna().unique()[:12]]
+                    return _bad(f"{criterion} matched no features — not writing an empty layer.",
+                                "Widen the test, or check the value against what the column holds.",
+                                column=column, **probe)
+
+                mode = (render or "auto").strip().lower()
+                if mode == "auto":
+                    kinds = {str(k) for k in selected.geometry.geom_type.unique()}
+                    mode = "points" if kinds and kinds <= {"Point", "MultiPoint"} else "shapes"
+                if style_by and style_by not in selected.columns:
+                    notes.append(f"style_by {style_by!r} is not a column of the result; dropped")
+                    style_by = None
+
+                stem = _stem(name, source, "selected")
+                mapped, sampled, total_out, sample_note = _sample_for_map(selected, mode, None)
+                if sample_note:
+                    notes.append(sample_note)
+                rec = _write_geojson(mapped, name, source, stem)
+                table = selected.drop(columns=[_geom_name(selected)], errors="ignore")
+                csv_rec = _write_csv(table, name, source, f"{stem}_table")
+                payload: Dict[str, Any] = {
+                    "ok": True, "file_id": rec["file_id"], "filename": rec.get("filename"),
+                    "download_url": rec.get("download_url"),
+                    "feature_count": int(len(selected)), "features_in": total_in,
+                    "criterion": criterion, "column": column, "csv": _asset(csv_rec),
+                    "on_map": True,
+                    "map_layer": _map_layer(rec, _label_for(name, rec), mode, style_by,
+                                            int(len(mapped)), sampled=sampled, total=total_out),
+                }
+                if notes:
+                    payload["notes"] = notes
+                return _dumps(payload)
+        except Exception as exc:
+            return _fail(exc, _SIB)
+
     meta = {"category": "geo"}
     return [
+        StructuredTool.from_function(
+            func=select_by_attribute, name="select_by_attribute", metadata=meta,
+            description=(
+                "SELECT A SUBSET of a layer by its attributes — the everyday GIS 'select by "
+                "attribute' / query, and the step that turns a whole layer into THE ONE FEATURE "
+                "you meant. 'the busiest grid cell' is top_n=1 on the count column; 'cells with "
+                "50+ incidents' is op='>=', value=50; 'only ward 12' is op='==', value=12. "
+                "column + top_n ranks (ascending=True for the smallest), column + op + value "
+                "compares: " + "|".join(_SELECT_OPS) + ". Returns the matching features as their "
+                "own GeoJSON layer on the map plus a CSV, so you can feed the result straight "
+                "into buffer_layer/clip_layer instead of operating on every feature. A test that "
+                "matches nothing returns the column's real range and example values rather than "
+                "an empty layer. " + _SIB)),
         StructuredTool.from_function(
             func=count_points_in_areas, name="count_points_in_areas", metadata=meta,
             description=(

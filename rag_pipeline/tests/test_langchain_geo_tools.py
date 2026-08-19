@@ -169,7 +169,7 @@ def test_geo_tools_wired_into_peers_only_with_files(monkeypatch):
 OVERLAY_TOOLS = {"clip_layer", "dissolve_layer", "intersect_layers", "erase_layer",
                  "buffer_layer", "simplify_layer", "geometry_summary"}
 AGGREGATE_TOOLS = {"count_points_in_areas", "aggregate_to_grid", "nearest_distance",
-                   "cluster_points", "summary_statistics"}
+                   "cluster_points", "summary_statistics", "select_by_attribute"}
 TEMPORAL_TOOLS = {"detect_time_column", "filter_by_time", "time_series",
                   "compare_periods", "temporal_hotspots"}
 ANALYSIS_TOOLS = OVERLAY_TOOLS | AGGREGATE_TOOLS | TEMPORAL_TOOLS

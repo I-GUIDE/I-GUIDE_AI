@@ -70,7 +70,7 @@ def incidents(tmp_path):
 def test_factory_shape():
     tools = _tools()
     assert set(tools) == {"count_points_in_areas", "aggregate_to_grid", "nearest_distance",
-                          "cluster_points", "summary_statistics"}
+                          "cluster_points", "summary_statistics", "select_by_attribute"}
     assert all(getattr(t, "metadata", {}).get("category") == "geo" for t in tools.values())
     assert all((t.description or "").strip() for t in tools.values())
 
@@ -436,3 +436,75 @@ def test_no_tool_raises_on_a_missing_file():
         res = json.loads(tools[tool_name].func(**kwargs))
         assert res["ok"] is False, tool_name
         assert res["error"] and res["hint"], tool_name
+
+# --- select_by_attribute: the missing fundamental ---------------------------------
+# Asked to "buffer the busiest cell", the analyze peer had no way to isolate one feature, so it
+# buffered all 708 grid cells (4,504 overlapping polygons) and called it the busiest cell.
+
+@pytest.fixture()
+def grid(tmp_path):
+    """Four cells carrying a point_count, the shape aggregate_to_grid emits."""
+    path = tmp_path / "grid.geojson"
+    gpd.GeoDataFrame(
+        {"cell_id": ["a", "b", "c", "d"], "point_count": [3, 91, 12, 91],
+         "ward": ["12", "12", "7", "7"]},
+        geometry=[box(0, 0, 1, 1), box(1, 0, 2, 1), box(0, 1, 1, 2), box(1, 1, 2, 2)],
+        crs="EPSG:4326",
+    ).to_file(path, driver="GeoJSON")
+    return str(path)
+
+
+def test_top_n_isolates_a_single_feature(grid):
+    out = _call("select_by_attribute", file_id=grid, column="point_count", top_n=1,
+                name="busiest")
+
+    assert out["ok"] is True
+    assert out["feature_count"] == 1 and out["features_in"] == 4
+    assert out["criterion"] == "top 1 by point_count"
+    # It must arrive as its own map layer, feedable straight into buffer_layer.
+    assert out["on_map"] is True and out["map_layer"]["count"] == 1
+    assert out["csv"]["file_id"]
+    assert int(_read_output(out["file_id"])["point_count"].iloc[0]) == 91
+
+
+def test_ascending_takes_the_smallest(grid):
+    out = _call("select_by_attribute", file_id=grid, column="point_count", top_n=1,
+                ascending=True)
+    assert int(_read_output(out["file_id"])["point_count"].iloc[0]) == 3
+
+
+def test_comparison_and_membership_select_the_right_rows(grid):
+    assert _call("select_by_attribute", file_id=grid, column="point_count",
+                 op=">=", value=12)["feature_count"] == 3
+    # A value passed as a STRING against an int column must still compare numerically.
+    assert _call("select_by_attribute", file_id=grid, column="point_count",
+                 op=">=", value="12")["feature_count"] == 3
+    assert _call("select_by_attribute", file_id=grid, column="ward",
+                 op="in", value=["7"])["feature_count"] == 2
+    assert _call("select_by_attribute", file_id=grid, column="point_count",
+                 op="between", value=[10, 50])["feature_count"] == 1
+    assert _call("select_by_attribute", file_id=grid, column="ward",
+                 op="==", value="12")["feature_count"] == 2
+
+
+def test_an_empty_selection_reports_the_real_range_instead_of_an_empty_layer(grid):
+    out = _call("select_by_attribute", file_id=grid, column="point_count", op=">", value=10_000)
+
+    assert out["ok"] is False
+    assert out["matched"] == 0
+    assert out["range"] == [3, 91]          # says what the column actually holds
+    assert "empty layer" in out["error"]
+
+
+def test_bad_column_and_bad_op_name_the_alternatives(grid):
+    col = _call("select_by_attribute", file_id=grid, column="nope", top_n=1)
+    assert col["ok"] is False and "point_count" in col["candidate_columns"]
+
+    op = _call("select_by_attribute", file_id=grid, column="point_count", op="~=", value=1)
+    assert op["ok"] is False and ">=" in op["accepted_ops"]
+
+
+def test_missing_criterion_explains_both_ways_to_select(grid):
+    out = _call("select_by_attribute", file_id=grid, column="point_count")
+    assert out["ok"] is False
+    assert "top_n" in out["error"] and "top_n" in out["hint"]
