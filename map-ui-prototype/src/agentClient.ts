@@ -37,6 +37,8 @@ export interface MapLayerEvent {
   url?: string;                 // fetch instead of inlining (large layers)
   render?: string;              // 'heatmap' | 'choropleth' | 'points' | 'shapes'
   styleBy?: string;             // numeric property to shade by
+  sampled?: boolean;            // true when the layer is a subset of the data
+  total?: number;               // full population size when sampled
 }
 
 export interface StreamResult {
@@ -218,6 +220,7 @@ export async function streamChat(
             id: layer.id || 'agent-layer', source: layer.source || 'analysis',
             label: layer.label || 'Agent layer', count: layer.count,
             url: layer.url, render: layer.render, styleBy: layer.style_by ?? layer.styleBy,
+            sampled: !!layer.sampled, total: layer.total,
           });
         } else if (layer.geojson && Array.isArray(layer.geojson.features)) {
           h.onMapLayer?.({
@@ -227,6 +230,7 @@ export async function streamChat(
             count: layer.count,
             geojson: layer.geojson,
             render: layer.render, styleBy: layer.style_by ?? layer.styleBy,
+            sampled: !!layer.sampled, total: layer.total,
           });
         }
         break;

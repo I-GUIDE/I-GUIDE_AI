@@ -42,7 +42,9 @@ export function LeftPanel(p: Props) {
                 <button className="eye" title={visible ? 'Hide' : 'Show'} onClick={() => p.onToggleLayer(l.id)}>{visible ? '👁' : '⦰'}</button>
                 <span className="dot" style={{ background: SOURCE_COLORS[l.source] ?? '#888' }} />
                 <button className="lname" title="Zoom to layer" onClick={() => p.onFitLayer(l.id)}>{l.label}</button>
-                <span className="cnt">{n}</span>
+                <span className="cnt" title={l.partial ? `sample of ${l.partial.total}` : undefined}>
+                  {l.partial ? `${l.partial.shown}/${l.partial.total}` : n}
+                </span>
                 <button className="x" title="Remove" onClick={() => p.onRemoveLayer(l.id)}>×</button>
               </li>
             );

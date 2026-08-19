@@ -216,6 +216,9 @@ export default function App() {
             data: fc, fitBounds: true,
             render: heat ? 'heatmap' : 'geojson',
             styleBy: layer.styleBy,
+            partial: layer.sampled && layer.total
+              ? { shown: layer.count ?? fc.features.length, total: layer.total }
+              : undefined,
             style: heat
               ? { opacity: 0.85 }
               : green
@@ -223,7 +226,10 @@ export default function App() {
                 : { fill: [124, 58, 237, 120], line: [124, 58, 237, 255], lineWidth: 2, pointRadius: 6 },
           });
           fitView(fc);
-          addTrace({ text: `map: ${layer.render || 'layer'} — ${layer.label} (${layer.count ?? fc.features.length} features)`, kind: 'tool' });
+          addTrace({ text: `map: ${layer.render || 'layer'} — ${layer.label} `
+            + (layer.sampled && layer.total
+                ? `(SAMPLE: ${layer.count ?? fc.features.length} of ${layer.total})`
+                : `(${layer.count ?? fc.features.length} features)`), kind: 'tool' });
         },
         onIds: ({ threadId, memoryId }) => { if (threadId) threadRef.current = threadId; if (memoryId) memoryRef.current = memoryId; },
       });

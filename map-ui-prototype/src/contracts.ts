@@ -34,6 +34,7 @@ export type LayerArtifact =
       style?: DeckStyle;
       render?: 'geojson' | 'heatmap' | 'points';
       styleBy?: string;   // numeric property to shade by (choropleth)
+      partial?: { shown: number; total: number };  // layer is a SAMPLE — shown in the UI
       legend?: Legend[];
       fitBounds?: boolean;
       visible?: boolean;

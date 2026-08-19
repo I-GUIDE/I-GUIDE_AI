@@ -33,6 +33,13 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 _GEOJSON_MAX_FEATURES = int(os.getenv("AGENT_GEOJSON_MAX_FEATURES", "60000"))
 # Attributes carried on a density layer so clicking a point still says something.
 _HEATMAP_KEEP_COLUMNS = int(os.getenv("AGENT_HEATMAP_KEEP_COLUMNS", "6"))
+# A full city-scale point set is genuinely servable: 128,855 incidents measured at 35.9 MB
+# with 6 attributes and 15.8 MB geometry-only, built in ~3s, and deck.gl draws that count
+# without effort. So show the whole population by default and only sample well beyond it.
+_MAP_LAYER_MAX_FEATURES = int(os.getenv("AGENT_MAP_LAYER_MAX_FEATURES", "150000"))
+# Past this, a density layer drops attributes instead of being sampled: the render only needs
+# position, and dropping them more than halves the payload (35.9 MB -> 15.8 MB).
+_HEATMAP_LEAN_ABOVE = int(os.getenv("AGENT_HEATMAP_LEAN_ABOVE", "60000"))
 
 _SELF_CONTAINED = {".geojson", ".json", ".gpkg", ".parquet", ".geoparquet", ".fgb", ".kml"}
 # Components of an (extracted) ESRI shapefile set — any one of these is enough to reference it.
@@ -562,7 +569,7 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
     meta = {"category": "geo"}
     def add_map_layer(file_id: str, render: str = "auto", column: Optional[str] = None,
                       name: Optional[str] = None, sibling_file_ids: Optional[List[str]] = None,
-                      max_points: int = 50000) -> str:
+                      max_points: Optional[int] = None) -> str:
         """Put a dataset on the user's interactive map as a styled layer.
 
         `render`: "heatmap" (point density), "choropleth" (polygons shaded by `column`),
@@ -595,17 +602,24 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                                        "numeric_columns": numeric[:40]})
                 gdf = gdf[[column, "geometry"]]
             elif mode == "heatmap":
-                # Keep a few attributes: the map lets the user click a feature, and a layer
-                # whose properties are all {} shows an empty panel. Trim to a handful so a
-                # 50k-point layer stays small enough to fetch.
+                # Keep a few attributes so clicking a point says something — but past
+                # _HEATMAP_LEAN_ABOVE drop them: a density render needs only position, and
+                # shedding them is what makes the FULL population servable instead of a sample.
                 keep = [c for c in gdf.columns if c == "geometry" or c == column]
-                extra = [c for c in gdf.columns if c not in keep][:_HEATMAP_KEEP_COLUMNS]
+                budget = 0 if len(gdf) > _HEATMAP_LEAN_ABOVE else _HEATMAP_KEEP_COLUMNS
+                extra = [c for c in gdf.columns if c not in keep][:budget]
                 gdf = gdf[[*keep, *extra]] if extra else gdf[keep]
-            # A heat map reads the same from a large sample, and the browser has to fetch this.
+            # Sample only beyond what is actually servable, and record it structurally so the
+            # client can SHOW that a layer is partial — an answer that forgets to mention it
+            # used to be the only signal, and the grounding audit passed such answers.
+            ceiling = int(max_points) if max_points else _MAP_LAYER_MAX_FEATURES
+            total = int(len(gdf))
             note = None
-            if len(gdf) > max_points and mode in {"heatmap", "points"}:
-                note = f"sampled {max_points} of {len(gdf)} features for display"
-                gdf = gdf.sample(int(max_points), random_state=0)
+            sampled = total > ceiling and mode in {"heatmap", "points"}
+            if sampled:
+                note = (f"showing a random {ceiling} of {total} features "
+                        f"({ceiling * 100 // total}%) — the layer on the map is a SAMPLE")
+                gdf = gdf.sample(ceiling, random_state=0)
             fname = artifact_name(name, "geojson", source=str(read_path), default=f"{mode}_layer")
             out = Path(tempfile.mkdtemp(prefix="map_layer_")) / fname
             gdf.to_file(out, driver="GeoJSON")
@@ -615,9 +629,12 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                    "download_url": rec.get("download_url"), "feature_count": int(len(gdf)),
                    "on_map": True,
                    # Consumed by agent_runtime.map_layers.build_map_layer -> `map_layer` SSE event.
+                   "sampled": bool(sampled), "features_total": total,
                    "map_layer": {"url": rec.get("download_url"), "label": label, "render": mode,
                                  "style_by": column, "source": "analysis",
-                                 "count": int(len(gdf))}}
+                                 "count": int(len(gdf)),
+                                 # Carried to the UI so a partial layer says so on screen.
+                                 "sampled": bool(sampled), "total": total}}
             if note:
                 res["note"] = note
             return json.dumps(res, default=str)
