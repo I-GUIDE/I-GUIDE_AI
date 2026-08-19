@@ -201,6 +201,24 @@ def kb_select_rows(df_file_id: str, column: str, values_csv: str) -> str:
         return json.dumps({"error": f"{type(exc).__name__}: {exc}"})
 
 
+
+def _save_figure(fig, filename: str) -> dict:
+    """Persist a matplotlib figure to the agent file store and return its record."""
+    import tempfile, os
+    from agent_runtime.file_store import create_output_file_from_path
+
+    fd, path = tempfile.mkstemp(prefix="img_", suffix=".png")
+    os.close(fd)
+    try:
+        fig.savefig(path, bbox_inches="tight", dpi=150)
+        rec = create_output_file_from_path(path, filename=filename)
+        return {"file_id": rec["file_id"], "filename": rec.get("filename"),
+                "download_url": rec.get("download_url"), "size_bytes": rec.get("size_bytes")}
+    finally:
+        try: os.remove(path)
+        except OSError: pass
+
+
 def _read_any_vector(ref: str):
     """Load a points/polygons file for the image tools.
 
@@ -214,30 +232,36 @@ def _read_any_vector(ref: str):
     return read_vector(str(path))
 
 
-def heatmap_image(points_file_id: str, title: str = "Density heat map") -> str:
+def heatmap_image(points_file_id: str, title: str = "Density heat map",
+                  name: str = "heatmap") -> str:
     """Draw a hexbin point-density heat map as a STATIC PNG PICTURE from a points file.
 
     An image to download or print — it cannot be panned, zoomed or clicked. To put a heat
     map on the user's interactive map instead, use add_map_layer(render="heatmap").
-    Returns JSON with the PNG file_id."""
+    Reads GeoJSON / shapefile / GeoPackage / GeoParquet / CSV-with-coordinates.
+    Returns JSON with the PNG file_id.
+    """
     import json
 
-    def _heat(gdf, title):
-        import matplotlib.pyplot as plt
-        import pandas as pd
-        try:                                  # GeoDataFrame with a geometry accessor
-            xs, ys = gdf.geometry.x, gdf.geometry.y
-        except Exception:                     # plain DataFrame with lon/lat columns
-            xs = pd.to_numeric(gdf["longitude"], errors="coerce")
-            ys = pd.to_numeric(gdf["latitude"], errors="coerce")
-        fig, ax = plt.subplots(figsize=(9, 9))
-        hb = ax.hexbin(xs, ys, gridsize=30, cmap="inferno", mincnt=1)
-        fig.colorbar(hb, ax=ax, label="count"); ax.set_title(title)
-        ax.set_xlabel("longitude"); ax.set_ylabel("latitude")
-    _heat.__annotations__ = {"gdf": "GeoDataFrame", "title": str, "return": type(None)}
-    _heat.__name__ = "point_heatmap"
     try:
-        return json.dumps(make_file_handle_tool(_heat)(gdf=points_file_id, title=title), default=str)
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        gdf = _read_any_vector(points_file_id)
+        pts = gdf[gdf.geometry.geom_type.isin(["Point", "MultiPoint"])] if hasattr(gdf, "geometry") else gdf
+        if hasattr(pts, "geometry") and len(pts):
+            xs, ys = pts.geometry.x, pts.geometry.y
+        else:
+            return json.dumps({"error": "no point geometry to build a density map from"})
+        fig, ax = plt.subplots(figsize=(9, 9))
+        hb = ax.hexbin(xs, ys, gridsize=40, cmap="inferno", mincnt=1)
+        fig.colorbar(hb, ax=ax, label="incidents per cell")
+        ax.set_title(f"{title} (n={len(pts):,})")
+        ax.set_xlabel("longitude"); ax.set_ylabel("latitude")
+        rec = _save_figure(fig, f"{re.sub(r'[^A-Za-z0-9]+', '_', name).strip('_').lower() or 'heatmap'}.png")
+        plt.close(fig)
+        return json.dumps({"ok": True, "features": int(len(pts)), **rec}, default=str)
     except Exception as exc:
         return json.dumps({"error": f"{type(exc).__name__}: {exc}"})
 
