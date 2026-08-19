@@ -29,7 +29,7 @@ export function TopNav(p: Props) {
         <div className="grow" />
         <div className="navsearch"><span className="mag">⌕</span><input placeholder="Search…" aria-label="Search (placeholder)" /></div>
         <span className={`tag ${p.mode}`}>{p.mode === 'live' ? 'live' : 'demo'}</span>
-        {p.hasLayers && <button className="navbtn" onClick={p.onToggleMap}>{p.mapVisible ? '🗺 hide map' : '🗺 show map'}</button>}
+        {p.hasLayers && <button className="navbtn" onClick={p.onToggleMap}>{p.mapVisible ? 'hide map' : 'show map'}</button>}
         <button className="navbtn gear" title="Connection settings" onClick={p.onToggleSettings}>⚙</button>
         <span className="jpy" title="Jupyter (placeholder)">jpy</span>
         <span className="avatar" title="Account (placeholder)" />

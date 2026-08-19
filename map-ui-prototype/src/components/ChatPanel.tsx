@@ -29,6 +29,7 @@ interface Props {
   messages: ChatMessage[];
   busy: boolean;
   hasRegion: boolean;
+  mapVisible: boolean;
   layers: LayerArtifact[];
   mode: Mode;
   cfg: AgentCfg;
@@ -38,6 +39,7 @@ interface Props {
   onSend: (text: string) => void;
   onStop: () => void;
   onClearRegion: () => void;
+  onToggleMap: () => void;
   onUpload: (files: File[]) => void;
   onSetMode: (m: Mode) => void;
   onSetCfg: (c: AgentCfg) => void;
@@ -148,9 +150,12 @@ export function ChatPanel(p: Props) {
       {p.spatial && (
         <>
           <div className="toolbar">
-            {/* No draw MODE any more: right-drag on the map always selects (rs-embed demo
-                behaviour), so this is a hint rather than a toggle. */}
-            <span className="hint">▭ Right-drag the map to select a region</span>
+            {/* Opens the map. Selecting a region needs a visible map, and TopNav only offers
+                its toggle once layers exist — so without this there is no way in on a fresh
+                session. Right-drag then selects; there is no draw MODE to enter. */}
+            <button className={p.mapVisible ? 'active' : ''} onClick={p.onToggleMap}
+                    title="Show the map, then right-drag on it to select a region">Map</button>
+            {p.mapVisible && <span className="hint">right-drag to select a region</span>}
             <button onClick={p.onClearRegion} disabled={!p.hasRegion}>Clear</button>
             <span className={p.hasRegion ? 'rstat on' : 'rstat'}>{p.hasRegion ? '● region set' : '◇ spatial on'}</span>
           </div>

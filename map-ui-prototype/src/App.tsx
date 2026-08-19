@@ -62,7 +62,7 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [selected, setSelected] = useState<SelectedFeature | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([
-    { role: 'agent', text: "Hi — I'm the I-GUIDE agent. Ask me anything. Turn on Spatial tools (⚙) to search geodata and draw regions; the map opens on its own when I return geometry." },
+    { role: 'agent', text: "Hi — I'm the I-GUIDE agent. Ask me anything. Turn on Spatial tools (⚙) to search geodata; the map opens on its own when I return geometry, or hit Map — then right-drag on it to select a region." },
   ]);
 
   const threadRef = useRef<string>(newThreadId());
@@ -463,6 +463,7 @@ export default function App() {
         )}
         <ChatPanel
           messages={messages} busy={busy} hasRegion={!!drawnRegion} layers={layers}
+          mapVisible={mapVisible} onToggleMap={() => setMapVisible((v) => !v)}
           mode={mode} cfg={cfg} spatial={spatial} showSettings={showSettings} resolveUrl={resolveUrl}
           onSend={runAgent}
         onStop={() => abortRef.current?.abort()}
