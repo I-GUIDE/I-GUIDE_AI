@@ -82,11 +82,8 @@ export default function App() {
     if (layers.length && !autoRevealed.current) { autoRevealed.current = true; setMapVisible(true); }
     if (!layers.length) autoRevealed.current = false;
   }, [layers.length]);
-  useEffect(() => {
-    if (!mapVisible) return;
-    const m = (window as any).__map;
-    requestAnimationFrame(() => { try { m?.resize(); } catch { /* */ } });
-  }, [mapVisible]);
+  // The instance is destroyed when hidden, so drop the stale handle.
+  useEffect(() => { if (!mapVisible) (window as any).__map = undefined; }, [mapVisible]);
 
   const asAgentConfig = useCallback((): AgentConfig => ({ ...cfg }), [cfg]);
   const resolveUrl = useCallback((u: string) => absoluteUrl(u, asAgentConfig()), [asAgentConfig]);
@@ -115,6 +112,12 @@ export default function App() {
   // interactive map, not just in a download list. Fetch and add each one once. Static
   // images (PNG plots) stay as attachments — that is the other visualization route.
   const loadedArtifacts = useRef<Set<string>>(new Set());
+  // Set when a turn delivers a layer through the map_layer event. The agent has then
+  // said exactly what belongs on the map, so its other .geojson artifacts — the raw
+  // conversion it made on the way, or the same file a second time — must NOT be
+  // auto-loaded too: three stacked layers of 128,855 points buried the heatmap under
+  // a solid mass of circles.
+  const mapLayerDelivered = useRef(false);
   const loadVectorArtifacts = useCallback(async (files: FileRecord[]) => {
     if (!spatial) return;
     for (const f of files) {
@@ -171,6 +174,7 @@ export default function App() {
     let agentIdx = -1;
     setMessages((prev) => { const base = [...prev, { role: 'user', text } as ChatMessage]; agentIdx = base.length; return [...base, { role: 'agent', streaming: true, trace: [] }]; });
     const patch = (up: Partial<ChatMessage>) => setMessages((prev) => { if (agentIdx < 0 || agentIdx >= prev.length) return prev; const n = prev.slice(); n[agentIdx] = { ...n[agentIdx], ...up }; return n; });
+    mapLayerDelivered.current = false;
     const trace: TraceLine[] = [];
     const addTrace = (t: TraceLine) => { trace.push(t); patch({ trace: [...trace] }); };
     setBusy(true);
@@ -198,8 +202,9 @@ export default function App() {
           const fc = extractFeatures(parsed);
           if (fc.features.length) putLayer({ kind: 'geojson', id: `live-${name}`, source: 'kb', label: `${name} (preview)`, data: fc, style: { fill: [124, 58, 237, 180], line: [255, 255, 255, 255], pointRadius: 6, lineWidth: 2 } });
         },
-        onFile: (files) => { patch({ artifacts: files }); void loadVectorArtifacts(files); },
+        onFile: (files) => patch({ artifacts: files }),
         onMapLayer: async (layer) => {
+          mapLayerDelivered.current = true;
           // A layer may arrive inline or as a URL to fetch (large heatmaps/choropleths).
           let fc = layer.geojson;
           if (!fc && layer.url) {
@@ -242,7 +247,8 @@ export default function App() {
       }
       const html = res.error ? '' : renderMarkdown(res.answer || '_(no answer text)_', resolveUrl);
       patch({ html, text: res.error ? `⚠ ${res.error}` : undefined, artifacts: res.downloads, response: res.response, trace: [...trace], streaming: false });
-      void loadVectorArtifacts(res.downloads);
+      // Only when the agent did NOT place a layer itself.
+      if (!mapLayerDelivered.current) void loadVectorArtifacts(res.downloads);
     } catch (e: any) {
       const stopped = e?.name === 'AbortError';
       patch({ text: stopped ? '⏹ Stopped. Anything already on the map stays; ask me something else.'
@@ -358,9 +364,14 @@ export default function App() {
             onFitLayer={fitLayer} onClearSelection={() => setSelected(null)}
           />
         )}
-        <div className="mapwrap">
-          <AgentMap layers={layers} drawnRegion={drawnRegion} drawPreview={drawPreview} drawMode={drawMode} onMapClick={onMapClick} onHover={() => {}} onFeatureClick={onFeatureClick} />
-        </div>
+        {/* MOUNT the map only while it is shown. Hiding it with display:none left it mounted
+            at ~40x30 and MapLibre never fired `load`: window.__map stayed unset and the
+            canvas painted nothing (observed 400x300 inside an 820x646 container). */}
+        {mapVisible && (
+          <div className="mapwrap">
+            <AgentMap layers={layers} drawnRegion={drawnRegion} drawPreview={drawPreview} drawMode={drawMode} onMapClick={onMapClick} onHover={() => {}} onFeatureClick={onFeatureClick} />
+          </div>
+        )}
         <ChatPanel
           messages={messages} busy={busy} drawMode={drawMode} hasRegion={!!drawnRegion} layers={layers}
           mode={mode} cfg={cfg} spatial={spatial} showSettings={showSettings} resolveUrl={resolveUrl}

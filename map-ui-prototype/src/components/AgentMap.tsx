@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { Map, Source, Layer, useControl } from 'react-map-gl/maplibre';
 import type { MapLayerMouseEvent } from 'react-map-gl/maplibre';
 import { MapboxOverlay } from '@deck.gl/mapbox';
@@ -48,6 +48,21 @@ interface Props {
 }
 
 export function AgentMap({ layers, drawnRegion, drawPreview, drawMode, onMapClick, onHover, onFeatureClick }: Props) {
+  // The map is mounted while hidden (progressive reveal), so its canvas is sized for a
+  // zero/40x30 box and stays that way: observed 400x300 inside an 820x646 container, painting
+  // nothing. A one-shot resize on reveal races the layout, so track the container instead.
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => {
+      const m = (window as any).__map;
+      if (m && el.clientWidth > 0) { try { m.resize(); } catch { /* */ } }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   const deckLayers = useMemo(
     () => layers.map((a) => toDeckLayer(a)),
     [layers],
@@ -59,6 +74,7 @@ export function AgentMap({ layers, drawnRegion, drawPreview, drawMode, onMapClic
   }, [drawnRegion]);
 
   return (
+    <div ref={wrapRef} style={{ position: 'absolute', inset: 0 }}>
     <Map
       initialViewState={{ longitude: -89.0, latitude: 40.5, zoom: 5.2 }}
       mapStyle={OSM_STYLE}
@@ -83,5 +99,6 @@ export function AgentMap({ layers, drawnRegion, drawPreview, drawMode, onMapClic
         </Source>
       )}
     </Map>
+    </div>
   );
 }
