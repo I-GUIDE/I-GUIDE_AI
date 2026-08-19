@@ -33,6 +33,7 @@ export type LayerArtifact =
       data: FeatureCollection;
       style?: DeckStyle;
       render?: 'geojson' | 'heatmap' | 'points';
+      styleBy?: string;   // numeric property to shade by (choropleth)
       legend?: Legend[];
       fitBounds?: boolean;
       visible?: boolean;

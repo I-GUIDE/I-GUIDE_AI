@@ -14,6 +14,24 @@ function centroidOf(f: Feature): [number, number] | null {
   return null;
 }
 
+// Sequential ramp for a choropleth: light -> deep, computed over the layer's own range.
+function rampFor(a: LayerArtifact): ((f: any) => [number, number, number, number]) | null {
+  if (!a.styleBy) return null;
+  const key = a.styleBy;
+  const vals = a.data.features
+    .map((f) => Number((f.properties || {})[key]))
+    .filter((v) => Number.isFinite(v));
+  if (!vals.length) return null;
+  const min = Math.min(...vals), max = Math.max(...vals);
+  const span = max - min || 1;
+  return (f: any) => {
+    const v = Number((f.properties || {})[key]);
+    const t = Number.isFinite(v) ? Math.min(1, Math.max(0, (v - min) / span)) : 0;
+    // #fff5eb -> #7f2704 (OrRd), the conventional choropleth ramp
+    return [255 - Math.round(128 * t), 245 - Math.round(206 * t), 235 - Math.round(231 * t), 200];
+  };
+}
+
 export function toDeckLayer(a: LayerArtifact) {
   const s = a.style ?? {};
   const fill = s.fill ?? DEFAULT_FILL;
@@ -37,6 +55,7 @@ export function toDeckLayer(a: LayerArtifact) {
     });
   }
 
+  const ramp = rampFor(a);
   return new GeoJsonLayer({
     id: a.id,
     data: a.data,
@@ -47,7 +66,7 @@ export function toDeckLayer(a: LayerArtifact) {
     extruded: !!s.extruded,
     getElevation: s.elevation ?? 0,
     pointType: 'circle',
-    getFillColor: fill,
+    getFillColor: ramp ?? fill,
     getLineColor: line,
     getLineWidth: s.lineWidth ?? 2,
     lineWidthUnits: 'pixels',
@@ -55,6 +74,6 @@ export function toDeckLayer(a: LayerArtifact) {
     pointRadiusUnits: s.radiusUnits ?? 'pixels',
     opacity: s.opacity ?? 1,
     // expose source + props for the tooltip
-    updateTriggers: {},
+    updateTriggers: { getFillColor: [a.styleBy, a.data] },
   });
 }

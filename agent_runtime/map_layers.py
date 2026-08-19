@@ -71,6 +71,26 @@ def build_map_layer(tool_name: str, output: Any) -> Optional[Dict[str, Any]]:
     obj = _coerce_obj(output)
     if obj is None:
         return None
+
+    # A tool that has ALREADY written a styled layer (add_map_layer) describes it explicitly:
+    # the client fetches the GeoJSON by url rather than receiving it inline, which is what makes
+    # a 50k-point heat map or an 800-polygon choropleth practical to stream.
+    if isinstance(obj, dict) and isinstance(obj.get("map_layer"), dict):
+        ml = dict(obj["map_layer"])
+        url = str(ml.get("url") or "").strip()
+        if url:
+            render = str(ml.get("render") or "shapes")
+            slug = re.sub(r"[^a-z0-9]+", "_", str(ml.get("label") or render).lower()).strip("_")[:40]
+            return {
+                "kind": "map_layer",
+                "id": ml.get("id") or f"agent-{slug or render}",
+                "source": ml.get("source") or "analysis",
+                "label": ml.get("label") or render,
+                "url": url,
+                "render": render,
+                "style_by": ml.get("style_by"),
+                "count": ml.get("count"),
+            }
     features = _features_from(obj)
     if not features:
         return None

@@ -33,7 +33,10 @@ export interface MapLayerEvent {
   source: string;
   label: string;
   count?: number;
-  geojson: import('geojson').FeatureCollection;
+  geojson?: import('geojson').FeatureCollection;
+  url?: string;                 // fetch instead of inlining (large layers)
+  render?: string;              // 'heatmap' | 'choropleth' | 'points' | 'shapes'
+  styleBy?: string;             // numeric property to shade by
 }
 
 export interface StreamResult {
@@ -209,14 +212,21 @@ export async function streamChat(
         break;
       }
       case 'map_layer': {
-        const layer = (p.geojson ? p : p.detail) || {};
-        if (layer.geojson && Array.isArray(layer.geojson.features)) {
+        const layer = (p.geojson || p.url ? p : p.detail) || {};
+        if (layer.url && !layer.geojson) {
+          h.onMapLayer?.({
+            id: layer.id || 'agent-layer', source: layer.source || 'analysis',
+            label: layer.label || 'Agent layer', count: layer.count,
+            url: layer.url, render: layer.render, styleBy: layer.style_by ?? layer.styleBy,
+          });
+        } else if (layer.geojson && Array.isArray(layer.geojson.features)) {
           h.onMapLayer?.({
             id: layer.id || 'agent-layer',
             source: layer.source || 'analysis',
             label: layer.label || 'Agent layer',
             count: layer.count,
             geojson: layer.geojson,
+            render: layer.render, styleBy: layer.style_by ?? layer.styleBy,
           });
         }
         break;

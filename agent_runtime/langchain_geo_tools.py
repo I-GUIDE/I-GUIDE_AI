@@ -558,7 +558,80 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                 shutil.rmtree(out.parent, ignore_errors=True)
 
     meta = {"category": "geo"}
+    def add_map_layer(file_id: str, render: str = "auto", column: Optional[str] = None,
+                      name: Optional[str] = None, sibling_file_ids: Optional[List[str]] = None,
+                      max_points: int = 50000) -> str:
+        """Put a dataset on the user's interactive map as a styled layer.
+
+        `render`: "heatmap" (point density), "choropleth" (polygons shaded by `column`),
+        "points"/"shapes", or "auto" to pick from the geometry. Returns the layer descriptor
+        the client plots, plus a downloadable GeoJSON file_id.
+        """
+        tmp = None
+        try:
+            from agent_runtime.file_store import create_output_file_from_path
+
+            read_path, tmp = _stage(file_id, sibling_file_ids)
+            gdf = read_vector(read_path)
+            if getattr(gdf, "crs", None) is not None:
+                gdf = gdf.to_crs("EPSG:4326")          # web maps are lon/lat
+            geom_types = {str(t) for t in gdf.geometry.geom_type.unique()}
+            is_point = geom_types and geom_types <= {"Point", "MultiPoint"}
+            mode = (render or "auto").strip().lower()
+            if mode == "auto":
+                mode = "heatmap" if (is_point and len(gdf) > 2000) else ("points" if is_point else "shapes")
+            if mode == "choropleth":
+                if not column or column not in gdf.columns:
+                    # List the NUMERIC columns: an arbitrary first-N slice hides the very
+                    # column being looked for (a join count often lands last of 50+ fields).
+                    import pandas as _pd
+                    numeric = [c for c in gdf.columns
+                               if c != "geometry" and _pd.api.types.is_numeric_dtype(gdf[c])]
+                    return json.dumps({"ok": False,
+                                       "error": f"choropleth needs a numeric `column` present in the data; "
+                                                f"got {column!r}",
+                                       "numeric_columns": numeric[:40]})
+                gdf = gdf[[column, "geometry"]]
+            elif mode == "heatmap":
+                keep = [c for c in gdf.columns if c == "geometry" or c == column]
+                gdf = gdf[keep] if len(keep) > 1 else gdf[["geometry"]]
+            # A heat map reads the same from a large sample, and the browser has to fetch this.
+            note = None
+            if len(gdf) > max_points and mode in {"heatmap", "points"}:
+                note = f"sampled {max_points} of {len(gdf)} features for display"
+                gdf = gdf.sample(int(max_points), random_state=0)
+            fname = artifact_name(name, "geojson", source=str(read_path), default=f"{mode}_layer")
+            out = Path(tempfile.mkdtemp(prefix="map_layer_")) / fname
+            gdf.to_file(out, driver="GeoJSON")
+            rec = create_output_file_from_path(out, filename=fname)
+            label = (name or Path(fname).stem).replace("_", " ")
+            res = {"ok": True, "file_id": rec["file_id"], "filename": rec.get("filename"),
+                   "download_url": rec.get("download_url"), "feature_count": int(len(gdf)),
+                   "on_map": True,
+                   # Consumed by agent_runtime.map_layers.build_map_layer -> `map_layer` SSE event.
+                   "map_layer": {"url": rec.get("download_url"), "label": label, "render": mode,
+                                 "style_by": column, "source": "analysis",
+                                 "count": int(len(gdf))}}
+            if note:
+                res["note"] = note
+            return json.dumps(res, default=str)
+        except Exception as exc:
+            return json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}", "hint": _SIB})
+        finally:
+            if tmp:
+                shutil.rmtree(tmp, ignore_errors=True)
+
     return [
+        StructuredTool.from_function(func=add_map_layer, name="add_map_layer", metadata=meta,
+            description=("Put a dataset on the user's INTERACTIVE MAP as a styled layer they can pan, "
+                         "zoom and click — this is how a map is delivered here, and it is what to use "
+                         "when the user asks to see/plot/visualize data on the map. `render`: "
+                         "'heatmap' for point density, 'choropleth' for polygons shaded by a numeric "
+                         "`column` (e.g. the count from vector_spatial_join), 'points'/'shapes', or "
+                         "'auto'. Accepts GeoJSON/shapefile/GeoPackage/GeoParquet/CSV-with-coordinates "
+                         "by file_id; reprojects to WGS84 and samples very large point sets for "
+                         "display. A PNG tool (plot_vector) is only for a static image someone wants "
+                         "to download.")),
         StructuredTool.from_function(func=inspect_vector, name="inspect_vector", metadata=meta,
             description=("Read a vector / shapefile's metadata (CRS, extent, geometry type, feature "
                          "count, attribute columns) without loading all geometry. Handles a TIGER/Line "
