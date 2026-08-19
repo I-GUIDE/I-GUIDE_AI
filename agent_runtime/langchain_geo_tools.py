@@ -322,6 +322,41 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             "the tool auto-finds the .shx/.dbf/.prj among the attached files. You may also pass "
             "the other components as sibling_file_ids, or upload the shapefile as a single .zip.")
 
+    # Observed: after heatmap_image returned heatmap.png, the peer passed that PNG's file_id to
+    # add_map_layer, got "unreadable vector/tabular source" plus a shapefile hint that did not
+    # apply, and told the user an interactive heat map was impossible. An image genuinely cannot
+    # become a layer — but the dataset it was drawn from can, so name it instead of dead-ending.
+    _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".pdf"}
+    _MAPPABLE_EXTS = {".geojson", ".json", ".csv", ".tsv", ".shp", ".zip", ".gpkg",
+                      ".parquet", ".geoparquet", ".gml", ".kml"}
+
+    def _mappable_attached(exclude: Optional[str] = None) -> List[Dict[str, str]]:
+        """Attached files add_map_layer can actually read, as {file_id, filename}."""
+        out = []
+        for a in _attached:
+            name = str(a.get("name") or "")
+            if a.get("id") == exclude or Path(name).suffix.lower() not in _MAPPABLE_EXTS:
+                continue
+            out.append({"file_id": str(a.get("id")), "filename": name})
+        return out[:20]
+
+    def _unmappable_input(file_id: str) -> Optional[Dict[str, Any]]:
+        """An actionable redirect when *file_id* is an image, else None."""
+        try:
+            path, rec = _resolve(file_id)
+        except Exception:
+            return None
+        name = _true_name(path, rec)
+        if Path(name).suffix.lower() not in _IMAGE_EXTS:
+            return None
+        return {"ok": False,
+                "error": f"{name} is an image, and an image cannot become an interactive map "
+                         f"layer — it has no geometry to pan, zoom or click.",
+                "hint": "Pass the DATASET this picture was drawn from instead. add_map_layer "
+                        "reads GeoJSON, CSV/TSV with lat-lon columns, shapefile (.shp/.zip), "
+                        "GeoPackage and GeoParquet. Keep the image as a download alongside it.",
+                "mappable_file_ids": _mappable_attached(exclude=file_id)}
+
     def inspect_vector(file_id: str, sibling_file_ids: Optional[List[str]] = None,
                        layer: Optional[str] = None) -> str:
         """Read a vector dataset's metadata (CRS, extent, geometry type, feature count,
@@ -580,6 +615,9 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
         try:
             from agent_runtime.file_store import create_output_file_from_path
 
+            redirect = _unmappable_input(file_id)
+            if redirect:
+                return json.dumps(redirect)
             read_path, tmp = _stage(file_id, sibling_file_ids)
             gdf = read_vector(read_path)
             if getattr(gdf, "crs", None) is not None:

@@ -496,6 +496,35 @@ def _claim_numbers(text: str) -> List[str]:
     return [m.replace(",", "") for m in re.findall(r"\d[\d,]{2,}", text or "")]
 
 
+# The auditor compares an answer against retrieved DOCUMENTS, and no document ever says
+# "a layer is on the user's map" — so a correct map claim looks unsupported to it. Observed:
+# a run that really did deliver a 31,977-point density layer plus a 708-cell grid choropleth
+# was stamped "high-severity hallucination ... unsupported claims about the interactive map".
+# The tool record settles it, so reconcile against that instead of warning the user off a
+# true statement. (A claim made with NO layer delivered still gets flagged — that is the
+# failure the analyze peer's own map check exists to catch.)
+_MAP_CLAIM_MARKERS = (
+    "interactive map", "on the map", "on your map", "map beside", "map layer",
+    "heat layer", "density layer", "displayed on", "shown on the map", "panning", "zooming",
+)
+
+
+def _map_layer_was_delivered(execution_context: Optional[Dict[str, Any]]) -> bool:
+    """Whether this turn actually put a layer on the user's map."""
+    def walk(obj: Any) -> bool:
+        if isinstance(obj, dict):
+            if obj.get("on_map") is True:
+                return True
+            if str(obj.get("name") or obj.get("tool_name") or "") in _MAP_LAYER_TOOLS:
+                return True
+            return any(walk(v) for v in obj.values())
+        if isinstance(obj, (list, tuple)):
+            return any(walk(v) for v in obj)
+        return False
+
+    return walk(execution_context)
+
+
 def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
                                     artifacts: List[Dict[str, str]],
                                     execution_context: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
@@ -503,8 +532,10 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
     (1) merely disputes artifact generation/availability and an artifact WAS produced,
     (2) disputes a numeric value that actually appears in the execution record, or
     (3) carries a reason that itself concedes the claim is grounded/correct (and no genuine
-    contradiction marker). The verdict is cleared if no substantive issues remain. Genuine
-    unsupported claims (a wrong statistic, an invented finding) are preserved."""
+    contradiction marker), or (4) disputes a claim about the interactive map when a layer was
+    actually delivered to it. The verdict is cleared if no substantive issues remain. Genuine
+    unsupported claims (a wrong statistic, an invented finding, a map that never got a layer)
+    are preserved."""
     if not _audit_flagged(audit):
         return audit
     issues = (audit or {}).get("issues") or []
@@ -515,6 +546,7 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
         except Exception:
             blob = str(execution_context)
         blob = blob.replace(",", "")
+    map_delivered = _map_layer_was_delivered(execution_context)
     kept = []
     for it in issues:
         if isinstance(it, dict):
@@ -526,6 +558,8 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
             claim, reason = str(it or "").lower(), ""
         if artifacts and any(m in claim for m in _ARTIFACT_CLAIM_MARKERS):
             continue  # (1) artifact dispute, but an artifact was produced
+        if map_delivered and any(m in claim for m in _MAP_CLAIM_MARKERS):
+            continue  # (4) a map claim, and a layer really did reach the map
         if any(g in reason for g in _GROUNDED_REASON_MARKERS) and not any(c in reason for c in _CONTRADICTION_MARKERS):
             continue  # (3) the auditor's own reason concedes grounding
         nums = _claim_numbers(claim)
@@ -534,7 +568,8 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
         kept.append(it)
     if not kept:
         return {"hallucination_detected": False, "severity": "none", "issues": [],
-                "summary": "Grounded: flagged claims are supported by the produced artifact(s) and the execution record."}
+                "summary": "Grounded: flagged claims are supported by the produced artifact(s), the "
+                           "delivered map layer(s) and the execution record."}
     return {**(audit or {}), "issues": kept}
 
 
@@ -1622,6 +1657,48 @@ def _run_qgis_map_workflow(query: str, *, input_file_ids: Optional[List[str]],
             "basemap": basemap or None}
 
 
+# --- did the interactive map actually get a layer? -----------------------------
+# Observed: asked for "a heat map of these incidents on the map", the peer ran execute_code
+# to build a GeoJSON, then heatmap_image to draw a PNG, and answered "you can view the heat
+# map directly on the interactive map ... visualized as a heat layer". add_map_layer was
+# never called, so the map got nothing; the grounding audit even logged "minor hallucination
+# about an interactive map" and the claim shipped anyway. A static PNG cannot be panned,
+# zoomed or clicked, so this is not a wording quibble — the deliverable was missing. Verified
+# structurally (like the unrun-code check) rather than demanded in the prompt.
+_MAP_LAYER_TOOLS = ("add_map_layer", "overpass_search", "spatial_search")
+_WANTS_MAP_RE = re.compile(
+    r"\b(?:on|in|onto|to)\s+(?:the\s+|a\s+|my\s+)?(?:interactive\s+)?map\b"
+    r"|\binteractive\s+map\b|\bmap\s+view\b|\bheat\s?map\b|\bchoropleth\b"
+    r"|\bmap\s+(?:of|showing)\b",
+    re.I,
+)
+_CLAIMS_MAP_RE = re.compile(
+    r"\binteractive\s+map\b|\bon\s+the\s+map\b|\bmap\s+beside\b|\bheat\s+layer\b|\bmap\s+layer\b",
+    re.I,
+)
+_MAP_NOT_DELIVERED_OBSERVATION = (
+    "This turn has no add_map_layer record, so the user's interactive map received nothing. "
+    "A PNG from heatmap_image / choropleth_image / render_map_image is a static picture: it "
+    "cannot be panned, zoomed or clicked, and it is not what 'on the map' means — describing "
+    "an image as a layer on their map would be false. Put the data on the map with "
+    "add_map_layer(file_id=<the geodata file you produced>, render='heatmap'|'choropleth'|"
+    "'points'|'shapes', column=<numeric column, for choropleth>, name=<short purpose name>), "
+    "then say what is on it. Keep the PNG too if it is worth having."
+)
+
+
+def _called_tool(artifacts: Dict[str, Any], names) -> bool:
+    """Whether this peer run called any of *names*."""
+    wanted = {names} if isinstance(names, str) else set(names)
+    for key in ("tool_calls", "tool_results"):
+        for item in artifacts.get(key) or []:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("name") or item.get("tool_name") or "") in wanted:
+                return True
+    return False
+
+
 def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = True,
                        mcp_modules: Optional[List[str]] = None,
                        skill_roots: Optional[List[str]] = None,
@@ -1698,6 +1775,25 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
                 tools.extend(make_langchain_geo_tools(default_input_file_ids=input_file_ids))
             except Exception:
                 pass
+            # Overlay / aggregation / temporal analysis tools. Same guard and the same
+            # "files are attached" condition as the vector tools above: each factory is
+            # imported separately so one missing optional dependency costs only its own
+            # module instead of the whole analysis toolset.
+            try:
+                from agent_runtime.analysis_overlay_tools import make_overlay_tools
+                tools.extend(make_overlay_tools(default_input_file_ids=input_file_ids))
+            except Exception:
+                pass
+            try:
+                from agent_runtime.analysis_aggregate_tools import make_aggregate_tools
+                tools.extend(make_aggregate_tools(default_input_file_ids=input_file_ids))
+            except Exception:
+                pass
+            try:
+                from agent_runtime.analysis_temporal_tools import make_temporal_tools
+                tools.extend(make_temporal_tools(default_input_file_ids=input_file_ids))
+            except Exception:
+                pass
         from agent_runtime.code_execution import is_code_exec_enabled
 
         if code_exec if code_exec is not None else is_code_exec_enabled():
@@ -1728,6 +1824,32 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
             "tool_results": artifacts.get("tool_results") or [],
         }
         caps = list(dict.fromkeys(r["capability"] for r in requests))
+
+        # The map is a deliverable, not a figure of speech: if the user asked to see this on
+        # the map (or the answer says it is there) and no layer-emitting tool ran, hand the
+        # peer that observation once. A peer that asked for another capability is stopping
+        # legitimately, so it is left alone. Only meaningful when geo tools were loaded.
+        on_map = _called_tool(artifacts, _MAP_LAYER_TOOLS)
+        wants_map = bool(_WANTS_MAP_RE.search(query or "")
+                         or _CLAIMS_MAP_RE.search(result["summary"] or ""))
+        if input_file_ids and wants_map and not on_map and not caps:
+            emit_trace_event(
+                "map_layer_not_delivered",
+                {"stage": "analyze",
+                 "message": "map requested but no add_map_layer record; retrying once"},
+                node="analyze",
+            )
+            resp_retry = invoke_agent_with_payload_fallback(
+                executor, query=_MAP_NOT_DELIVERED_OBSERVATION, chat_history=None,
+                config=agent_config(child_thread_id(thread_id, "analysis")),
+            )
+            retry_artifacts = extract_search_artifacts(resp_retry)
+            on_map = _called_tool(retry_artifacts, _MAP_LAYER_TOOLS)
+            result["summary"] = extract_final_answer(resp_retry) or result["summary"]
+            result["tool_calls"] = [*result["tool_calls"], *(retry_artifacts.get("tool_calls") or [])]
+            result["tool_results"] = [*result["tool_results"], *(retry_artifacts.get("tool_results") or [])]
+        # Carried downstream so synthesis can describe the map honestly either way.
+        result["on_map"] = bool(on_map)
         if caps:
             result["needs"] = caps  # model-driven request(s)
         return result
@@ -1740,13 +1862,7 @@ _CODE_FENCE_RE = re.compile(r"^```[\w+-]*\s*$", re.M)
 
 def _has_execution_record(artifacts: Dict[str, Any]) -> bool:
     """Whether this peer run actually called ``execute_code``."""
-    for key in ("tool_calls", "tool_results"):
-        for item in artifacts.get(key) or []:
-            if not isinstance(item, dict):
-                continue
-            if str(item.get("name") or item.get("tool_name") or "") == "execute_code":
-                return True
-    return False
+    return _called_tool(artifacts, "execute_code")
 
 
 def _ships_unrun_code(answer: str) -> bool:
@@ -1826,6 +1942,24 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
             try:
                 from agent_runtime.langchain_geo_tools import make_langchain_geo_tools
                 tools.extend(make_langchain_geo_tools(default_input_file_ids=input_file_ids))
+            except Exception:
+                pass
+            # Overlay / aggregation / temporal tools, same as the analysis peer: the code
+            # peer should reach for a ready-made clip/buffer/time-series tool before
+            # writing the same thing by hand in the sandbox. Independently guarded.
+            try:
+                from agent_runtime.analysis_overlay_tools import make_overlay_tools
+                tools.extend(make_overlay_tools(default_input_file_ids=input_file_ids))
+            except Exception:
+                pass
+            try:
+                from agent_runtime.analysis_aggregate_tools import make_aggregate_tools
+                tools.extend(make_aggregate_tools(default_input_file_ids=input_file_ids))
+            except Exception:
+                pass
+            try:
+                from agent_runtime.analysis_temporal_tools import make_temporal_tools
+                tools.extend(make_temporal_tools(default_input_file_ids=input_file_ids))
             except Exception:
                 pass
         from agent_runtime.code_execution import is_code_exec_enabled

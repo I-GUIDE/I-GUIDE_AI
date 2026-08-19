@@ -47,9 +47,10 @@ interface Props {
   onHover: (info: any) => void;
   onFeatureClick: (feature: any, layerId: string) => void;
   onReady?: () => void;
+  onResize?: () => void;
 }
 
-export function AgentMap({ layers, drawnRegion, drawPreview, drawMode, onMapClick, onHover, onFeatureClick, onReady }: Props) {
+export function AgentMap({ layers, drawnRegion, drawPreview, drawMode, onMapClick, onHover, onFeatureClick, onReady, onResize }: Props) {
   // The map is mounted while hidden (progressive reveal), so its canvas is sized for a
   // zero/40x30 box and stays that way: observed 400x300 inside an 820x646 container, painting
   // nothing. A one-shot resize on reveal races the layout, so track the container instead.
@@ -60,11 +61,17 @@ export function AgentMap({ layers, drawnRegion, drawPreview, drawMode, onMapClic
     if (!el || typeof ResizeObserver === 'undefined') return;
     const ro = new ResizeObserver(() => {
       const m = (window as any).__map;
-      if (m && el.clientWidth > 0) { try { m.resize(); } catch { /* */ } }
+      if (m && el.clientWidth > 0) {
+        try { m.resize(); } catch { /* */ }
+        // Resizing keeps the CENTER but not the framing: a fit computed against the
+        // pre-reveal box stays over-zoomed after the canvas grows, so let the owner
+        // re-apply it now that the container is its real size.
+        onResize?.();
+      }
     });
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
+  }, [onResize]);
 
   const deckLayers = useMemo(
     () => layers.map((a) => toDeckLayer(a)),

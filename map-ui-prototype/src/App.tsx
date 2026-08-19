@@ -107,11 +107,33 @@ export default function App() {
   // dropped, which left the user looking at the whole US with their city as a single dot —
   // so remember the request and apply it the moment the map is ready.
   const pendingFit = useRef<FeatureCollection | null>(null);
+  // The last fit we asked for, so it can be re-applied once the container settles (below).
+  const lastFit = useRef<{ fc: FeatureCollection; at: number } | null>(null);
+  const applyFit = (m: any, fc: FeatureCollection, duration: number) => {
+    try {
+      const [w, s, e, n] = layerBBox(fc);
+      m.fitBounds([[w, s], [e, n]], { padding: 80, duration, maxZoom: 14 });
+    } catch { /* degenerate bbox — leave the view alone */ }
+  };
   const fitView = useCallback((fc: FeatureCollection) => {
     const m = (window as any).__map;
     if (!fc.features.length) return;
+    lastFit.current = { fc, at: Date.now() };
     if (!m) { pendingFit.current = fc; return; }
-    try { const [w, s, e, n] = layerBBox(fc); m.fitBounds([[w, s], [e, n]], { padding: 80, duration: 800, maxZoom: 14 }); } catch { /* */ }
+    applyFit(m, fc, 800);
+  }, []);
+  // The map instance is published as soon as it EXISTS (deliberately: waiting for `load`
+  // strands everything when a basemap tile source fails). So on a first-turn reveal fitBounds
+  // can run while the pane is still expanding — it then sizes the view for a container a
+  // fraction of the final width and lands ~3 zoom levels too deep, which turned a 31,977-point
+  // density surface into one pane-filling blob with the basemap scrolled out of frame.
+  // Re-apply the fit when the container resizes, but only right after we asked for it, so a
+  // view the user has since panned or zoomed is never yanked back.
+  const refitAfterResize = useCallback(() => {
+    const m = (window as any).__map;
+    const last = lastFit.current;
+    if (!m || !last || Date.now() - last.at > 2500) return;
+    applyFit(m, last.fc, 0);
   }, []);
 
   // --- layer management + feature inspection (left panel) ---
@@ -164,10 +186,20 @@ export default function App() {
         // the same name, and the user should see one updated layer rather than two
         // identical ones stacked on the map.
         const layerId = `artifact-${label.toLowerCase().replace(/[^a-z0-9]+/g, '_')}`;
+        // Same rule add_map_layer applies for render:"auto" — a big pile of points is a
+        // density surface, not 32,000 overlapping circles. Without this, a turn that wrote
+        // its GeoJSON with execute_code (no map_layer event, so we land here) drew a solid
+        // orange blob over Chicago and called it a heat map.
+        const heat =
+          fc.features.length > 2000 &&
+          fc.features.every((ft) => /^(Multi)?Point$/.test(ft.geometry?.type || ''));
         putLayer({
           kind: 'geojson', id: layerId, source: 'analysis', label: `${label}`,
           data: fc, fitBounds: true,
-          style: { fill: [201, 138, 26, 110], line: [201, 138, 26, 255], lineWidth: 2, pointRadius: 5 },
+          render: heat ? 'heatmap' : 'geojson',
+          style: heat
+            ? { opacity: 0.85 }
+            : { fill: [201, 138, 26, 110], line: [201, 138, 26, 255], lineWidth: 2, pointRadius: 5 },
         });
         fitView(fc);
       } catch { /* not loadable as GeoJSON — leave it as a download */ }
@@ -400,6 +432,7 @@ export default function App() {
                   pendingFit.current = null;
                   if (fc) fitView(fc);
                 }}
+                onResize={refitAfterResize}
               />
             )}
           </div>

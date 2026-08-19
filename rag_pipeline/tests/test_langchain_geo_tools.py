@@ -162,6 +162,87 @@ def test_geo_tools_wired_into_peers_only_with_files(monkeypatch):
     assert "inspect_vector" in captured["tools"]
 
 
+# The overlay / aggregate / temporal registries ride the same "files are attached"
+# gate as the vector tools above. Every name is listed explicitly: these sets are the
+# contract the peers advertise to the model, so a factory that silently stops
+# exporting a tool has to fail here rather than quietly shrink the toolset.
+OVERLAY_TOOLS = {"clip_layer", "dissolve_layer", "intersect_layers", "erase_layer",
+                 "buffer_layer", "simplify_layer", "geometry_summary"}
+AGGREGATE_TOOLS = {"count_points_in_areas", "aggregate_to_grid", "nearest_distance",
+                   "cluster_points", "summary_statistics"}
+TEMPORAL_TOOLS = {"detect_time_column", "filter_by_time", "time_series",
+                  "compare_periods", "temporal_hotspots"}
+ANALYSIS_TOOLS = OVERLAY_TOOLS | AGGREGATE_TOOLS | TEMPORAL_TOOLS
+
+
+def test_analysis_tools_wired_into_peers_only_with_files(monkeypatch):
+    pytest.importorskip("pandas")
+    import agent_runtime.executor_factory as ef
+    import agent_runtime.supervisor_graph as sg
+
+    captured = {}
+
+    def fake_build(**kwargs):
+        captured["tools"] = [getattr(t, "name", "") for t in (kwargs.get("preloaded_tools") or [])]
+        return object()
+
+    monkeypatch.setattr(ef, "build_agent_executor", fake_build)
+    monkeypatch.setattr(ef, "invoke_agent_with_payload_fallback", lambda *a, **k: {"messages": []})
+    import agent_runtime.langchain_granular_tools as gt
+    monkeypatch.setattr(gt, "make_langchain_qgis_tools", lambda **k: [])
+    monkeypatch.delenv("AGENT_CODE_EXEC", raising=False)
+
+    for label, run in (
+        ("analyze", lambda fids: sg.default_analyze_fn(
+            include_mcp_tools=False, input_file_ids=fids)("q", [], {"thread_id": None})),
+        ("code", lambda fids: sg.default_code_fn(
+            input_file_ids=fids)("q", [], {"thread_id": None})),
+    ):
+        captured.clear()
+        run(["file_x"])
+        names = captured["tools"]
+        assert ANALYSIS_TOOLS <= set(names), (
+            f"{label} peer is missing {sorted(ANALYSIS_TOOLS - set(names))}")
+        # A duplicate name makes the model's tool choice ambiguous and can break
+        # provider-side schema validation, so the assembled set must stay unique.
+        assert len(names) == len(set(names)), (
+            f"{label} peer has duplicate tool names: "
+            f"{sorted(n for n in set(names) if names.count(n) > 1)}")
+
+        captured.clear()
+        run(None)
+        assert not (ANALYSIS_TOOLS & set(captured["tools"])), (
+            f"{label} peer exposed file-only analysis tools with nothing attached: "
+            f"{sorted(ANALYSIS_TOOLS & set(captured['tools']))}")
+
+
+def test_analysis_tools_are_tagged_geo_like_their_neighbours():
+    """The peers mix these in with make_langchain_geo_tools, which tags every tool
+    category=geo; an untagged tool would sort differently wherever category is read."""
+    pytest.importorskip("pandas")
+    from agent_runtime.analysis_aggregate_tools import make_aggregate_tools
+    from agent_runtime.analysis_overlay_tools import make_overlay_tools
+    from agent_runtime.analysis_temporal_tools import make_temporal_tools
+
+    for factory, expected in ((make_overlay_tools, OVERLAY_TOOLS),
+                              (make_aggregate_tools, AGGREGATE_TOOLS),
+                              (make_temporal_tools, TEMPORAL_TOOLS)):
+        tools = factory()
+        assert {t.name for t in tools} == expected
+        for t in tools:
+            assert (getattr(t, "metadata", {}) or {}).get("category") == "geo", t.name
+
+
+def test_capability_inventory_reports_the_analysis_tools():
+    """The inventory answers 'what can you do' independently of what is attached
+    right now, so it must probe these registries unfiltered like the geo one."""
+    pytest.importorskip("pandas")
+    from agent_runtime.capabilities import collect_capability_inventory
+
+    names = {t["name"] for t in collect_capability_inventory()["tools"]}
+    assert ANALYSIS_TOOLS <= names, f"missing {sorted(ANALYSIS_TOOLS - names)}"
+
+
 # --- auto-discovery of extracted shapefile siblings ------------------------
 
 def _tools_with(attached):
@@ -229,3 +310,30 @@ def test_choropleth_reports_the_numeric_columns_when_the_column_is_wrong(shapefi
         file_id=shapefile["zip_id"], render="choropleth", column="does_not_exist"))
     assert res["ok"] is False
     assert "numeric_columns" in res          # candidates, not a truncated slice of everything
+
+
+def test_add_map_layer_redirects_an_image_to_the_real_datasets(tmp_path, monkeypatch):
+    """Observed: the peer passed heatmap.png to add_map_layer, got 'unreadable vector source'
+    plus an unrelated shapefile hint, and told the user an interactive map was impossible."""
+    import json
+    from agent_runtime.langchain_geo_tools import make_langchain_geo_tools
+
+    png = tmp_path / "heatmap.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n")
+    csv = tmp_path / "incidents.csv"
+    csv.write_text("lat,lon\n41.9,-87.6\n", encoding="utf-8")
+
+    ids = {}
+    for p in (png, csv):
+        from agent_runtime.file_store import create_output_file_from_path
+        ids[p.name] = create_output_file_from_path(p, filename=p.name)["file_id"]
+
+    tools = {t.name: t for t in make_langchain_geo_tools(
+        default_input_file_ids=[ids["heatmap.png"], ids["incidents.csv"]])}
+    out = json.loads(tools["add_map_layer"].func(file_id=ids["heatmap.png"], render="heatmap"))
+
+    assert out["ok"] is False
+    assert "image" in out["error"].lower()
+    # The point of the fix: it names what to pass INSTEAD.
+    assert [c["filename"] for c in out["mappable_file_ids"]] == ["incidents.csv"]
+    assert "shapefile sidecar" not in out["hint"]
