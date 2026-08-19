@@ -58,7 +58,7 @@ def shapefile(monkeypatch, tmp_path):
 
 def test_factory_shape():
     tools = _tools()
-    assert set(tools) == {"inspect_vector", "plot_vector", "vector_to_geojson",
+    assert set(tools) == {"inspect_vector", "render_map_image", "vector_to_geojson",
                           "reproject_vector", "vector_spatial_join", "add_map_layer"}
     assert all(getattr(t, "metadata", {}).get("category") == "geo" for t in tools.values())
 
@@ -82,7 +82,7 @@ def test_inspect_extracted_siblings(shapefile):
 
 def test_plot_creates_downloadable_png(shapefile):
     from agent_runtime.file_store import resolve_file_id
-    p = json.loads(_tools()["plot_vector"].invoke({"file_id": shapefile["zip_id"], "column": "val"}))
+    p = json.loads(_tools()["render_map_image"].invoke({"file_id": shapefile["zip_id"], "column": "val"}))
     assert p["ok"] is True and p["download_url"]
     assert resolve_file_id(p["file_id"]).stat().st_size > 0  # a real PNG was written
 
@@ -97,7 +97,7 @@ def test_plot_downsamples(monkeypatch, tmp_path):
     with zipfile.ZipFile(zp, "w") as z:
         for c in comps:
             z.write(c, Path(c).name)
-    p = json.loads(_tools()["plot_vector"].invoke({"file_id": _upload(zp), "max_features": 10}))
+    p = json.loads(_tools()["render_map_image"].invoke({"file_id": _upload(zp), "max_features": 10}))
     assert p["ok"] is True and p["downsampled"] is True and p["plotted_features"] == 10
 
 
@@ -149,7 +149,7 @@ def test_geo_tools_wired_into_peers_only_with_files(monkeypatch):
 
     # analyze peer WITH files -> geo tools present
     sg.default_analyze_fn(include_mcp_tools=False, input_file_ids=["file_x"])("q", [], {"thread_id": None})
-    assert "inspect_vector" in captured["tools"] and "plot_vector" in captured["tools"]
+    assert "inspect_vector" in captured["tools"] and "render_map_image" in captured["tools"]
 
     # analyze peer WITHOUT files -> no geo tools
     captured.clear()
@@ -189,7 +189,7 @@ def test_reference_any_component_resolves_shapefile(shapefile):
 def test_plot_auto_discovers_siblings(shapefile):
     from agent_runtime.file_store import resolve_file_id
     tools = _tools_with([shapefile["shp_id"], *shapefile["siblings"]])
-    p = json.loads(tools["plot_vector"].invoke({"file_id": shapefile["shp_id"], "column": "val"}))
+    p = json.loads(tools["render_map_image"].invoke({"file_id": shapefile["shp_id"], "column": "val"}))
     assert p["ok"] is True and resolve_file_id(p["file_id"]).stat().st_size > 0
 
 

@@ -258,7 +258,7 @@ def read_vector(read_path: Any, layer: Optional[str] = None) -> Any:
     # GDAL (read_file) cannot open (geo)parquet, and these tools WRITE parquet —
     # vector_spatial_join / reproject_vector emit it — so without this branch a tool's own
     # output is unreadable by every other tool in the set: an observed spatial join produced
-    # 128,464 joined features that inspect_vector, plot_vector and pyqgis_layer_summary all
+    # 128,464 joined features that inspect_vector, render_map_image and pyqgis_layer_summary all
     # then refused as "not recognized as being in a supported file format".
     if str(read_path).lower().endswith((".parquet", ".geoparquet")):
         try:
@@ -373,7 +373,7 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                         "bounds": [float(x) for x in b],
                         "geometry_source": "derived from coordinate columns "
                                            "(decimal degrees or DMS) — usable directly with "
-                                           "plot_vector / vector_to_geojson / spatial tools",
+                                           "render_map_image / vector_to_geojson / spatial tools",
                     })
                 except Exception as derive_exc:
                     payload["geometry_note"] = (
@@ -385,7 +385,7 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             if tmp:
                 shutil.rmtree(tmp, ignore_errors=True)
 
-    def plot_vector(file_id: str, column: Optional[str] = None,
+    def render_map_image(file_id: str, column: Optional[str] = None,
                     sibling_file_ids: Optional[List[str]] = None, layer: Optional[str] = None,
                     max_features: int = 50000, cmap: str = "viridis", title: Optional[str] = None,
                     name: Optional[str] = None) -> str:
@@ -630,17 +630,20 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                          "`column` (e.g. the count from vector_spatial_join), 'points'/'shapes', or "
                          "'auto'. Accepts GeoJSON/shapefile/GeoPackage/GeoParquet/CSV-with-coordinates "
                          "by file_id; reprojects to WGS84 and samples very large point sets for "
-                         "display. A PNG tool (plot_vector) is only for a static image someone wants "
+                         "display. A PNG tool (render_map_image) is only for a static image someone wants "
                          "to download.")),
         StructuredTool.from_function(func=inspect_vector, name="inspect_vector", metadata=meta,
             description=("Read a vector / shapefile's metadata (CRS, extent, geometry type, feature "
                          "count, attribute columns) without loading all geometry. Handles a TIGER/Line "
                          "shapefile .zip, a .shp (+ sidecars), GeoJSON, GeoPackage, or GeoParquet by "
                          "file_id. " + _SIB)),
-        StructuredTool.from_function(func=plot_vector, name="plot_vector", metadata=meta,
-            description=("Render a vector dataset to a PNG map (optionally a choropleth via `column`) "
-                         "and return a downloadable file_id. Use this to VISUALIZE an uploaded "
-                         "shapefile/TIGER layer. Large layers auto-downsample. " + _SIB)),
+        StructuredTool.from_function(func=render_map_image, name="render_map_image", metadata=meta,
+            description=("Draw a vector dataset into a STATIC PNG PICTURE (optionally shaded by "
+                         "`column`) and return a downloadable file_id. The picture cannot be "
+                         "panned, zoomed or clicked, so choose it when someone wants an IMAGE to "
+                         "download, embed in a document or print. To show data on the user's "
+                         "interactive map instead, use add_map_layer. Large layers auto-downsample. "
+                         + _SIB)),
         StructuredTool.from_function(func=vector_to_geojson, name="vector_to_geojson", metadata=meta,
             description=("Convert a vector dataset to GeoJSON (reprojected to WGS84 by default) and "
                          "return a downloadable file_id, e.g. for web mapping. " + _SIB)),

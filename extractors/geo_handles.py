@@ -201,8 +201,11 @@ def kb_select_rows(df_file_id: str, column: str, values_csv: str) -> str:
         return json.dumps({"error": f"{type(exc).__name__}: {exc}"})
 
 
-def kb_point_heatmap(points_file_id: str, title: str = "Density heat map") -> str:
-    """Render a hexbin point-density HEAT MAP from a points (Geo)DataFrame file.
+def heatmap_image(points_file_id: str, title: str = "Density heat map") -> str:
+    """Draw a hexbin point-density heat map as a STATIC PNG PICTURE from a points file.
+
+    An image to download or print — it cannot be panned, zoomed or clicked. To put a heat
+    map on the user's interactive map instead, use add_map_layer(render="heatmap").
     Returns JSON with the PNG file_id."""
     import json
 
@@ -226,11 +229,13 @@ def kb_point_heatmap(points_file_id: str, title: str = "Density heat map") -> st
         return json.dumps({"error": f"{type(exc).__name__}: {exc}"})
 
 
-def kb_choropleth_map(gdf_file_id: str, column: str, title: str = "Choropleth map",
+def choropleth_image(gdf_file_id: str, column: str, title: str = "Choropleth map",
                       scheme: str = "") -> str:
-    """Render a CHOROPLETH from a polygon (Geo)DataFrame file_id, colored by `column`
+    """Draw a choropleth as a STATIC PNG PICTURE from a polygon file_id, colored by `column`
     (e.g. a count produced by spatial_join_and_count). Robust to library versions —
-    use this instead of an extracted plot function that may target an old matplotlib.
+    use this instead of an extracted plot function that may target an old matplotlib. This is
+    an image to download or print; for a choropleth the user can explore on their interactive
+    map, use add_map_layer(render="choropleth", column=...) instead.
     Optional `scheme` (e.g. 'NaturalBreaks'=Jenks, 'Quantile') needs mapclassify; it
     silently falls back to a continuous ramp if unavailable. Returns a PNG file_id."""
     import json
@@ -275,12 +280,12 @@ def make_geo_analysis_tools() -> list:
                          "comma-separated value set, e.g. violent crime types. Returns a new file_id."),
             metadata={"category": "computation"}),
         StructuredTool.from_function(
-            func=kb_point_heatmap, name="kb_point_heatmap",
+            func=heatmap_image, name="heatmap_image",
             description=("Render a hexbin point-density HEAT MAP from a points (Geo)DataFrame file_id. "
                          "Returns a PNG file_id. Use this for 'heat map' requests (not a choropleth)."),
             metadata={"category": "generation"}),
         StructuredTool.from_function(
-            func=kb_choropleth_map, name="kb_choropleth_map",
+            func=choropleth_image, name="choropleth_image",
             description=("Render a CHOROPLETH (shaded polygons) from a polygon (Geo)DataFrame file_id "
                          "colored by `column` (e.g. the count from spatial_join_and_count). Robust "
                          "renderer — prefer this over an extracted plot function that may fail on the "
@@ -291,5 +296,5 @@ def make_geo_analysis_tools() -> list:
 
 
 __all__ = ["write_geodata", "read_geodata", "capture_current_fig", "make_file_handle_tool",
-           "kb_run_geofunction", "kb_select_rows", "kb_point_heatmap", "kb_choropleth_map",
+           "kb_run_geofunction", "kb_select_rows", "heatmap_image", "choropleth_image",
            "make_geo_analysis_tools"]

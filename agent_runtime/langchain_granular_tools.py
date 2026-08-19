@@ -329,7 +329,7 @@ def make_langchain_geocode_tools() -> List[Any]:
 def make_langchain_qgis_tools(*, session_id: Optional[str] = None) -> List[Any]:
     # QGIS is not installed in the default agent image (only GDAL, for the geopandas-backed
     # geo tools). Expose each QGIS tool only when its backend is actually present, so the agent
-    # falls back to the working `plot_vector`/`inspect_vector` geo tools instead of attempting
+    # falls back to the working `render_map_image`/`inspect_vector` geo tools instead of attempting
     # QGIS calls that fail at runtime. The processing/buffer tools need the `qgis_process` CLI;
     # render_map / layer_summary need the PyQGIS Python module — a deployment may have one and
     # not the other. Forceable via AGENT_QGIS_ENABLED. See qgis_headless_tools.qgis_available().
@@ -390,7 +390,7 @@ def make_langchain_qgis_tools(*, session_id: Optional[str] = None) -> List[Any]:
             timeout_sec=timeout_sec,
         )
 
-    def pyqgis_render_map(
+    def qgis_map_image(
         layers_json: str,
         output_filename: str = "map.png",
         width: int = 1200,
@@ -462,17 +462,15 @@ def make_langchain_qgis_tools(*, session_id: Optional[str] = None) -> List[Any]:
                 metadata={"category": "spatial_analysis"},
             ),
             StructuredTool.from_function(
-                func=pyqgis_render_map,
-                name="pyqgis_render_map",
+                func=qgis_map_image,
+                name="qgis_map_image",
                 description=(
-                    "Render vector/raster layer FILES to a static PNG using standalone headless PyQGIS. Use ONLY "
-                    "when the user explicitly wants a downloadable/exported map image or a styled cartographic "
-                    "figure of layer FILES (uploads/rasters). Do NOT use it to 'show a map' of features from "
-                    "overpass_search or other geo tools — that geometry is already plotted live on the user's "
-                    "interactive map, so a static render is redundant (and will fail without a layer file). "
-                    "layers_json may contain uploaded file_id strings or objects with path/layer_path, optional "
-                    "name, and provider ('ogr' for vector or 'gdal' for raster). Set basemap='osm' for an "
-                    "OpenStreetMap background. Returns managed_output with file_id and download_url on success."
+                    "Draw layer FILES into a STATIC PNG PICTURE with QGIS — the only renderer here that "
+                    "can composite data over an OpenStreetMap basemap (basemap='osm'). The result is an "
+                    "image to download or print, not something the user can pan or click; to put data on "
+                    "their interactive map use add_map_layer instead. layers_json may contain uploaded "
+                    "file_id strings or objects with path/layer_path, optional name, and provider ('ogr' "
+                    "for vector, 'gdal' for raster). Returns managed_output with file_id and download_url."
                 ),
                 metadata={"category": "spatial_analysis"},
             ),
@@ -562,7 +560,7 @@ def make_langchain_granular_tools(
                 "For an UPLOADED file, pass the file's bounding box as `bbox` (read it first with a "
                 "geo/file tool or execute_code if you don't already have it). "
                 "The geometry you get back is plotted AUTOMATICALLY on the user's interactive map — do "
-                "NOT also call a map-rendering tool (e.g. pyqgis_render_map) for it. "
+                "NOT also call a map-rendering tool (e.g. qgis_map_image) for it. "
                 "Returns JSON: {count, features:[{name, lat, lon, feature_type, tags, geometry}]}."
             ),
             metadata={"category": "retrieval_external"},

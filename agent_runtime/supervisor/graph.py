@@ -1607,7 +1607,7 @@ def _run_qgis_map_workflow(query: str, *, input_file_ids: Optional[List[str]],
             width=1100, height=1200, basemap="osm", session_id=session))
     except Exception as exc:
         return {"summary": f"QGIS render failed: {exc}", "steps": steps, "qgis_workflow": True}
-    steps.append({"step": "pyqgis_render_map", "result": render})
+    steps.append({"step": "qgis_map_image", "result": render})
 
     basemap = str(render.get("basemap") or "")
     parts = []

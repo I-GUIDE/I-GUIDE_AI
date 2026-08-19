@@ -687,7 +687,7 @@ def test_collect_image_artifacts_walks_json_tool_results():
     import json as _json
     from agent_runtime.supervisor_graph import _collect_image_artifacts
     analysis = {"tool_results": [
-        {"name": "plot_vector", "content": _json.dumps(
+        {"name": "render_map_image", "content": _json.dumps(
             {"ok": True, "file_id": "f1", "filename": "vector_plot.png",
              "download_url": "/agent/files/f1/download"})},
         {"name": "inspect_vector", "content": _json.dumps({"ok": True, "feature_count": 3})},
@@ -1204,7 +1204,7 @@ def test_code_peer_has_qgis_tools(monkeypatch):
 
     monkeypatch.setattr(gt, "make_langchain_qgis_tools",
                         lambda **k: [SimpleNamespace(name="qgis_metric_buffer"),
-                                     SimpleNamespace(name="pyqgis_render_map")])
+                                     SimpleNamespace(name="qgis_map_image")])
     captured = {}
 
     def fake_build(**kwargs):
@@ -1215,7 +1215,7 @@ def test_code_peer_has_qgis_tools(monkeypatch):
 
     sg.default_code_fn()("buffer these points with qgis", [], {"thread_id": None})
     assert "qgis_metric_buffer" in captured["tools"]
-    assert "pyqgis_render_map" in captured["tools"]
+    assert "qgis_map_image" in captured["tools"]
 
 
 def test_decider_prompt_distinguishes_analyze_from_code():
