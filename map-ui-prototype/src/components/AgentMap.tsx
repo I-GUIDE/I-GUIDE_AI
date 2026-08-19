@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { Map, Source, Layer, useControl } from 'react-map-gl/maplibre';
+import type { MapRef } from 'react-map-gl/maplibre';
 import type { MapLayerMouseEvent } from 'react-map-gl/maplibre';
 import { MapboxOverlay } from '@deck.gl/mapbox';
 import type { Feature, Polygon } from 'geojson';
@@ -45,13 +46,15 @@ interface Props {
   onMapClick: (lng: number, lat: number) => void;
   onHover: (info: any) => void;
   onFeatureClick: (feature: any, layerId: string) => void;
+  onReady?: () => void;
 }
 
-export function AgentMap({ layers, drawnRegion, drawPreview, drawMode, onMapClick, onHover, onFeatureClick }: Props) {
+export function AgentMap({ layers, drawnRegion, drawPreview, drawMode, onMapClick, onHover, onFeatureClick, onReady }: Props) {
   // The map is mounted while hidden (progressive reveal), so its canvas is sized for a
   // zero/40x30 box and stays that way: observed 400x300 inside an 820x646 container, painting
   // nothing. A one-shot resize on reveal races the layout, so track the container instead.
   const wrapRef = useRef<HTMLDivElement | null>(null);
+  const mapRef = useRef<MapRef | null>(null);
   useEffect(() => {
     const el = wrapRef.current;
     if (!el || typeof ResizeObserver === 'undefined') return;
@@ -78,9 +81,26 @@ export function AgentMap({ layers, drawnRegion, drawPreview, drawMode, onMapClic
     <Map
       initialViewState={{ longitude: -89.0, latitude: 40.5, zoom: 5.2 }}
       mapStyle={OSM_STYLE}
+      // Keep the WebGL buffer so the rendered view can be exported as an image;
+      // without it canvas.toDataURL() returns a cleared, single-colour frame.
+      preserveDrawingBuffer
       cursor={drawMode ? 'crosshair' : 'grab'}
       onClick={(e: MapLayerMouseEvent) => onMapClick(e.lngLat.lng, e.lngLat.lat)}
-      onLoad={(e: any) => { (window as any).__map = e.target; }}
+      ref={(r) => {
+        // Publish the instance as soon as it EXISTS. Waiting for the `load` event is
+        // unreliable: if the basemap's tile source fails (throttled/blocked), `load` never
+        // fires, `__map` stays unset and everything keyed off it — auto-framing a delivered
+        // layer, resize, export — silently never happens, even though deck.gl is drawing.
+        mapRef.current = r;
+        const m = r?.getMap?.();
+        if (m && (window as any).__map !== m) {
+          (window as any).__map = m;
+          const announce = () => onReady?.();
+          if (m.isStyleLoaded?.()) announce();
+          else { m.once?.('idle', announce); setTimeout(announce, 3000); }
+        }
+      }}
+      onLoad={(e: any) => { (window as any).__map = e.target; onReady?.(); }}
       interactiveLayerIds={[]}
       onMouseMove={() => {}}
       style={{ position: 'absolute', inset: 0 }}

@@ -84,6 +84,16 @@ export default function App() {
   }, [layers.length]);
   // The instance is destroyed when hidden, so drop the stale handle.
   useEffect(() => { if (!mapVisible) (window as any).__map = undefined; }, [mapVisible]);
+  useEffect(() => {
+    const el = mapBoxRef.current;
+    if (!mapVisible || !el) { setMapBoxReady(false); return; }
+    const measure = () => setMapBoxReady(el.clientWidth > 0 && el.clientHeight > 0);
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [mapVisible]);
 
   const asAgentConfig = useCallback((): AgentConfig => ({ ...cfg }), [cfg]);
   const resolveUrl = useCallback((u: string) => absoluteUrl(u, asAgentConfig()), [asAgentConfig]);
@@ -92,8 +102,15 @@ export default function App() {
   const putLayer = useCallback((a: LayerArtifact) => {
     setLayers((prev) => { const i = prev.findIndex((l) => l.id === a.id); if (i === -1) return [...prev, a]; const n = prev.slice(); n[i] = a; return n; });
   }, []);
+  // A layer often arrives before MapLibre has finished loading (a heatmap can be delivered
+  // within a second of the map mounting). fitBounds on a not-yet-loaded map is silently
+  // dropped, which left the user looking at the whole US with their city as a single dot —
+  // so remember the request and apply it the moment the map is ready.
+  const pendingFit = useRef<FeatureCollection | null>(null);
   const fitView = useCallback((fc: FeatureCollection) => {
-    const m = (window as any).__map; if (!m || !fc.features.length) return;
+    const m = (window as any).__map;
+    if (!fc.features.length) return;
+    if (!m) { pendingFit.current = fc; return; }
     try { const [w, s, e, n] = layerBBox(fc); m.fitBounds([[w, s], [e, n]], { padding: 80, duration: 800, maxZoom: 14 }); } catch { /* */ }
   }, []);
 
@@ -118,6 +135,11 @@ export default function App() {
   // auto-loaded too: three stacked layers of 128,855 points buried the heatmap under
   // a solid mass of circles.
   const mapLayerDelivered = useRef(false);
+  // A map mounted into a zero-sized container (collapsed pane, hidden tab) never finishes
+  // initialising — MapLibre does not fire `load`, so there is no instance to resize later and
+  // the canvas stays blank. Mount only once the container actually has room.
+  const mapBoxRef = useRef<HTMLDivElement | null>(null);
+  const [mapBoxReady, setMapBoxReady] = useState(false);
   const loadVectorArtifacts = useCallback(async (files: FileRecord[]) => {
     if (!spatial) return;
     for (const f of files) {
@@ -368,8 +390,18 @@ export default function App() {
             at ~40x30 and MapLibre never fired `load`: window.__map stayed unset and the
             canvas painted nothing (observed 400x300 inside an 820x646 container). */}
         {mapVisible && (
-          <div className="mapwrap">
-            <AgentMap layers={layers} drawnRegion={drawnRegion} drawPreview={drawPreview} drawMode={drawMode} onMapClick={onMapClick} onHover={() => {}} onFeatureClick={onFeatureClick} />
+          <div className="mapwrap" ref={mapBoxRef}>
+            {mapBoxReady && (
+              <AgentMap
+                layers={layers} drawnRegion={drawnRegion} drawPreview={drawPreview} drawMode={drawMode}
+                onMapClick={onMapClick} onHover={() => {}} onFeatureClick={onFeatureClick}
+                onReady={() => {
+                  const fc = pendingFit.current;
+                  pendingFit.current = null;
+                  if (fc) fitView(fc);
+                }}
+              />
+            )}
           </div>
         )}
         <ChatPanel
