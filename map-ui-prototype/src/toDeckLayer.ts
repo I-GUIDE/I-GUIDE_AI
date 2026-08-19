@@ -1,5 +1,5 @@
 // The thin renderer: LayerArtifact -> deck.gl layer. One switch, easy to test.
-import { GeoJsonLayer } from '@deck.gl/layers';
+import { BitmapLayer, GeoJsonLayer } from '@deck.gl/layers';
 import { HeatmapLayer } from '@deck.gl/aggregation-layers';
 import type { LayerArtifact } from './contracts';
 import type { Feature, Point } from 'geojson';
@@ -15,7 +15,9 @@ function centroidOf(f: Feature): [number, number] | null {
 }
 
 // Sequential ramp for a choropleth: light -> deep, computed over the layer's own range.
-function rampFor(a: LayerArtifact): ((f: any) => [number, number, number, number]) | null {
+type VectorLayer = Extract<LayerArtifact, { kind: 'geojson' }>;
+
+function rampFor(a: VectorLayer): ((f: any) => [number, number, number, number]) | null {
   if (!a.styleBy) return null;
   const key = a.styleBy;
   const vals = a.data.features
@@ -33,6 +35,19 @@ function rampFor(a: LayerArtifact): ((f: any) => [number, number, number, number
 }
 
 export function toDeckLayer(a: LayerArtifact) {
+  // A raster is an image with a footprint, not geometry: deck.gl wants the bounds in
+  // [left, bottom, right, top] order, which is the same order the agent sends.
+  if (a.kind === 'raster') {
+    return new BitmapLayer({
+      id: a.id,
+      image: a.url,
+      bounds: a.bounds,
+      opacity: a.opacity ?? 0.85,
+      visible: a.visible !== false,
+      pickable: false,
+    });
+  }
+
   const s = a.style ?? {};
   const fill = s.fill ?? DEFAULT_FILL;
   const line = s.line ?? DEFAULT_LINE;

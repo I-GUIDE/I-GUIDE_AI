@@ -804,8 +804,13 @@ def default_decide_fn(llm: Optional[Any] = None) -> DecideFn:
             "order and repeat as needed:\n"
             "- search: retrieve evidence (datasets, publications, notebooks)\n"
             "- analyze: run a GIS/data analysis workflow with EXISTING purpose-built tools "
-            "(QGIS/PyQGIS, spatial ops, statistics, vector inspect/plot/reproject) over the "
-            "evidence or uploaded files\n"
+            "(QGIS/PyQGIS, overlay/buffer/clip/dissolve, aggregation, temporal analysis, "
+            "statistics, vector inspect/plot/reproject) over the evidence or uploaded files. "
+            "It ALSO computes remote-sensing foundation-model embeddings for a map region: "
+            "embedding a drawn area, segmenting it into look-alike zones, measuring how much "
+            "it changed across years, comparing two areas, and running pretrained heads. "
+            "Model names (gse, tessera, prithvi, terrafm, satmae, ...) are ARGUMENTS to those "
+            "tools, not datasets to retrieve — a request naming one is analyze work, not search.\n"
             "- code: produce and run NEW code for work no existing tool covers\n"
             "- done: stop; a grounded final answer is composed automatically from the "
             "conversation + evidence + analysis results + code\n\n"
@@ -1682,7 +1687,8 @@ def _run_qgis_map_workflow(query: str, *, input_file_ids: Optional[List[str]],
 # about an interactive map" and the claim shipped anyway. A static PNG cannot be panned,
 # zoomed or clicked, so this is not a wording quibble — the deliverable was missing. Verified
 # structurally (like the unrun-code check) rather than demanded in the prompt.
-_MAP_LAYER_TOOLS = ("add_map_layer", "overpass_search", "spatial_search")
+_MAP_LAYER_TOOLS = ("add_map_layer", "overpass_search", "spatial_search",
+                    "embed_region", "segment_region")
 _WANTS_MAP_RE = re.compile(
     r"\b(?:on|in|onto|to)\s+(?:the\s+|a\s+|my\s+)?(?:interactive\s+)?map\b"
     r"|\binteractive\s+map\b|\bmap\s+view\b|\bheat\s?map\b|\bchoropleth\b"
@@ -1811,6 +1817,14 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
                 tools.extend(make_temporal_tools(default_input_file_ids=input_file_ids))
             except Exception:
                 pass
+        # Remote-sensing foundation-model embeddings (rs-embed service). NOT gated on
+        # attached files: the region can come from the map's Region tool or a place name,
+        # with nothing uploaded at all.
+        try:
+            from agent_runtime.rs_embed_tools import make_rs_embed_tools
+            tools.extend(make_rs_embed_tools(default_input_file_ids=input_file_ids))
+        except Exception:
+            pass
         from agent_runtime.code_execution import is_code_exec_enabled
 
         if code_exec if code_exec is not None else is_code_exec_enabled():
@@ -1982,6 +1996,14 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
                 tools.extend(make_temporal_tools(default_input_file_ids=input_file_ids))
             except Exception:
                 pass
+        # Remote-sensing foundation-model embeddings (rs-embed service). NOT gated on
+        # attached files: the region can come from the map's Region tool or a place name,
+        # with nothing uploaded at all.
+        try:
+            from agent_runtime.rs_embed_tools import make_rs_embed_tools
+            tools.extend(make_rs_embed_tools(default_input_file_ids=input_file_ids))
+        except Exception:
+            pass
         from agent_runtime.code_execution import is_code_exec_enabled
 
         if code_exec if code_exec is not None else is_code_exec_enabled():

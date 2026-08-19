@@ -1529,3 +1529,30 @@ def test_toolkit_layers_count_as_delivery_for_the_analyze_peer(monkeypatch):
                                    query="buffer the hotspot by 2 km and show it on the map")
     assert len(seen) == 1, "a delivered toolkit layer must not trigger the retry"
     assert out["on_map"] is True
+
+
+def test_decider_knows_embedding_is_analyze_not_search():
+    """Naming a foundation model sent the turn to search, which hunted the KB for a dataset
+    called "gse model embedding" and blew the 128k context window."""
+    from agent_runtime.supervisor.graph import default_decide_fn
+
+    seen = {}
+
+    def llm(prompt: str) -> str:
+        seen["prompt"] = prompt
+        return '{"next": "analyze", "reason": "embedding work"}'
+
+    state = {"query": "Embed this drawn region with the gse model", "actions": [],
+             "search_attempts": 0}
+    out = default_decide_fn(llm=llm)(state, {"available_actions": ["search", "analyze", "code", "done"]})
+    assert out == "analyze"
+    p = seen["prompt"]
+    assert "remote-sensing foundation-model embeddings" in p
+    assert "ARGUMENTS to those" in p and "not datasets to retrieve" in p
+
+
+def test_analysis_hints_cover_embedding_vocabulary():
+    from agent_runtime.intent_classifier import ANALYSIS_HINTS
+
+    for word in ("embed", "embedding", "satellite", "remote sensing", "segment"):
+        assert word in ANALYSIS_HINTS

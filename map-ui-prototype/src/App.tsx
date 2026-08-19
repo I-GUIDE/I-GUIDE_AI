@@ -9,6 +9,7 @@ import { parseIntent } from './agentBrain';
 import { searchKb, kbHitsToFeatureCollections, type KbHit } from './mockKb';
 import { queryOverpass } from './overpass';
 import { bufferFC, clipToRegion, convexHull, areaKm2, stats, selectRelated, layerBBox } from './analysis';
+import { bboxToFC } from './mapFit';
 import {
   streamChat, uploadFiles, absoluteUrl, extractFeatures, newThreadId,
   type AgentConfig, type FileRecord, type TraceLine,
@@ -143,9 +144,13 @@ export default function App() {
   const removeLayerById = useCallback((id: string) => {
     setLayers((prev) => prev.filter((l) => l.id !== id));
   }, []);
+  const setLayerOpacity = useCallback((id: string, opacity: number) => {
+    setLayers((prev) => prev.map((l) => (l.id === id && l.kind === 'raster' ? { ...l, opacity } : l)));
+  }, []);
   const fitLayer = useCallback((id: string) => {
     const l = layersRef.current.find((x) => x.id === id);
-    if (l) fitView(l.data);
+    if (!l) return;
+    fitView(l.kind === 'raster' ? bboxToFC(l.bounds) : l.data);
   }, [fitView]);
   // Vector artifacts (a .geojson the agent WROTE, e.g. from execute_code) belong on the
   // interactive map, not just in a download list. Fetch and add each one once. Static
@@ -259,6 +264,20 @@ export default function App() {
         onFile: (files) => patch({ artifacts: files }),
         onMapLayer: async (layer) => {
           mapLayerDelivered.current = true;
+          // A raster (embedding PCA image, segmentation mask) is an IMAGE draped over its
+          // footprint. It must be handled before the GeoJSON path below, which would try to
+          // parse the PNG as JSON, fail, and silently deliver nothing.
+          if (layer.render === 'raster' && layer.url && layer.bounds) {
+            const bounds = layer.bounds;
+            putLayer({
+              kind: 'raster', id: layer.id, source: (layer.source as any) || 'analysis',
+              label: layer.label, url: resolveUrl(layer.url), bounds,
+              opacity: layer.opacity ?? 0.85, fitBounds: true,
+            });
+            fitView(bboxToFC(bounds));
+            addTrace({ text: `map: raster — ${layer.label}`, kind: 'tool' });
+            return;
+          }
           // A layer may arrive inline or as a URL to fetch (large heatmaps/choropleths).
           let fc = layer.geojson;
           if (!fc && layer.url) {
@@ -415,7 +434,7 @@ export default function App() {
           <LeftPanel
             layers={layers} selected={selected}
             onToggleLayer={toggleLayer} onRemoveLayer={removeLayerById}
-            onFitLayer={fitLayer} onClearSelection={() => setSelected(null)}
+            onFitLayer={fitLayer} onSetOpacity={setLayerOpacity} onClearSelection={() => setSelected(null)}
           />
         )}
         {/* MOUNT the map only while it is shown. Hiding it with display:none left it mounted
@@ -442,7 +461,12 @@ export default function App() {
           mode={mode} cfg={cfg} spatial={spatial} showSettings={showSettings} resolveUrl={resolveUrl}
           onSend={runAgent}
         onStop={() => abortRef.current?.abort()}
-          onToggleDraw={() => { setDrawMode((d) => !d); firstCorner.current = null; }}
+          onToggleDraw={() => {
+            // Drawing needs somewhere to draw: entering draw mode opens the map. Without
+            // this the button says "Click 2 corners…" over a closed map and nothing happens.
+            setDrawMode((d) => { const next = !d; if (next) setMapVisible(true); return next; });
+            firstCorner.current = null;
+          }}
           onClearRegion={() => { setDrawnRegion(null); pushMsg({ role: 'agent', text: 'Region cleared.' }); }}
           onUpload={onUpload}
           onSetMode={setMode} onSetCfg={setCfg}
@@ -456,7 +480,11 @@ export default function App() {
 
 function short(v: any): string { try { const s = typeof v === 'string' ? v : JSON.stringify(v); return s.length > 80 ? s.slice(0, 80) + '…' : s; } catch { return ''; } }
 
-function pickTarget(layers: LayerArtifact[], hint: string): LayerArtifact | null {
+type VectorLayer = Extract<LayerArtifact, { kind: 'geojson' }>;
+// Buffer / hull / clip / relate all read `.data`, so only a vector layer can be their
+// target. Narrowing here keeps every caller honest instead of guarding at each use.
+function pickTarget(all: LayerArtifact[], hint: string): VectorLayer | null {
+  const layers = all.filter((l): l is VectorLayer => l.kind === 'geojson');
   if (!layers.length) return null;
   const h = hint.toLowerCase();
   const pool = layers.filter((l) => l.source !== 'analysis');

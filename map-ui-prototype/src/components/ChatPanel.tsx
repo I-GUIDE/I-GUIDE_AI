@@ -18,6 +18,13 @@ export interface ChatMessage {
 export type Mode = 'live' | 'local';
 export interface AgentCfg { endpoint: string; uploadEndpoint: string; apiKey: string }
 
+const RS_ACTIONS = [
+  { label: 'Embed',   prompt: 'Embed this drawn region with the gse model for June–September 2022 and put the embedding on the map.' },
+  { label: 'Segment', prompt: 'Segment this drawn region into 6 look-alike zones from its satellite embedding and show it on the map.' },
+  { label: 'Change',  prompt: 'How much did this drawn region change across 2018, 2020, 2022 and 2024 according to its satellite embeddings?' },
+  { label: 'Predict', prompt: 'Run the available pretrained heads on this drawn region and report the predictions with their validation scores.' },
+];
+
 interface Props {
   messages: ChatMessage[];
   busy: boolean;
@@ -141,11 +148,22 @@ export function ChatPanel(p: Props) {
       )}
 
       {p.spatial && (
-        <div className="toolbar">
-          <button className={p.drawMode ? 'active' : ''} onClick={p.onToggleDraw}>{p.drawMode ? 'Click 2 corners…' : '▭ Region'}</button>
-          <button onClick={p.onClearRegion} disabled={!p.hasRegion}>Clear</button>
-          <span className={p.hasRegion ? 'rstat on' : 'rstat'}>{p.hasRegion ? '● region set' : '◇ spatial on'}</span>
-        </div>
+        <>
+          <div className="toolbar">
+            <button className={p.drawMode ? 'active' : ''} onClick={p.onToggleDraw}>{p.drawMode ? 'Click 2 corners…' : '▭ Region'}</button>
+            <button onClick={p.onClearRegion} disabled={!p.hasRegion}>Clear</button>
+            <span className={p.hasRegion ? 'rstat on' : 'rstat'}>{p.hasRegion ? '● region set' : '◇ spatial on'}</span>
+          </div>
+          {p.hasRegion && (
+            <div className="rsrow" title="Run on the drawn region">
+              <span className="rslabel">🛰 satellite embedding</span>
+              {RS_ACTIONS.map((a) => (
+                <button key={a.label} className="rsbtn" disabled={p.busy}
+                  onClick={() => p.onSend(a.prompt)}>{a.label}</button>
+              ))}
+            </div>
+          )}
+        </>
       )}
 
       <div className="transcript" ref={scrollRef}

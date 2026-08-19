@@ -12,6 +12,7 @@ interface Props {
   onToggleLayer: (id: string) => void;
   onRemoveLayer: (id: string) => void;
   onFitLayer: (id: string) => void;
+  onSetOpacity?: (id: string, opacity: number) => void;
   onClearSelection: () => void;
 }
 
@@ -36,16 +37,25 @@ export function LeftPanel(p: Props) {
         <ul>
           {p.layers.map((l) => {
             const visible = l.visible !== false;
-            const n = l.data?.features?.length ?? 0;
+            // A raster is one image: it has no feature count and cannot be a sample.
+            const n = l.kind === 'geojson' ? (l.data?.features?.length ?? 0) : null;
+            const partial = l.kind === 'geojson' ? l.partial : undefined;
             return (
               <li key={l.id} className={visible ? '' : 'off'}>
                 <button className="eye" title={visible ? 'Hide' : 'Show'} onClick={() => p.onToggleLayer(l.id)}>{visible ? '👁' : '⦰'}</button>
                 <span className="dot" style={{ background: SOURCE_COLORS[l.source] ?? '#888' }} />
                 <button className="lname" title="Zoom to layer" onClick={() => p.onFitLayer(l.id)}>{l.label}</button>
-                <span className="cnt" title={l.partial ? `sample of ${l.partial.total}` : undefined}>
-                  {l.partial ? `${l.partial.shown}/${l.partial.total}` : n}
+                <span className="cnt" title={partial ? `sample of ${partial.total}` : undefined}>
+                  {partial ? `${partial.shown}/${partial.total}` : (n ?? "img")}
                 </span>
                 <button className="x" title="Remove" onClick={() => p.onRemoveLayer(l.id)}>×</button>
+                {l.kind === 'raster' && p.onSetOpacity && (
+                  <label className="lp-opacity" title="Layer opacity">
+                    <input type="range" min={0} max={1} step={0.05}
+                      value={l.opacity ?? 0.85}
+                      onChange={(e) => p.onSetOpacity!(l.id, Number(e.target.value))} />
+                  </label>
+                )}
               </li>
             );
           })}

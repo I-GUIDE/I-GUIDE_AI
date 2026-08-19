@@ -81,7 +81,7 @@ def build_map_layer(tool_name: str, output: Any) -> Optional[Dict[str, Any]]:
         if url:
             render = str(ml.get("render") or "shapes")
             slug = re.sub(r"[^a-z0-9]+", "_", str(ml.get("label") or render).lower()).strip("_")[:40]
-            return {
+            out = {
                 "kind": "map_layer",
                 "id": ml.get("id") or f"agent-{slug or render}",
                 "source": ml.get("source") or "analysis",
@@ -90,7 +90,22 @@ def build_map_layer(tool_name: str, output: Any) -> Optional[Dict[str, Any]]:
                 "render": render,
                 "style_by": ml.get("style_by"),
                 "count": ml.get("count"),
+                # Whether the layer is a SUBSET is part of the layer, not a remark in the
+                # answer text: the client shows "shown/total" from these. Dropping them here
+                # silently turned every sampled layer into one that looked complete.
+                "sampled": bool(ml.get("sampled")),
+                "total": ml.get("total"),
             }
+            # A raster layer (e.g. an embedding PCA image) is draped over a geographic
+            # extent rather than parsed as GeoJSON, so it travels with its bounds.
+            if render == "raster":
+                bounds = ml.get("bounds")
+                if not (isinstance(bounds, (list, tuple)) and len(bounds) == 4):
+                    logger.warning("raster map_layer %r has no usable bounds; dropping", out["id"])
+                    return None
+                out["bounds"] = [float(v) for v in bounds]
+                out["opacity"] = float(ml.get("opacity") or 0.85)
+            return out
     features = _features_from(obj)
     if not features:
         return None
