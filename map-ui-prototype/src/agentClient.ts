@@ -7,6 +7,36 @@ export interface AgentConfig {
   endpoint: string;        // .../agent/chat/stream
   uploadEndpoint: string;  // .../agent/files/upload
   apiKey: string;
+  /** Selected model, e.g. 'gpt-4o-2024-11-20' or 'qwen3.6:27b'. Empty = the agent's default. */
+  model?: string;
+  /** 'openai' | 'anvilgpt'. Empty lets the server infer it from the model id. */
+  provider?: string;
+  /** Reasoning models only (gpt-5.x, o-series): 'none'|'low'|'medium'|'high'|'xhigh'. */
+  reasoningEffort?: string;
+}
+
+export interface ModelCatalogue {
+  default: { provider: string; model: string };
+  /** Accepted reasoning_effort values, per the API's own error message. */
+  reasoning_efforts?: string[];
+  providers: { provider: string; label: string; configured: boolean;
+               models: string[]; stale?: boolean;
+               /** Subset of `models` that accept reasoning_effort. */
+               reasoning_models?: string[] }[];
+}
+
+/** Ask the agent which models a request may select. */
+export async function fetchModels(cfg: AgentConfig): Promise<ModelCatalogue | null> {
+  try {
+    // apiBase is only the ORIGIN, so name the path explicitly — the same way download
+    // URLs are resolved. new URL('models', origin) would hit /models.
+    const url = absoluteUrl('/agent/models', cfg);
+    const r = await fetch(url, { headers: authHeaders(cfg, false) });
+    if (!r.ok) return null;
+    return (await r.json()) as ModelCatalogue;
+  } catch {
+    return null;   // the picker degrades to "agent default" rather than blocking the page
+  }
 }
 
 export interface FileRecord {
@@ -150,6 +180,11 @@ export async function streamChat(
     file_ids: (opts.fileIds || []).filter((id) => id && !id.startsWith('tmp:')),
     enabled_search_methods: opts.enabledSearchMethods ?? null,
     verbose: false,
+    // Only sent when chosen: absent model AND provider means the agent uses its configured
+    // default (OpenAI gpt-4o here), which is what every older client does.
+    ...(cfg.model ? { model: cfg.model } : {}),
+    ...(cfg.provider ? { provider: cfg.provider } : {}),
+    ...(cfg.reasoningEffort ? { reasoning_effort: cfg.reasoningEffort } : {}),
   };
 
   const resp = await fetch(cfg.endpoint, {

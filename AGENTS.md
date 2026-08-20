@@ -61,6 +61,43 @@ herring for this test: with no model, `_extract_place_candidates` falls back to
 worth doing — production entity extraction runs on a weaker regex path without it — but it
 fixes nothing here.
 
+## Which model answers
+
+**A request with no `model` and no `provider` uses OpenAI `gpt-4o-2024-11-20`.** That is the
+deliberate default: it is what the deployment has been validated against, and it is what every
+client got before selection existed, so an older caller behaves identically.
+
+Selection is per request — `model`, `provider` and `reasoning_effort` on `/agent/chat` and
+`/agent/chat/stream`, resolved in `_llm_for_request` (`agent_runtime/agent_chat_service.py`)
+and built by `build_llm` (`agent_runtime/executor_factory.py`). `GET /agent/models` lists what
+may be selected; it queries each provider live, because a hardcoded id that the provider has
+retired 404s at request time instead of being absent from the picker.
+
+Two providers are wired:
+
+- **OpenAI** — the default. The `gpt-5.x` family and the o-series accept `reasoning_effort`;
+  the accepted values are `none`, `low`, `medium`, `high`, `xhigh`. **Not** `minimal`, which
+  some docs list and `gpt-5.6-luna` rejects. `supports_reasoning_effort()` decides, and the
+  argument is dropped for models that would refuse it, so a UI leaving the control set while
+  switching to gpt-4o cannot break the request.
+- **AnvilGPT** (Purdue RCAC, Open WebUI) — set `AGENT_LLM_PROVIDER=anvilgpt` for the
+  process default, or select a model per request. Its ids look like `qwen3.6:27b`, NOT the
+  HuggingFace `Qwen/Qwen3.6-27B` form a vLLM server uses; a wrong id 404s. Chat lives at
+  `/api/chat/completions`, which `normalize_openai_base_url` reduces to the `/api` base.
+
+**Do not set `max_tokens` for a reasoning model.** qwen3.6:27b and the gpt-5.x line spend
+their first tokens on reasoning and only then write `content`, so a tight ceiling returns
+`finish_reason="length"` with `content=None` — an EMPTY answer. `extract_final_answer` reads
+blank as "no answer", so a truncated reasoning model looks like a failed peer rather than a
+cut-off one. Measured on qwen3.6:27b: `max_tokens=20` produced no content at all; unset
+completes normally.
+
+Which model actually answered is not visible in the transport log — it shows only the host,
+and a dropped `reasoning_effort` looks identical to an applied one. So each per-request build
+logs `per-request LLM: provider=… model=… reasoning_effort=…`, and
+`active_llm_description()` reports the process default. Read those rather than inferring the
+model from whether a call succeeded.
+
 ## The delivery contract
 
 An analysis result reaches the user as an **interactive map layer**, not a file path in prose:

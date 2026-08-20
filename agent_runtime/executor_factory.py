@@ -146,10 +146,45 @@ def normalize_openai_base_url(url: Optional[str]) -> Optional[str]:
     return normalized
 
 
+# Deliberately NO max_tokens. qwen3.6:27b is a reasoning model: it spends its first tokens on
+# `reasoning_content` and only then writes `content`, so a tight ceiling returns
+# finish_reason="length" with content=None — an EMPTY answer that reads as a model failure
+# rather than a truncation. Measured: max_tokens=20 produced no content at all (all 20 spent
+# thinking); 800 answered in 41; unset completes normally at 57. Since the endpoint imposes no
+# small default of its own, any ceiling invented here could only truncate a long answer.
+
+
+def _anvilgpt_settings() -> Optional[Dict[str, Any]]:
+    """AnvilGPT (Purdue RCAC, Open WebUI) config, or None when it is not configured.
+
+    Selected by AGENT_LLM_PROVIDER=anvilgpt, so setting the variables alone never silently
+    moves every request onto a different model.
+    """
+    if (os.getenv("AGENT_LLM_PROVIDER") or "").strip().lower() != "anvilgpt":
+        return None
+    key = os.getenv("ANVILGPT_KEY")
+    if not key:
+        raise RuntimeError(
+            "AGENT_LLM_PROVIDER=anvilgpt but ANVILGPT_KEY is unset. Create a key at "
+            "https://anvilgpt.rcac.purdue.edu (avatar -> Settings -> Account -> API Keys)."
+        )
+    # Its chat path is /api/chat/completions, so the OpenAI-compatible base is /api — which
+    # normalize_openai_base_url already produces by stripping the /chat/completions suffix.
+    base_url = normalize_openai_base_url(
+        os.getenv("ANVILGPT_URL") or "https://anvilgpt.rcac.purdue.edu/api/chat/completions")
+    return {
+        "api_key": key,
+        "base_url": base_url,
+        # Open WebUI names models like "qwen3.6:27b" — NOT the HuggingFace "Qwen/Qwen3.6-27B"
+        # form a vLLM server uses. Ask /api/models for the exact id; a wrong one 404s.
+        "model": os.getenv("ANVILGPT_MODEL") or "qwen3.6:27b",
+    }
+
+
 def build_default_llm() -> Any:
     """Build a ``ChatOpenAI`` instance from environment variables.
 
-    Priority: VLLM_* env vars → OPENAI_* env vars → defaults.
+    Priority: AGENT_LLM_PROVIDER=anvilgpt → VLLM_* → OPENAI_* → defaults.
     """
     try:
         from langchain_openai import ChatOpenAI
@@ -157,6 +192,10 @@ def build_default_llm() -> Any:
         raise RuntimeError(
             "Missing dependency `langchain-openai`. Install it to use the default LLM builder."
         ) from exc
+
+    anvil = _anvilgpt_settings()
+    if anvil:
+        return ChatOpenAI(temperature=0.0, **anvil)
 
     api_key = os.getenv("VLLM_API_KEY") or os.getenv("OPENAI_KEY")
     if not api_key:
@@ -174,6 +213,157 @@ def build_default_llm() -> Any:
     if base_url:
         kwargs["base_url"] = base_url
     return ChatOpenAI(**kwargs)
+
+
+# --- explicit per-request provider/model selection ------------------------------------
+# The UI can offer a model picker, so a turn needs to be able to say which model it wants
+# without changing process-wide env. Absent both, the DEFAULT IS OPENAI gpt-4o: it is what
+# the deployment has been validated against, and a reasoning model's latency profile is
+# quite different (see the qwen3.6:27b notes above).
+DEFAULT_PROVIDER = "openai"
+DEFAULT_OPENAI_MODEL = "gpt-4o-2024-11-20"
+
+# Offered in the picker. AnvilGPT's list is fetched live because it changes and a stale
+# hardcoded id 404s; these are the fallback if the fetch fails.
+_ANVIL_FALLBACK_MODELS = ("qwen3.6:27b", "qwen3:32b", "qwen3-coder:30b", "qwen3-vl:32b")
+# Verified present on this account via GET /v1/models. The gpt-5.x line are REASONING models:
+# they accept reasoning_effort and require max_completion_tokens rather than max_tokens.
+_OPENAI_MODELS = (
+    "gpt-4o-2024-11-20", "gpt-4o-mini", "gpt-4.1-2025-04-14",
+    "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra",
+    "gpt-5.5-pro", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-chat-latest", "gpt-5.2",
+    "o4-mini-2025-04-16",
+)
+
+# reasoning_effort is accepted by the gpt-5.x family and the o-series. The values are the ones
+# the API itself lists on rejection: "Supported values are: 'none', 'low', 'medium', 'high',
+# and 'xhigh'." Note 'minimal' is NOT accepted by gpt-5.6-luna even though older docs list it.
+REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh")
+
+
+def supports_reasoning_effort(model: Optional[str]) -> bool:
+    """Whether `model` takes a reasoning_effort argument."""
+    m = (model or "").strip().lower()
+    return m.startswith("gpt-5") or m.startswith(("o1", "o3", "o4"))
+
+
+def build_llm(provider: Optional[str] = None, model: Optional[str] = None,
+              reasoning_effort: Optional[str] = None) -> Any:
+    """Build a chat model for an EXPLICIT provider/model, falling back to the default.
+
+    ``provider=None and model=None`` reproduces :func:`build_default_llm` exactly, so an
+    unspecified request behaves as it always has.
+    """
+    prov = (provider or "").strip().lower()
+    effort = (reasoning_effort or "").strip().lower() or None
+    if effort and effort not in REASONING_EFFORTS:
+        raise ValueError(
+            f"reasoning_effort={reasoning_effort!r} is not one of {', '.join(REASONING_EFFORTS)}")
+    if not prov and not model and not effort:
+        return build_default_llm()
+    if not prov:
+        # A bare model name: infer the provider from the shape rather than guessing wrong.
+        # Open WebUI ids look like "qwen3.6:27b"; OpenAI's never contain a colon.
+        prov = "anvilgpt" if ":" in str(model) else DEFAULT_PROVIDER
+
+    from langchain_openai import ChatOpenAI
+
+    if prov == "anvilgpt":
+        key = os.getenv("ANVILGPT_KEY")
+        if not key:
+            raise ValueError(
+                "provider='anvilgpt' needs ANVILGPT_KEY. Create one at "
+                "https://anvilgpt.rcac.purdue.edu (avatar -> Settings -> Account -> API Keys).")
+        base_url = normalize_openai_base_url(
+            os.getenv("ANVILGPT_URL") or "https://anvilgpt.rcac.purdue.edu/api/chat/completions")
+        # No max_tokens: qwen3.x reasons before it answers, so a ceiling truncates the thinking
+        # and returns an EMPTY content rather than a short answer.
+        return ChatOpenAI(model=model or os.getenv("ANVILGPT_MODEL") or "qwen3.6:27b",
+                          api_key=key, base_url=base_url, temperature=0.0)
+    if prov in ("openai", "default"):
+        key = os.getenv("OPENAI_KEY") or os.getenv("OPENAI_API_KEY")
+        if not key:
+            raise ValueError("provider='openai' needs OPENAI_KEY.")
+        kwargs: Dict[str, Any] = {
+            "model": model or os.getenv("OPENAI_CHAT_MODEL") or os.getenv("OPENAI_MODEL")
+            or DEFAULT_OPENAI_MODEL,
+            "api_key": key, "temperature": 0.0,
+        }
+        base_url = normalize_openai_base_url(os.getenv("OPENAI_BASE_URL"))
+        if base_url:
+            kwargs["base_url"] = base_url
+        # Only send it where it is accepted: gpt-4o rejects the argument outright, so a UI
+        # that leaves the control set while switching models must not break the request.
+        if effort and supports_reasoning_effort(kwargs["model"]):
+            kwargs["reasoning_effort"] = effort
+        return ChatOpenAI(**kwargs)
+    raise ValueError(f"unknown provider {provider!r}; expected 'openai' or 'anvilgpt'")
+
+
+def list_available_models(*, timeout: float = 6.0) -> Dict[str, Any]:
+    """Models offerable in a picker, per provider, with the default marked.
+
+    AnvilGPT is queried live: its catalogue changes, and offering an id it no longer serves
+    produces a 404 at request time instead of an honest "unavailable" in the UI.
+    """
+    out: Dict[str, Any] = {
+        "default": {"provider": DEFAULT_PROVIDER,
+                    "model": os.getenv("OPENAI_CHAT_MODEL") or os.getenv("OPENAI_MODEL")
+                    or DEFAULT_OPENAI_MODEL},
+        "providers": [],
+    }
+    openai_models = list(dict.fromkeys(
+        [os.getenv("OPENAI_CHAT_MODEL") or os.getenv("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL,
+         *_OPENAI_MODELS]))
+    out["reasoning_efforts"] = list(REASONING_EFFORTS)
+    out["providers"].append({
+        "provider": "openai", "label": "OpenAI",
+        "configured": bool(os.getenv("OPENAI_KEY") or os.getenv("OPENAI_API_KEY")),
+        "models": [m for m in openai_models if m],
+        # Which of them accept reasoning_effort, so the picker can show the control
+        # conditionally instead of offering a setting that 400s.
+        "reasoning_models": [m for m in openai_models if m and supports_reasoning_effort(m)],
+    })
+
+    anvil: Dict[str, Any] = {"provider": "anvilgpt", "label": "AnvilGPT (Purdue RCAC)",
+                             "configured": bool(os.getenv("ANVILGPT_KEY")), "models": []}
+    if anvil["configured"]:
+        base = normalize_openai_base_url(
+            os.getenv("ANVILGPT_URL") or "https://anvilgpt.rcac.purdue.edu/api/chat/completions")
+        try:
+            import requests
+
+            resp = requests.get(f"{base}/models",
+                                headers={"Authorization": f"Bearer {os.getenv('ANVILGPT_KEY')}"},
+                                timeout=timeout)
+            resp.raise_for_status()
+            ids = [m.get("id") for m in (resp.json().get("data") or []) if m.get("id")]
+            anvil["models"] = sorted(ids)
+        except Exception as exc:
+            logger.info("AnvilGPT model list unavailable (%s); offering known ids", exc)
+            anvil["models"] = list(_ANVIL_FALLBACK_MODELS)
+            anvil["stale"] = True
+    out["providers"].append(anvil)
+    return out
+
+
+def active_llm_description() -> Dict[str, Any]:
+    """Which provider/model a run would actually use — for logs and smoke tests.
+
+    A silent fallback to OpenAI looks exactly like success, so make the choice inspectable
+    rather than inferring it from whether a call worked.
+    """
+    anvil = _anvilgpt_settings()
+    if anvil:
+        return {"provider": "anvilgpt", "model": anvil["model"],
+                "base_url": anvil["base_url"], "max_tokens": "unset (server default)"}
+    if os.getenv("VLLM_MODEL") or os.getenv("VLLM_PROXY"):
+        return {"provider": "vllm",
+                "model": os.getenv("VLLM_MODEL"),
+                "base_url": normalize_openai_base_url(os.getenv("VLLM_PROXY"))}
+    return {"provider": "openai",
+            "model": os.getenv("OPENAI_CHAT_MODEL") or os.getenv("OPENAI_MODEL"),
+            "base_url": normalize_openai_base_url(os.getenv("OPENAI_BASE_URL"))}
 
 
 # ---------------------------------------------------------------------------
