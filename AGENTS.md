@@ -42,9 +42,24 @@ panel. Node 18+ required.
 python3 -m pytest rag_pipeline/tests/ -q
 ```
 
-Baseline is **595 passed, 1 failed**. The failure — `test_spatial_routing_e2e.py::
-test_spatial_routing_to_generation_e2e` — is pre-existing and environmental: the spaCy model
-`en_core_web_sm` is not installed. Don't chase it; do check the count hasn't grown.
+Baseline is **649 passed, 1 skipped, 0 failed**. If something fails, it is yours.
+
+That baseline was reached by fixing a test everyone had learned to ignore, and the way it hid
+is worth knowing because it will happen again. `test_spatial_routing_e2e.py` suppresses the
+non-spatial retrieval sources so it can assert every document came from the spatial one. It
+patched `rag_pipeline.search.keyword.retrieve_keyword` — but `core.py` does `from .keyword
+import retrieve_keyword`, a from-import that binds the function into `core`'s namespace at
+import time, so patching the defining module afterwards changes nothing and the real function
+still runs. **Patch where a symbol is used, not where it is defined.** Two further sources
+(neo4j, opengeodata) had been added since the test was written, and the graph tier that
+actually runs is `get_neo4j_agent_results`, not the `retrieve_neo4j` fallback beneath it.
+
+The failure was misattributed for a long time to the missing spaCy model `en_core_web_sm`,
+because that logs a loud warning on import of `rag_pipeline/search/spatial.py`. It is a red
+herring for this test: with no model, `_extract_place_candidates` falls back to
+`_capitalized_candidates`, which handles the test's query fine. Installing the model is still
+worth doing — production entity extraction runs on a weaker regex path without it — but it
+fixes nothing here.
 
 ## The delivery contract
 
