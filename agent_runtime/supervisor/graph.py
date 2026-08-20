@@ -1817,6 +1817,14 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
                 tools.extend(make_temporal_tools(default_input_file_ids=input_file_ids))
             except Exception:
                 pass
+            # Spatial statistics (libpysal/esda/spreg/pygeoda): weights, Moran/Geary, LISA,
+            # Getis-Ord Gi*, spatial regression, GeoDa regionalization. Guarded like the rest —
+            # a deployment without the PySAL stack loses these tools and nothing else.
+            try:
+                from agent_runtime.analysis_spatial_stats_tools import make_spatial_stats_tools
+                tools.extend(make_spatial_stats_tools(default_input_file_ids=input_file_ids))
+            except Exception:
+                pass
         # Remote-sensing foundation-model embeddings (rs-embed service). NOT gated on
         # attached files: the region can come from the map's Region tool or a place name,
         # with nothing uploaded at all.
@@ -1994,6 +2002,14 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
             try:
                 from agent_runtime.analysis_temporal_tools import make_temporal_tools
                 tools.extend(make_temporal_tools(default_input_file_ids=input_file_ids))
+            except Exception:
+                pass
+            # Spatial statistics (libpysal/esda/spreg/pygeoda): weights, Moran/Geary, LISA,
+            # Getis-Ord Gi*, spatial regression, GeoDa regionalization. Guarded like the rest —
+            # a deployment without the PySAL stack loses these tools and nothing else.
+            try:
+                from agent_runtime.analysis_spatial_stats_tools import make_spatial_stats_tools
+                tools.extend(make_spatial_stats_tools(default_input_file_ids=input_file_ids))
             except Exception:
                 pass
         # Remote-sensing foundation-model embeddings (rs-embed service). NOT gated on

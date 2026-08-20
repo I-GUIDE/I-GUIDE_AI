@@ -56,6 +56,18 @@ export function LeftPanel(p: Props) {
                       onChange={(e) => p.onSetOpacity!(l.id, Number(e.target.value))} />
                   </label>
                 )}
+                {/* A cluster map is unreadable without its key: "High-High" is a colour on the
+                    map and nowhere else. Only categorical layers carry one. */}
+                {l.kind === 'geojson' && !!l.legend?.length && (
+                  <ul className="lp-legend">
+                    {l.legend.map((e) => (
+                      <li key={e.label}>
+                        <span className="swatch" style={{ background: `rgba(${e.color[0]},${e.color[1]},${e.color[2]},${e.color[3] / 255})` }} />
+                        <span className="llabel" title={e.label}>{e.label}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </li>
             );
           })}
