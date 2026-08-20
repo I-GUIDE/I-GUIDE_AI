@@ -397,7 +397,11 @@ def test_map_layer_descriptor_is_accepted_by_build_map_layer(data):
     """The descriptor must survive the real SSE builder the client consumes."""
     from agent_runtime.map_layers import build_map_layer
 
-    r = _call("dissolve_layer", file_id=data["tracts"], by="state", name="pop_by_state")
+    # statistic="mean" so the two dissolved groups DIFFER: the fixture's populations sum to
+    # 300 for both IL (100+200) and IN (300), which makes a summed choropleth genuinely flat —
+    # and layer_qa now refuses to ship a flat choropleth as a choropleth.
+    r = _call("dissolve_layer", file_id=data["tracts"], by="state", statistic="mean",
+              name="pop_by_state")
     built = build_map_layer("dissolve_layer", json.dumps(r))
     assert built is not None
     assert built["kind"] == "map_layer" and built["render"] == "choropleth"

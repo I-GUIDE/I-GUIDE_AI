@@ -120,6 +120,26 @@ def build_map_layer(tool_name: str, output: Any) -> Optional[Dict[str, Any]]:
             # layer's features are not in hand at this point, so deriving a palette belongs in
             # the tool that assigned the classes. 'shapes' at least does not claim to encode
             # anything it isn't.
+            # The written file is in the local store, so the descriptor can be checked against
+            # the actual data rather than taken on trust. A choropleth over a constant column
+            # or geometry in metres mislabelled EPSG:4326 is delivered-but-meaningless, and the
+            # client has no way to tell.
+            try:
+                from agent_runtime.file_store import resolve_file_id
+                from agent_runtime.layer_qa import inspect_geojson
+                fid = str(url).rstrip("/").split("/")[-2] if "/files/" in str(url) else ""
+                local = str(resolve_file_id(fid)) if fid else ""
+                qa = inspect_geojson(local, render=render, style_by=out.get("style_by"),
+                                    legend=out.get("legend")) if local else {"ok": True}
+            except Exception:
+                qa = {"ok": True}
+            if not qa.get("ok"):
+                logger.warning("map_layer %r would render meaninglessly (%s); shipping it as "
+                               "plain shapes", out["id"], "; ".join(qa.get("problems") or []))
+                out["render"] = "shapes"
+                out.pop("style_by", None)
+                out["degenerate"] = qa.get("problems") or True
+
             if render == "categories" and not out.get("legend"):
                 logger.warning(
                     "map_layer %r declares render='categories' with no usable legend; "

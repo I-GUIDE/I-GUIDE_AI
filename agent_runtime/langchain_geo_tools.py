@@ -471,6 +471,13 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             fd, png = tempfile.mkstemp(prefix="vec_plot_", suffix=".png")
             os.close(fd)
             fig.savefig(png, bbox_inches="tight", dpi=150)
+            # A blank figure is worse than an error: it looks like a result. Check before
+            # registering it as a download.
+            try:
+                from agent_runtime.layer_qa import inspect_image
+                img_qa = inspect_image(str(png))
+            except Exception:
+                img_qa = {"ok": True}
             plt.close(fig)
             rec = create_output_file_from_path(
                 png, filename=artifact_name(name, "png", source=str(read_path),
@@ -480,6 +487,8 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                 "download_url": rec.get("download_url"),
                 "plotted_features": int(len(gdf)), "total_features": int(total),
                 "downsampled": bool(downsampled), "crs": _epsg(getattr(gdf, "crs", None)),
+                **({"visual_warning": "; ".join(img_qa.get("problems") or [])}
+                   if not img_qa.get("ok") else {}),
             }, default=str)
         except Exception as exc:
             return json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}", "hint": _SIB})
@@ -635,6 +644,10 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             is_point = geom_types and geom_types <= {"Point", "MultiPoint"}
             mode = (render or "auto").strip().lower()
             legend = None
+            # The choropleth/heatmap branches below slice `gdf` down to the columns they need,
+            # so hold the full frame: if the layer turns out to be meaningless, the alternatives
+            # worth suggesting live in the columns that were dropped.
+            full = gdf
             if mode == "auto":
                 mode = "heatmap" if (is_point and len(gdf) > 2000) else ("points" if is_point else "shapes")
             if mode == "categories":
@@ -690,6 +703,36 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             out = Path(tempfile.mkdtemp(prefix="map_layer_")) / fname
             gdf.to_file(out, driver="GeoJSON")
             rec = create_output_file_from_path(out, filename=fname)
+            # Look at what was actually written before calling it a visual. A choropleth over a
+            # constant column, a styling column that did not survive the write, or geometry in
+            # metres labelled EPSG:4326 all produce a map that is technically delivered and
+            # visually meaningless — and the model cannot see the result to notice.
+            try:
+                from agent_runtime.layer_qa import inspect_geojson
+                qa = inspect_geojson(str(out), render=mode, style_by=column, legend=legend)
+            except Exception:
+                qa = {"ok": True, "problems": []}
+            if not qa.get("ok"):
+                import pandas as _pd2
+                # Offer columns that would actually WORK: numeric, varying, and not the one
+                # that just failed. Listing the failing column back is not an alternative.
+                usable = [c for c in full.columns
+                          if c != "geometry" and c != column
+                          and _pd2.api.types.is_numeric_dtype(full[c])
+                          and full[c].nunique(dropna=True) > 1]
+                varied = [c for c in full.columns
+                          if c != "geometry" and c != column
+                          and full[c].nunique(dropna=True) > 1]
+                return json.dumps({
+                    "ok": False,
+                    "error": "the layer would render meaninglessly: "
+                             + "; ".join(qa.get("problems") or []),
+                    "render": mode, "column": column,
+                    "numeric_columns_that_vary": usable[:40],
+                    "categorical_columns_that_vary": [c for c in varied if c not in usable][:40],
+                    "hint": "fix the column or the render and call add_map_layer again — the "
+                            "file was written but is not worth showing as-is",
+                })
             label = (name or Path(fname).stem).replace("_", " ")
             res = {"ok": True, "file_id": rec["file_id"], "filename": rec.get("filename"),
                    "download_url": rec.get("download_url"), "feature_count": int(len(gdf)),
@@ -707,6 +750,8 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                                  "sampled": bool(sampled), "total": total}}
             if note:
                 res["note"] = note
+            if qa.get("notes"):
+                res["visual_notes"] = qa["notes"]
             return json.dumps(res, default=str)
         except Exception as exc:
             return json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}", "hint": _SIB})
