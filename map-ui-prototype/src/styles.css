@@ -231,3 +231,26 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
   border: 1px solid rgba(0, 0, 0, 0.25); }
 .lp-layers .lp-legend .llabel { font-size: 11px; opacity: 0.85; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
+
+/* Past-conversation picker: an overlay rather than a sidebar, so it never competes with the
+   map for width and needs no layout change to the workspace. */
+.history { position: absolute; top: 64px; right: 18px; z-index: 30; width: min(420px, calc(100vw - 36px));
+  max-height: 70vh; overflow: auto; background: #fff; border: 1px solid var(--line);
+  border-radius: 12px; box-shadow: var(--shadow); padding: 12px 14px; }
+.history-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.history-head strong { flex: 1; font-size: 14px; }
+.hbtn { font-size: 12px; border: 1px solid var(--line); background: #fff; border-radius: 999px;
+  padding: 4px 10px; cursor: pointer; }
+.hbtn:hover { background: var(--soft); }
+.hempty { color: var(--muted); font-size: 13px; margin: 6px 2px; }
+.hlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.hrow { display: flex; align-items: center; gap: 6px; border-radius: 8px; }
+.hrow:hover { background: var(--soft); }
+.hrow.current { background: var(--soft); box-shadow: inset 2px 0 0 var(--brand); }
+.hopen { flex: 1; text-align: left; border: 0; background: none; cursor: pointer; padding: 8px 8px;
+  display: flex; flex-direction: column; gap: 2px; box-shadow: none; }
+.htitle { font-size: 13.5px; color: var(--ink); }
+.hmeta { font-size: 11.5px; color: var(--muted); }
+.hdel { border: 0; background: none; color: #9aa0a6; font-size: 16px; cursor: pointer;
+  padding: 4px 8px; box-shadow: none; }
+.hdel:hover { color: #b42318; }

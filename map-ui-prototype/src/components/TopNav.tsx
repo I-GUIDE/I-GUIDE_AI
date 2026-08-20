@@ -1,5 +1,7 @@
 interface Props {
   onToggleSettings: () => void;
+  onToggleHistory: () => void;
+  sessionCount: number;
 }
 
 // The reference I-GUIDE platform chrome. Nav items / search / account are PLACEHOLDERS
@@ -22,6 +24,9 @@ export function TopNav(p: Props) {
         </nav>
         <div className="grow" />
         <div className="navsearch"><span className="mag">⌕</span><input placeholder="Search…" aria-label="Search (placeholder)" /></div>
+        <button className="navbtn" title="Past conversations" onClick={p.onToggleHistory}>
+          History{p.sessionCount ? ` (${p.sessionCount})` : ''}
+        </button>
         <button className="navbtn gear" title="Connection settings" onClick={p.onToggleSettings}>⚙</button>
         <span className="jpy" title="Jupyter (placeholder)">jpy</span>
         <span className="avatar" title="Account (placeholder)" />

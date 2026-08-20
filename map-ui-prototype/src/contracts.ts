@@ -57,6 +57,9 @@ export type LayerArtifact =
       legend?: Legend[];
       fitBounds?: boolean;
       visible?: boolean;
+      // Where `data` was fetched from. Not used to render — it exists so a saved session can
+      // restore the layer without storing megabytes of geometry in the browser.
+      sourceUrl?: string;
     };
 
 export interface MapUpdate {
