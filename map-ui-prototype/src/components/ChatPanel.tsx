@@ -156,7 +156,9 @@ export function ChatPanel(p: Props) {
             <button className={p.mapVisible ? 'active' : ''} onClick={p.onToggleMap}
                     title="Show the map, then right-drag on it to select a region">Map</button>
             {p.mapVisible && <span className="hint">right-drag to select a region</span>}
-            <button onClick={p.onClearRegion} disabled={!p.hasRegion}>Clear</button>
+            {/* Shown only when there IS a region: a permanently greyed-out button is just
+                clutter — the toolbar should offer what can actually be done right now. */}
+            {p.hasRegion && <button onClick={p.onClearRegion}>Clear region</button>}
             <span className={p.hasRegion ? 'rstat on' : 'rstat'}>{p.hasRegion ? '● region set' : '◇ spatial on'}</span>
           </div>
           {p.hasRegion && (

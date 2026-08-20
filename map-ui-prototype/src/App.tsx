@@ -427,11 +427,7 @@ export default function App() {
 
   return (
     <div className={`app ${mapVisible ? 'map-on' : 'chat-only'}`}>
-      <TopNav
-        mode={mode} mapVisible={mapVisible} hasLayers={layers.length > 0}
-        onToggleMap={() => setMapVisible((v) => !v)}
-        onToggleSettings={() => setShowSettings((s) => !s)}
-      />
+      <TopNav onToggleSettings={() => setShowSettings((s) => !s)} />
       <div className="workspace">
         {mapVisible && (
           <LeftPanel
