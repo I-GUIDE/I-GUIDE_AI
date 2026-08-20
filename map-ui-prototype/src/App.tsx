@@ -205,7 +205,13 @@ export default function App() {
     for (const l of rec.layers || []) {
       if (l.kind === 'raster') { restored.push(l); continue; }
       const url = (l as any).sourceUrl;
-      if (!url) continue;
+      // A layer delivered inline (overpass_search, spatial_search) has no url behind it, so its
+      // stored geometry IS the copy — use it directly instead of dropping the layer.
+      const inline = (l as any).data;
+      if (!url) {
+        if (inline?.features?.length) restored.push(l as LayerArtifact);
+        continue;
+      }
       try {
         const res = await fetch(resolveUrl(url));
         if (!res.ok) continue;
@@ -437,8 +443,10 @@ export default function App() {
       }
       const html = res.error ? '' : renderMarkdown(res.answer || '_(no answer text)_', resolveUrl);
       patch({ html, text: res.error ? `⚠ ${res.error}` : undefined, artifacts: res.downloads, response: res.response, trace: [...trace], streaming: false });
-      // Only when the agent did NOT place a layer itself.
-      if (!mapLayerDelivered.current) void loadVectorArtifacts(res.downloads);
+      // Only when the agent did NOT place a layer itself. AWAITED, not fire-and-forget: the
+      // snapshot in `finally` used to run first, so a turn whose layers came from the artifact
+      // fallback was saved with an empty layer list and restored as a bare transcript.
+      if (!mapLayerDelivered.current) await loadVectorArtifacts(res.downloads);
     } catch (e: any) {
       const stopped = e?.name === 'AbortError';
       patch({ text: stopped ? '⏹ Stopped. Anything already on the map stays; ask me something else.'

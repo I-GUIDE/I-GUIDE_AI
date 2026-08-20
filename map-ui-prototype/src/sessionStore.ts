@@ -17,6 +17,7 @@
  * a per-user endpoint later means swapping the transport, not the record.
  */
 
+import type { FeatureCollection } from 'geojson';
 import type { LayerArtifact } from './contracts';
 import type { ChatMessage } from './components/ChatPanel';
 
@@ -24,9 +25,11 @@ const DB_NAME = 'iguide-map-ui';
 const DB_VERSION = 1;
 const STORE = 'sessions';
 
-/** A layer without its geometry — `sourceUrl` is what makes it restorable. */
+/** A stored layer is restorable one of two ways: a `sourceUrl` to re-fetch (the usual case,
+ *  and the only sane one for a 15 MB heatmap), or — for a layer delivered inline with no url
+ *  behind it — its own small geometry. One of the two must be present or the layer is lost. */
 export type StoredLayer = Omit<Extract<LayerArtifact, { kind: 'geojson' }>, 'data'> & {
-  data?: undefined;
+  data?: FeatureCollection;
   sourceUrl?: string;
 } | Extract<LayerArtifact, { kind: 'raster' }>;
 
@@ -81,12 +84,25 @@ function tx<T>(mode: IDBTransactionMode, run: (store: IDBObjectStore) => IDBRequ
 }
 
 /** Drop geometry and any transient fields; keep what restore needs. */
+/** Above this, inline geometry is dropped rather than stored: a layer this big came from a
+ *  file and has a `sourceUrl` to re-fetch, and IndexedDB is not the place for 15 MB of
+ *  coordinates. Inline-DELIVERED layers (overpass_search, spatial_search) arrive in the SSE
+ *  event itself, so they are small by construction and have no url at all — dropping their
+ *  geometry made them silently unrestorable, which read as "history lost my layers". */
+const INLINE_KEEP_BYTES = 2_000_000;
+
 export function toStoredLayer(a: LayerArtifact): StoredLayer {
   if (a.kind === 'raster') return { ...a };
-  const { data: _data, ...rest } = a as Extract<LayerArtifact, { kind: 'geojson' }> & {
+  const { data, ...rest } = a as Extract<LayerArtifact, { kind: 'geojson' }> & {
     sourceUrl?: string;
   };
-  return { ...rest, data: undefined };
+  if (rest.sourceUrl) return { ...rest, data: undefined };   // re-fetchable: store the pointer
+  // No url: geometry is the only copy. Keep it if it is small enough to be worth keeping.
+  let keep: typeof data | undefined;
+  try {
+    if (data && JSON.stringify(data).length <= INLINE_KEEP_BYTES) keep = data;
+  } catch { /* unserialisable — treat as too big */ }
+  return { ...rest, data: keep };
 }
 
 /** First user message, trimmed — the same thing a person would call the conversation. */
