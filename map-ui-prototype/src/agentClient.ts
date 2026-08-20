@@ -224,6 +224,7 @@ export async function streamChat(
             id: layer.id || 'agent-layer', source: layer.source || 'analysis',
             label: layer.label || 'Agent layer', count: layer.count,
             url: layer.url, render: layer.render, styleBy: layer.style_by ?? layer.styleBy,
+            legend: _legend(layer),
             sampled: !!layer.sampled, total: layer.total,
             // A raster layer is an image + its footprint; without bounds it cannot be placed.
             bounds: Array.isArray(layer.bounds) && layer.bounds.length === 4
@@ -238,6 +239,7 @@ export async function streamChat(
             count: layer.count,
             geojson: layer.geojson,
             render: layer.render, styleBy: layer.style_by ?? layer.styleBy,
+            legend: _legend(layer),
             sampled: !!layer.sampled, total: layer.total,
           });
         }
@@ -283,6 +285,22 @@ export async function streamChat(
 // can show KB/spatial results if the backend surfaces coordinates (defensive: the
 // current contract usually does NOT include element geometry -- see agent-api-contract).
 import type { Feature, FeatureCollection, Geometry } from 'geojson';
+
+/** Class-name -> swatch pairs for a categorical layer, dropping malformed entries.
+ *  A categorical layer is only categorical if its legend survives the wire: App keys the
+ *  'categories' render off `legend?.length`, so an omitted legend silently becomes a flat fill. */
+function _legend(layer: any): { label: string; color: [number, number, number, number] }[] | undefined {
+  const raw = layer?.legend;
+  if (!Array.isArray(raw)) return undefined;
+  const out = raw
+    .filter((e: any) => e && typeof e.label === 'string' && Array.isArray(e.color) && e.color.length >= 3)
+    .map((e: any) => ({
+      label: String(e.label),
+      color: [Number(e.color[0]), Number(e.color[1]), Number(e.color[2]),
+              e.color.length > 3 ? Number(e.color[3]) : 255] as [number, number, number, number],
+    }));
+  return out.length ? out : undefined;
+}
 
 export function extractFeatures(payload: any): FeatureCollection {
   const feats: Feature[] = [];

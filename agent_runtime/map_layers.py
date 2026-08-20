@@ -110,9 +110,22 @@ def build_map_layer(tool_name: str, output: Any) -> Optional[Dict[str, Any]]:
                 ]
                 if entries:
                     out["legend"] = entries
-                elif render == "categories":
-                    logger.warning("categorical map_layer %r has no usable legend entries",
-                                   out["id"])
+
+            # INVARIANT: a 'categories' render is meaningless without its palette. The client
+            # maps class NAMES through the legend; with no legend it falls back to the NUMERIC
+            # ramp, where Number("High-High") is NaN, so all 801 features landed on one flat
+            # fill while the answer text described five colours (observed, twice, from two
+            # different tools). Enforce it here — the one boundary every tool's layer crosses —
+            # rather than trusting each emitter. Downgrade instead of deriving: a URL-based
+            # layer's features are not in hand at this point, so deriving a palette belongs in
+            # the tool that assigned the classes. 'shapes' at least does not claim to encode
+            # anything it isn't.
+            if render == "categories" and not out.get("legend"):
+                logger.warning(
+                    "map_layer %r declares render='categories' with no usable legend; "
+                    "downgrading to 'shapes' so it does not render as one flat fill", out["id"])
+                out["render"] = "shapes"
+                out["legend_missing"] = True
 
             # A raster layer (e.g. an embedding PCA image) is draped over a geographic
             # extent rather than parsed as GeoJSON, so it travels with its bounds.

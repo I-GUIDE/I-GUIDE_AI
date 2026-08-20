@@ -304,6 +304,14 @@ def read_vector(read_path: Any, layer: Optional[str] = None) -> Any:
             raise ValueError(f"unreadable vector/tabular source: {table_error or exc}") from exc
     return dataframe_to_points(frame)
 
+# Qualitative palette for render="categories". Distinct hues rather than a ramp: these are
+# class NAMES with no order, so a sequential scale would imply one.
+_CATEGORY_COLORS = [
+    [215, 25, 28, 200], [44, 123, 182, 200], [253, 174, 97, 200], [171, 217, 233, 200],
+    [26, 150, 65, 200], [123, 50, 148, 200], [255, 217, 47, 200], [166, 97, 26, 200],
+    [230, 97, 158, 200], [102, 194, 165, 200], [140, 140, 140, 200], [8, 81, 156, 200],
+]
+
 def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None) -> List[Any]:
     """Build the vector/shapefile StructuredTools (geopandas-backed).
 
@@ -607,8 +615,9 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                       max_points: Optional[int] = None) -> str:
         """Put a dataset on the user's interactive map as a styled layer.
 
-        `render`: "heatmap" (point density), "choropleth" (polygons shaded by `column`),
-        "points"/"shapes", or "auto" to pick from the geometry. Returns the layer descriptor
+        `render`: "heatmap" (point density), "choropleth" (polygons shaded by a NUMERIC
+        `column`), "categories" (shaded by a CLASS-NAME `column` — LISA classes, Gi* bands,
+        region ids; a legend is built for you), "points"/"shapes", or "auto". Returns the layer descriptor
         the client plots, plus a downloadable GeoJSON file_id.
         """
         tmp = None
@@ -625,8 +634,27 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             geom_types = {str(t) for t in gdf.geometry.geom_type.unique()}
             is_point = geom_types and geom_types <= {"Point", "MultiPoint"}
             mode = (render or "auto").strip().lower()
+            legend = None
             if mode == "auto":
                 mode = "heatmap" if (is_point and len(gdf) > 2000) else ("points" if is_point else "shapes")
+            if mode == "categories":
+                # A class-NAME column (LISA's High-High, a Gi* band, a region id). Without a
+                # legend the client has nothing to map names to colours and falls back to the
+                # NUMERIC ramp, where Number("High-High") is NaN and every feature lands on one
+                # flat fill — the exact bug this branch exists to prevent.
+                if not column or column not in gdf.columns:
+                    return json.dumps({"ok": False,
+                                       "error": "render='categories' needs `column` — the class-name "
+                                                "column to colour by",
+                                       "columns": [c for c in gdf.columns if c != "geometry"][:40]})
+                classes = [str(v) for v in gdf[column].dropna().unique()]
+                if len(classes) > len(_CATEGORY_COLORS):
+                    return json.dumps({"ok": False,
+                                       "error": f"{column!r} has {len(classes)} distinct values; "
+                                                f"categories renders at most {len(_CATEGORY_COLORS)}",
+                                       "hint": "Use render='choropleth' for a numeric column, or bin "
+                                               "the values first."})
+                legend = [{"label": c, "color": _CATEGORY_COLORS[i]} for i, c in enumerate(sorted(classes))]
             if mode == "choropleth":
                 if not column or column not in gdf.columns:
                     # List the NUMERIC columns: an arbitrary first-N slice hides the very
@@ -672,6 +700,9 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
                    "map_layer": {"url": rec.get("download_url"), "label": label, "render": mode,
                                  "style_by": column, "source": "analysis",
                                  "count": int(len(gdf)),
+                                 # Only categorical layers carry one; the client keys its
+                                 # 'categories' render off its presence.
+                                 **({"legend": legend} if legend else {}),
                                  # Carried to the UI so a partial layer says so on screen.
                                  "sampled": bool(sampled), "total": total}}
             if note:
