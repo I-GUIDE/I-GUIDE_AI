@@ -146,10 +146,45 @@ def normalize_openai_base_url(url: Optional[str]) -> Optional[str]:
     return normalized
 
 
+# Deliberately NO max_tokens. qwen3.6:27b is a reasoning model: it spends its first tokens on
+# `reasoning_content` and only then writes `content`, so a tight ceiling returns
+# finish_reason="length" with content=None — an EMPTY answer that reads as a model failure
+# rather than a truncation. Measured: max_tokens=20 produced no content at all (all 20 spent
+# thinking); 800 answered in 41; unset completes normally at 57. Since the endpoint imposes no
+# small default of its own, any ceiling invented here could only truncate a long answer.
+
+
+def _anvilgpt_settings() -> Optional[Dict[str, Any]]:
+    """AnvilGPT (Purdue RCAC, Open WebUI) config, or None when it is not configured.
+
+    Selected by AGENT_LLM_PROVIDER=anvilgpt, so setting the variables alone never silently
+    moves every request onto a different model.
+    """
+    if (os.getenv("AGENT_LLM_PROVIDER") or "").strip().lower() != "anvilgpt":
+        return None
+    key = os.getenv("ANVILGPT_KEY")
+    if not key:
+        raise RuntimeError(
+            "AGENT_LLM_PROVIDER=anvilgpt but ANVILGPT_KEY is unset. Create a key at "
+            "https://anvilgpt.rcac.purdue.edu (avatar -> Settings -> Account -> API Keys)."
+        )
+    # Its chat path is /api/chat/completions, so the OpenAI-compatible base is /api — which
+    # normalize_openai_base_url already produces by stripping the /chat/completions suffix.
+    base_url = normalize_openai_base_url(
+        os.getenv("ANVILGPT_URL") or "https://anvilgpt.rcac.purdue.edu/api/chat/completions")
+    return {
+        "api_key": key,
+        "base_url": base_url,
+        # Open WebUI names models like "qwen3.6:27b" — NOT the HuggingFace "Qwen/Qwen3.6-27B"
+        # form a vLLM server uses. Ask /api/models for the exact id; a wrong one 404s.
+        "model": os.getenv("ANVILGPT_MODEL") or "qwen3.6:27b",
+    }
+
+
 def build_default_llm() -> Any:
     """Build a ``ChatOpenAI`` instance from environment variables.
 
-    Priority: VLLM_* env vars → OPENAI_* env vars → defaults.
+    Priority: AGENT_LLM_PROVIDER=anvilgpt → VLLM_* → OPENAI_* → defaults.
     """
     try:
         from langchain_openai import ChatOpenAI
@@ -157,6 +192,10 @@ def build_default_llm() -> Any:
         raise RuntimeError(
             "Missing dependency `langchain-openai`. Install it to use the default LLM builder."
         ) from exc
+
+    anvil = _anvilgpt_settings()
+    if anvil:
+        return ChatOpenAI(temperature=0.0, **anvil)
 
     api_key = os.getenv("VLLM_API_KEY") or os.getenv("OPENAI_KEY")
     if not api_key:
@@ -174,6 +213,25 @@ def build_default_llm() -> Any:
     if base_url:
         kwargs["base_url"] = base_url
     return ChatOpenAI(**kwargs)
+
+
+def active_llm_description() -> Dict[str, Any]:
+    """Which provider/model a run would actually use — for logs and smoke tests.
+
+    A silent fallback to OpenAI looks exactly like success, so make the choice inspectable
+    rather than inferring it from whether a call worked.
+    """
+    anvil = _anvilgpt_settings()
+    if anvil:
+        return {"provider": "anvilgpt", "model": anvil["model"],
+                "base_url": anvil["base_url"], "max_tokens": "unset (server default)"}
+    if os.getenv("VLLM_MODEL") or os.getenv("VLLM_PROXY"):
+        return {"provider": "vllm",
+                "model": os.getenv("VLLM_MODEL"),
+                "base_url": normalize_openai_base_url(os.getenv("VLLM_PROXY"))}
+    return {"provider": "openai",
+            "model": os.getenv("OPENAI_CHAT_MODEL") or os.getenv("OPENAI_MODEL"),
+            "base_url": normalize_openai_base_url(os.getenv("OPENAI_BASE_URL"))}
 
 
 # ---------------------------------------------------------------------------
