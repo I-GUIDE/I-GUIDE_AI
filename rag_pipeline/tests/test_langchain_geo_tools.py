@@ -174,6 +174,18 @@ TEMPORAL_TOOLS = {"detect_time_column", "filter_by_time", "time_series",
                   "compare_periods", "temporal_hotspots"}
 ANALYSIS_TOOLS = OVERLAY_TOOLS | AGGREGATE_TOOLS | TEMPORAL_TOOLS
 
+# The spatial-statistics family (libpysal/esda/spreg/pygeoda). Kept OUT of ANALYSIS_TOOLS and
+# asserted separately: its factory is guarded like the others, so a deployment without the PySAL
+# stack legitimately exposes none of these and must not fail the shared contract above.
+SPATIAL_STATS_TOOLS = {"spatial_weights", "global_spatial_autocorrelation", "local_moran_lisa",
+                       "local_getis_ord", "moran_scatterplot", "spatial_regression",
+                       "regionalize"}
+
+
+def _needs_pysal():
+    pytest.importorskip("libpysal")
+    pytest.importorskip("esda")
+
 
 def test_analysis_tools_wired_into_peers_only_with_files(monkeypatch):
     pytest.importorskip("pandas")
@@ -216,6 +228,52 @@ def test_analysis_tools_wired_into_peers_only_with_files(monkeypatch):
             f"{sorted(ANALYSIS_TOOLS & set(captured['tools']))}")
 
 
+def test_spatial_stats_tools_wired_into_peers_only_with_files(monkeypatch):
+    """Same gate as the other analysis families: both peers get them when files are
+    attached, neither does when nothing is."""
+    _needs_pysal()
+    import agent_runtime.executor_factory as ef
+    import agent_runtime.supervisor_graph as sg
+
+    captured = {}
+    monkeypatch.setattr(ef, "build_agent_executor",
+                        lambda **kw: captured.__setitem__(
+                            "tools", [getattr(t, "name", "")
+                                      for t in (kw.get("preloaded_tools") or [])]) or object())
+    monkeypatch.setattr(ef, "invoke_agent_with_payload_fallback", lambda *a, **k: {"messages": []})
+    import agent_runtime.langchain_granular_tools as gt
+    monkeypatch.setattr(gt, "make_langchain_qgis_tools", lambda **k: [])
+    monkeypatch.delenv("AGENT_CODE_EXEC", raising=False)
+
+    for label, run in (
+        ("analyze", lambda fids: sg.default_analyze_fn(
+            include_mcp_tools=False, input_file_ids=fids)("q", [], {"thread_id": None})),
+        ("code", lambda fids: sg.default_code_fn(
+            input_file_ids=fids)("q", [], {"thread_id": None})),
+    ):
+        captured.clear()
+        run(["file_x"])
+        names = captured["tools"]
+        assert SPATIAL_STATS_TOOLS <= set(names), (
+            f"{label} peer is missing {sorted(SPATIAL_STATS_TOOLS - set(names))}")
+        assert len(names) == len(set(names)), (
+            f"{label} peer has duplicate tool names: "
+            f"{sorted(n for n in set(names) if names.count(n) > 1)}")
+
+        captured.clear()
+        run(None)
+        assert not (SPATIAL_STATS_TOOLS & set(captured["tools"])), (
+            f"{label} peer exposed file-only spatial-stats tools with nothing attached")
+
+
+def test_spatial_stats_tools_in_capability_inventory():
+    _needs_pysal()
+    from agent_runtime.capabilities import collect_capability_inventory
+
+    names = {t["name"] for t in collect_capability_inventory()["tools"]}
+    assert SPATIAL_STATS_TOOLS <= names, f"missing {sorted(SPATIAL_STATS_TOOLS - names)}"
+
+
 def test_analysis_tools_are_tagged_geo_like_their_neighbours():
     """The peers mix these in with make_langchain_geo_tools, which tags every tool
     category=geo; an untagged tool would sort differently wherever category is read."""
@@ -224,9 +282,15 @@ def test_analysis_tools_are_tagged_geo_like_their_neighbours():
     from agent_runtime.analysis_overlay_tools import make_overlay_tools
     from agent_runtime.analysis_temporal_tools import make_temporal_tools
 
-    for factory, expected in ((make_overlay_tools, OVERLAY_TOOLS),
-                              (make_aggregate_tools, AGGREGATE_TOOLS),
-                              (make_temporal_tools, TEMPORAL_TOOLS)):
+    families = [(make_overlay_tools, OVERLAY_TOOLS), (make_aggregate_tools, AGGREGATE_TOOLS),
+                (make_temporal_tools, TEMPORAL_TOOLS)]
+    try:
+        from agent_runtime.analysis_spatial_stats_tools import make_spatial_stats_tools
+        import libpysal  # noqa: F401
+        families.append((make_spatial_stats_tools, SPATIAL_STATS_TOOLS))
+    except Exception:
+        pass
+    for factory, expected in families:
         tools = factory()
         assert {t.name for t in tools} == expected
         for t in tools:

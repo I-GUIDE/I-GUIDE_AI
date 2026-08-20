@@ -96,6 +96,24 @@ def build_map_layer(tool_name: str, output: Any) -> Optional[Dict[str, Any]]:
                 "sampled": bool(ml.get("sampled")),
                 "total": ml.get("total"),
             }
+            # A CATEGORICAL layer carries its own palette: the tool that assigned the classes
+            # is the only thing that knows what they mean, so the legend travels WITH the layer
+            # instead of being hardcoded per-tool in the client. Dropped when malformed rather
+            # than passed through half-valid.
+            legend = ml.get("legend")
+            if isinstance(legend, list):
+                entries = [
+                    {"label": str(e.get("label")), "color": [int(v) for v in e.get("color")]}
+                    for e in legend
+                    if isinstance(e, dict) and e.get("label") is not None
+                    and isinstance(e.get("color"), (list, tuple)) and len(e["color"]) == 4
+                ]
+                if entries:
+                    out["legend"] = entries
+                elif render == "categories":
+                    logger.warning("categorical map_layer %r has no usable legend entries",
+                                   out["id"])
+
             # A raster layer (e.g. an embedding PCA image) is draped over a geographic
             # extent rather than parsed as GeoJSON, so it travels with its bounds.
             if render == "raster":

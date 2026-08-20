@@ -34,6 +34,17 @@ function rampFor(a: VectorLayer): ((f: any) => [number, number, number, number])
   };
 }
 
+// Categorical fill: look the feature's class up in the legend the tool sent. The palette is
+// NOT hardcoded here on purpose -- the tool that assigned the classes is the only thing that
+// knows what they mean, so a new categorical statistic needs no change in this file.
+function categoricalFor(a: VectorLayer): ((f: any) => [number, number, number, number]) | null {
+  if (!a.styleBy || !a.legend?.length) return null;
+  const key = a.styleBy;
+  const byLabel = new Map(a.legend.map((e) => [e.label, e.color]));
+  const UNKNOWN: [number, number, number, number] = [200, 200, 200, 140];
+  return (f: any) => byLabel.get(String((f.properties || {})[key])) ?? UNKNOWN;
+}
+
 export function toDeckLayer(a: LayerArtifact) {
   // A raster is an image with a footprint, not geometry: deck.gl wants the bounds in
   // [left, bottom, right, top] order, which is the same order the agent sends.
@@ -76,7 +87,8 @@ export function toDeckLayer(a: LayerArtifact) {
     });
   }
 
-  const ramp = rampFor(a);
+  // Categorical first: a class-name column would ramp to NaN and come out one flat colour.
+  const ramp = a.render === 'categories' ? categoricalFor(a) ?? rampFor(a) : rampFor(a);
   return new GeoJsonLayer({
     id: a.id,
     data: a.data,
@@ -98,6 +110,6 @@ export function toDeckLayer(a: LayerArtifact) {
     pointRadiusUnits: s.radiusUnits ?? 'pixels',
     opacity: s.opacity ?? 1,
     // expose source + props for the tooltip
-    updateTriggers: { getFillColor: [a.styleBy, a.data] },
+    updateTriggers: { getFillColor: [a.styleBy, a.data, a.render, a.legend] },
   });
 }

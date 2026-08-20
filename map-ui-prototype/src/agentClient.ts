@@ -35,8 +35,10 @@ export interface MapLayerEvent {
   count?: number;
   geojson?: import('geojson').FeatureCollection;
   url?: string;                 // fetch instead of inlining (large layers)
-  render?: string;              // 'heatmap' | 'choropleth' | 'points' | 'shapes'
-  styleBy?: string;             // numeric property to shade by
+  render?: string;              // 'heatmap' | 'choropleth' | 'categories' | 'points' | 'shapes'
+  styleBy?: string;             // property to shade by (numeric, or a class name for 'categories')
+  legend?: { label: string; color: [number, number, number, number] }[];
+  style_by?: string;            // snake_case as the agent sends it
   sampled?: boolean;            // true when the layer is a subset of the data
   total?: number;               // full population size when sampled
   bounds?: [number, number, number, number];  // raster footprint [minLon,minLat,maxLon,maxLat]

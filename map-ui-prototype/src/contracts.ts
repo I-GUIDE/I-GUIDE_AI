@@ -47,8 +47,12 @@ export type LayerArtifact =
       label: string;
       data: FeatureCollection;
       style?: DeckStyle;
-      render?: 'geojson' | 'heatmap' | 'points';
-      styleBy?: string;   // numeric property to shade by (choropleth)
+      render?: 'geojson' | 'heatmap' | 'points' | 'categories';
+      // 'categories' shades by a CLASS NAME (LISA's High-High, a Gi* hot-spot band, a region
+      // id) using `legend` as the palette, instead of ramping a number. The two cannot share a
+      // path: Number('High-High') is NaN, so a categorical column on the choropleth ramp
+      // renders every feature in one flat colour.
+      styleBy?: string;   // property to shade by: numeric (choropleth) or class name (categories)
       partial?: { shown: number; total: number };  // layer is a SAMPLE — shown in the UI
       legend?: Legend[];
       fitBounds?: boolean;

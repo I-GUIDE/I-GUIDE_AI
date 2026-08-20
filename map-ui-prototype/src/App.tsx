@@ -292,11 +292,16 @@ export default function App() {
           if (!fc || !Array.isArray(fc.features) || !fc.features.length) return;
           const heat = layer.render === 'heatmap';
           const green = layer.source === 'overpass';
+          // A categorical layer (LISA classes, Gi* bands, region ids) must keep that render:
+          // collapsing it to 'geojson' sends a class-NAME style column down the numeric
+          // choropleth ramp, which yields NaN for every feature and one flat fill.
+          const categorical = layer.render === 'categories' && !!layer.legend?.length;
           putLayer({
             kind: 'geojson', id: layer.id, source: (layer.source as any) || 'analysis', label: layer.label,
             data: fc, fitBounds: true,
-            render: heat ? 'heatmap' : 'geojson',
+            render: heat ? 'heatmap' : categorical ? 'categories' : 'geojson',
             styleBy: layer.styleBy,
+            legend: categorical ? layer.legend : undefined,
             partial: layer.sampled && layer.total
               ? { shown: layer.count ?? fc.features.length, total: layer.total }
               : undefined,

@@ -114,6 +114,12 @@ def collect_capability_inventory(
     except Exception:
         pass
     try:
+        from agent_runtime.analysis_spatial_stats_tools import make_spatial_stats_tools
+
+        tools += _tool_entries(make_spatial_stats_tools, default_input_file_ids=None)
+    except Exception:
+        pass
+    try:
         from extractors.geo_handles import make_geo_analysis_tools
 
         tools += _tool_entries(make_geo_analysis_tools)
