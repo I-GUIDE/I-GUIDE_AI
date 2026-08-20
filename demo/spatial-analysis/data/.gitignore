@@ -1,0 +1,4 @@
+# The large demo inputs are rebuilt by ../build_datasets.py (Illinois) or copied from the
+# deployment (Chicago) — see ../README.md. Keeping tens of MB out of git history.
+*
+!.gitignore
