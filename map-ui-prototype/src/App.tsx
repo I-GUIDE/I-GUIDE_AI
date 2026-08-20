@@ -11,8 +11,8 @@ import { queryOverpass } from './overpass';
 import { bufferFC, clipToRegion, convexHull, areaKm2, stats, selectRelated, layerBBox } from './analysis';
 import { bboxToFC } from './mapFit';
 import {
-  streamChat, uploadFiles, absoluteUrl, extractFeatures, newThreadId,
-  type AgentConfig, type FileRecord, type TraceLine,
+  streamChat, uploadFiles, absoluteUrl, extractFeatures, newThreadId, fetchModels,
+  type AgentConfig, type FileRecord, type ModelCatalogue, type TraceLine,
 } from './agentClient';
 import { renderMarkdown } from './markdown';
 
@@ -60,6 +60,9 @@ export default function App() {
   const [spatial, setSpatial] = useState<boolean>(init.spatial);
   const [mapVisible, setMapVisible] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  // Which models this agent will accept. Fetched once so the picker offers what is actually
+  // served rather than a hardcoded list that drifts; null just means "agent default only".
+  const [models, setModels] = useState<ModelCatalogue | null>(null);
   const [selected, setSelected] = useState<SelectedFeature | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([
     { role: 'agent', text: "Hi — I'm the I-GUIDE agent. Ask me anything. Turn on Spatial tools (⚙) to search geodata; the map opens on its own when I return geometry, or hit Map — then right-drag on it to select a region." },
@@ -95,6 +98,12 @@ export default function App() {
   }, [mapVisible]);
 
   const asAgentConfig = useCallback((): AgentConfig => ({ ...cfg }), [cfg]);
+  useEffect(() => {
+    if (mode !== 'live') return;
+    let live = true;
+    void fetchModels(asAgentConfig()).then((m) => { if (live) setModels(m); });
+    return () => { live = false; };
+  }, [mode, cfg.endpoint, cfg.apiKey]);   // re-ask when the target or credential changes
   const resolveUrl = useCallback((u: string) => absoluteUrl(u, asAgentConfig()), [asAgentConfig]);
 
   const pushMsg = useCallback((m: ChatMessage) => setMessages((prev) => [...prev, m]), []);
@@ -465,6 +474,7 @@ export default function App() {
         <ChatPanel
           messages={messages} busy={busy} hasRegion={!!drawnRegion} layers={layers}
           mapVisible={mapVisible} onToggleMap={() => setMapVisible((v) => !v)}
+          models={models}
           mode={mode} cfg={cfg} spatial={spatial} showSettings={showSettings} resolveUrl={resolveUrl}
           onSend={runAgent}
         onStop={() => abortRef.current?.abort()}

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { LayerArtifact } from '../contracts';
-import type { FileRecord, TraceLine } from '../agentClient';
+import type { FileRecord, ModelCatalogue, TraceLine } from '../agentClient';
 import { SUGGESTIONS } from '../agentBrain';
 import { groupedSources, type SourceGroup } from '../answerFormat';
 
@@ -16,7 +16,8 @@ export interface ChatMessage {
 }
 
 export type Mode = 'live' | 'local';
-export interface AgentCfg { endpoint: string; uploadEndpoint: string; apiKey: string }
+export interface AgentCfg { endpoint: string; uploadEndpoint: string; apiKey: string;
+                            model?: string; provider?: string; reasoningEffort?: string }
 
 const RS_ACTIONS = [
   { label: 'Embed',   prompt: 'Embed this drawn region with the gse model for June–September 2022 and put the embedding on the map.' },
@@ -30,6 +31,7 @@ interface Props {
   busy: boolean;
   hasRegion: boolean;
   mapVisible: boolean;
+  models: ModelCatalogue | null;
   layers: LayerArtifact[];
   mode: Mode;
   cfg: AgentCfg;
@@ -139,6 +141,47 @@ export function ChatPanel(p: Props) {
             <label>API key
               <input type="password" value={p.cfg.apiKey} placeholder="X-API-KEY (if required)" onChange={(e) => p.onSetCfg({ ...p.cfg, apiKey: e.target.value })} />
             </label>
+            <label>Model
+              <select value={p.cfg.model || ''}
+                      onChange={(e) => {
+                        const model = e.target.value;
+                        // Carry the provider alongside the id: two providers could serve
+                        // similarly-named models, and the server should not have to guess.
+                        const owner = p.models?.providers.find(
+                          (g: ModelCatalogue['providers'][number]) => g.models.includes(model));
+                        p.onSetCfg({ ...p.cfg, model, provider: model ? (owner?.provider || '') : '' });
+                      }}>
+                <option value="">
+                  Agent default{p.models ? ` (${p.models.default.model})` : ''}
+                </option>
+                {(p.models?.providers || [])
+                  .filter((g: ModelCatalogue['providers'][number]) => g.configured)
+                  .map((g: ModelCatalogue['providers'][number]) => (
+                  <optgroup key={g.provider} label={g.label + (g.stale ? ' — list unavailable' : '')}>
+                    {g.models.map((m: string) => <option key={m} value={m}>{m}</option>)}
+                  </optgroup>
+                ))}
+              </select>
+            </label>
+            {/* Reasoning effort applies only to the gpt-5.x / o-series models, so the control
+                appears only when one is selected rather than offering a setting that 400s. */}
+            {(() => {
+              const reasoning = p.models?.providers.some(
+                (g: ModelCatalogue['providers'][number]) =>
+                  (g.reasoning_models || []).includes(p.cfg.model || ''));
+              if (!reasoning) return null;
+              return (
+                <label>Reasoning effort
+                  <select value={p.cfg.reasoningEffort || ''}
+                          onChange={(e) => p.onSetCfg({ ...p.cfg, reasoningEffort: e.target.value })}>
+                    <option value="">Model default</option>
+                    {(p.models?.reasoning_efforts || []).map((v: string) => (
+                      <option key={v} value={v}>{v}</option>
+                    ))}
+                  </select>
+                </label>
+              );
+            })()}
             <label className="wide">Chat endpoint
               <input value={p.cfg.endpoint} onChange={(e) => p.onSetCfg({ ...p.cfg, endpoint: e.target.value })} />
             </label>
