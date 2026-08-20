@@ -1556,3 +1556,56 @@ def test_analysis_hints_cover_embedding_vocabulary():
 
     for word in ("embed", "embedding", "satellite", "remote sensing", "segment"):
         assert word in ANALYSIS_HINTS
+
+
+# --- a repeatedly failing tool gets routed around, not stopped on ------------------
+# Observed: regionalize(maxp) failed twice with a raw AttributeError, and the peer ENDED the
+# turn asking "I recommend switching to a manual implementation ... Let me know if you'd like
+# me to proceed." A different run answered as though the tool had succeeded.
+
+def _failing(tool, error, times=2, answer="I recommend a manual implementation. Shall I?"):
+    """A response where `tool` returned ok=false `times` over."""
+    from langchain_core.messages import AIMessage, ToolMessage
+    msgs = []
+    for i in range(times):
+        msgs.append(AIMessage(content="", tool_calls=[{"name": tool, "args": {}, "id": f"c{i}"}]))
+        msgs.append(ToolMessage(content=json.dumps({"ok": False, "error": error}),
+                                name=tool, tool_call_id=f"c{i}"))
+    msgs.append(AIMessage(content=answer))
+    return {"messages": msgs}
+
+
+def test_repeatedly_failed_tools_are_detected():
+    from agent_runtime.supervisor.graph import _repeatedly_failed_tools
+    from agent_runtime.runtime_utils import extract_search_artifacts
+
+    arts = extract_search_artifacts(_failing("regionalize", "AttributeError: no attribute 'to_list'"))
+    assert _repeatedly_failed_tools(arts) == {
+        "regionalize": "AttributeError: no attribute 'to_list'"}
+
+    once = extract_search_artifacts(_failing("regionalize", "boom", times=1))
+    assert _repeatedly_failed_tools(once) == {}, "a single failure is not a dead end"
+
+
+def test_the_observation_tells_the_peer_to_proceed_and_to_say_so():
+    from agent_runtime.supervisor.graph import _tool_stuck_observation
+
+    text = _tool_stuck_observation({"regionalize": "AttributeError: no attribute 'to_list'"})
+    assert "execute_code" in text                      # the alternative route
+    assert "add_map_layer" in text                     # still has to be delivered
+    assert "do not ask whether to" in text.lower()     # the stop-and-ask is the failure mode
+    assert "failed" in text.lower() and "quote its error" in text.lower()
+
+
+def test_analyze_peer_routes_around_a_dead_end_tool(monkeypatch):
+    stuck = _failing("regionalize", "AttributeError: no attribute 'to_list'")
+    recovered = _resp("regionalize failed with an AttributeError, so I computed the regions "
+                      "with execute_code and mapped them.",
+                      tool_names=["execute_code", "add_map_layer"])
+    out, seen = _stub_analyze_peer(monkeypatch, [stuck, recovered],
+                                   query="partition these tracts into regions")
+
+    assert len(seen) == 2, "should hand back the observation exactly once"
+    assert "failed repeatedly" in seen[1]
+    assert out["tool_failures"] == {"regionalize": "AttributeError: no attribute 'to_list'"}
+    assert "execute_code" in out["summary"]

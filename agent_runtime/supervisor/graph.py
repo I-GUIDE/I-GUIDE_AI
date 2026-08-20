@@ -1722,6 +1722,50 @@ def _called_tool(artifacts: Dict[str, Any], names) -> bool:
     return False
 
 
+# --- a tool that keeps failing is a dead end, not a reason to stop --------------
+# Observed: regionalize(method='maxp') crashed with "'DataFrame' object has no attribute
+# 'to_list'" — a raw exception naming nothing relevant. The peer retried the identical call,
+# got the identical error, and then STOPPED to ask: "I recommend switching to a manual
+# implementation ... Let me know if you'd like me to proceed." A whole turn spent, no result,
+# and on an earlier run the same situation ended in an answer claiming the tool had succeeded.
+# The peer already has everything needed to route around a broken tool; what it lacked was
+# permission to, and the instruction to say so.
+_TOOL_FAIL_REPEATS = 2
+
+
+def _repeatedly_failed_tools(artifacts: Dict[str, Any]) -> Dict[str, str]:
+    """``{tool_name: error}`` for tools that returned ok=false at least _TOOL_FAIL_REPEATS times."""
+    counts: Dict[str, int] = {}
+    errors: Dict[str, str] = {}
+    for item in artifacts.get("tool_results") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "")
+        body = str(item.get("content") or "")
+        if not name or '"ok"' not in body:
+            continue
+        try:
+            parsed = json.loads(body)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict) and parsed.get("ok") is False:
+            counts[name] = counts.get(name, 0) + 1
+            errors.setdefault(name, str(parsed.get("error") or "")[:300])
+    return {n: errors.get(n, "") for n, c in counts.items() if c >= _TOOL_FAIL_REPEATS}
+
+
+def _tool_stuck_observation(failures: Dict[str, str]) -> str:
+    listed = "; ".join(f"{n}: {e or 'repeated failure'}" for n, e in failures.items())
+    return (
+        f"These tools failed repeatedly this turn with the same error — {listed}. Calling them "
+        "again will not help: the fault is inside the tool, not in your arguments. Do the work "
+        "another way instead of stopping. execute_code has geopandas, shapely, libpysal, esda, "
+        "spreg and pygeoda available, so the computation is reachable directly; write it, then "
+        "deliver the result with add_map_layer as usual. In your answer, state plainly which "
+        "tool failed, quote its error, and say you computed the result in code instead — do not "
+        "describe a failed tool as having worked. Proceed now; do not ask whether to."
+    )
+
 def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = True,
                        mcp_modules: Optional[List[str]] = None,
                        skill_roots: Optional[List[str]] = None,
@@ -1863,6 +1907,31 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
             "tool_results": artifacts.get("tool_results") or [],
         }
         caps = list(dict.fromkeys(r["capability"] for r in requests))
+
+        # A tool that failed twice the same way is a dead end. Give the peer that fact and
+        # explicit licence to route around it — once — rather than letting the turn end in
+        # "shall I implement it by hand?" or, worse, a claim that the tool worked.
+        stuck = _repeatedly_failed_tools(artifacts)
+        if stuck and not caps:
+            emit_trace_event(
+                "tool_dead_end",
+                {"stage": "analyze", "tools": sorted(stuck),
+                 "message": f"{', '.join(sorted(stuck))} failed repeatedly; "
+                            "handing the peer the observation and an alternative route"},
+                node="analyze",
+            )
+            resp_alt = invoke_agent_with_payload_fallback(
+                executor, query=_tool_stuck_observation(stuck), chat_history=None,
+                config=agent_config(child_thread_id(thread_id, "analysis")),
+            )
+            alt = extract_search_artifacts(resp_alt)
+            result["summary"] = extract_final_answer(resp_alt) or result["summary"]
+            result["tool_calls"] = [*result["tool_calls"], *(alt.get("tool_calls") or [])]
+            result["tool_results"] = [*result["tool_results"], *(alt.get("tool_results") or [])]
+            artifacts = {"tool_calls": result["tool_calls"], "tool_results": result["tool_results"]}
+        # Carried downstream so synthesis cannot describe a failed tool as a success.
+        if stuck:
+            result["tool_failures"] = stuck
 
         # The map is a deliverable, not a figure of speech: if the user asked to see this on
         # the map (or the answer says it is there) and no layer-emitting tool ran, hand the
