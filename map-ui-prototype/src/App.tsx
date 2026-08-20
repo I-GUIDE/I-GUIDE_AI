@@ -15,6 +15,10 @@ import {
   type AgentConfig, type FileRecord, type ModelCatalogue, type TraceLine,
 } from './agentClient';
 import { renderMarkdown } from './markdown';
+import {
+  deleteSession, listSessions, loadSession, newSessionId, saveSession, titleFor,
+  toStoredLayer, type SessionSummary, type StoredSession,
+} from './sessionStore';
 
 const DEFAULT_CFG: AgentCfg = {
   endpoint: '/agent/chat/stream',       // proxied to the deployed agent by vite (see vite.config)
@@ -69,6 +73,15 @@ export default function App() {
   ]);
 
   const threadRef = useRef<string>(newThreadId());
+  // One local history record per conversation. The server already owns the conversational
+  // memory (keyed by memoryId); this is the client remembering which conversations exist.
+  const sessionIdRef = useRef<string>(newSessionId());
+  // EVERY file uploaded in this session. pendingFileIds is cleared once a turn attaches them
+  // server-side, but a RESTORED session has to re-attach them all: the analysis tools only
+  // load when files are attached, so without this a restored session loses the whole toolkit.
+  const sessionFileIds = useRef<string[]>([]);
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
   const memoryRef = useRef<string | null>(null);
   const pendingFileIds = useRef<string[]>([]);
   const uploadContext = useRef<string>(''); // e.g. 'Uploaded "chicago" covers bbox [...]' — spatial context for the agent
@@ -144,6 +157,93 @@ export default function App() {
     applyFit(m, last.fc, 0);
   }, []);
 
+  // --- local chat history: snapshot, restore, continue ------------------------------
+  // Saved after each turn rather than on every keystroke: a turn is the unit a user would
+  // expect to come back to, and it keeps writes off the streaming path.
+  const layersRef2 = useRef(layers); layersRef2.current = layers;
+  const messagesRef = useRef(messages); messagesRef.current = messages;
+  const snapshotSession = useCallback(() => {
+    const msgs = messagesRef.current;
+    if (!msgs.some((m) => m.role === 'user')) return;   // nothing worth listing yet
+    const now = Date.now();
+    const rec: StoredSession = {
+      id: sessionIdRef.current,
+      title: titleFor(msgs),
+      createdAt: now, updatedAt: now,
+      threadId: threadRef.current,
+      memoryId: memoryRef.current,
+      messages: msgs,
+      layers: layersRef2.current.map(toStoredLayer),
+      fileIds: [...new Set(sessionFileIds.current)],
+      region: drawnRegion ?? undefined,
+      model: cfg.model, provider: cfg.provider,
+    };
+    void loadSession(rec.id).then((prev) => {
+      if (prev) rec.createdAt = prev.createdAt;          // keep the original start time
+      return saveSession(rec);
+    }).then(() => listSessions()).then(setSessions);
+  }, [drawnRegion, cfg.model, cfg.provider]);
+
+  const restoreSession = useCallback(async (id: string) => {
+    const rec = await loadSession(id);
+    if (!rec) return;
+    setShowHistory(false);
+    // Identity first: the next turn must continue the SAME agent conversation, and must
+    // re-attach the files or the analysis tools will not even load.
+    sessionIdRef.current = rec.id;
+    threadRef.current = rec.threadId;
+    memoryRef.current = rec.memoryId ?? null;
+    sessionFileIds.current = [...(rec.fileIds || [])];
+    pendingFileIds.current = [...(rec.fileIds || [])];
+    setMessages(rec.messages || []);
+    setLayers([]);
+    autoRevealed.current = false;
+    // Geometry was never stored — re-fetch each layer from the file store, which keeps its
+    // files indefinitely. A layer with no sourceUrl (a local upload preview, a mock preview)
+    // cannot come back; it is skipped rather than restored empty.
+    const restored: LayerArtifact[] = [];
+    for (const l of rec.layers || []) {
+      if (l.kind === 'raster') { restored.push(l); continue; }
+      const url = (l as any).sourceUrl;
+      if (!url) continue;
+      try {
+        const res = await fetch(resolveUrl(url));
+        if (!res.ok) continue;
+        const fc = await res.json();
+        if (!fc || !Array.isArray(fc.features) || !fc.features.length) continue;
+        restored.push({ ...(l as any), data: fc } as LayerArtifact);
+      } catch { /* the file is gone — leave the layer out rather than showing an empty one */ }
+    }
+    setLayers(restored);
+    if (restored.length) {
+      setMapVisible(true);
+      const first = restored.find((l) => l.kind === 'geojson') as any;
+      if (first?.data) fitView(first.data);
+    }
+    const missing = (rec.layers || []).length - restored.length;
+    pushMsg({ role: 'agent', text:
+      `Continuing "${rec.title}" — ${(rec.messages || []).length} messages, ` +
+      `${restored.length} layer(s) restored${missing > 0 ? `, ${missing} no longer available` : ''}` +
+      `${(rec.fileIds || []).length ? `, ${(rec.fileIds || []).length} file(s) re-attached` : ''}.` });
+  }, [resolveUrl, fitView, pushMsg]);
+
+  const startNewSession = useCallback(() => {
+    sessionIdRef.current = newSessionId();
+    threadRef.current = newThreadId();
+    memoryRef.current = null;
+    sessionFileIds.current = [];
+    pendingFileIds.current = [];
+    uploadContext.current = '';
+    setLayers([]);
+    setDrawnRegion(null);
+    autoRevealed.current = false;
+    setMapVisible(false);
+    setShowHistory(false);
+    setMessages([{ role: 'agent', text: "New conversation. Ask me anything." }]);
+  }, []);
+
+  useEffect(() => { void listSessions().then(setSessions); }, []);
+
   // --- layer management + feature inspection (left panel) ---
   const toggleLayer = useCallback((id: string) => {
     setLayers((prev) => prev.map((l) => (l.id === id ? { ...l, visible: !(l.visible !== false) } : l)));
@@ -207,7 +307,7 @@ export default function App() {
           fc.features.every((ft) => /^(Multi)?Point$/.test(ft.geometry?.type || ''));
         putLayer({
           kind: 'geojson', id: layerId, source: 'analysis', label: `${label}`,
-          data: fc, fitBounds: true,
+          data: fc, fitBounds: true, sourceUrl: f.download_url,
           render: heat ? 'heatmap' : 'geojson',
           style: heat
             ? { opacity: 0.85 }
@@ -307,7 +407,7 @@ export default function App() {
           const categorical = layer.render === 'categories' && !!layer.legend?.length;
           putLayer({
             kind: 'geojson', id: layer.id, source: (layer.source as any) || 'analysis', label: layer.label,
-            data: fc, fitBounds: true,
+            data: fc, fitBounds: true, sourceUrl: layer.url,
             render: heat ? 'heatmap' : categorical ? 'categories' : 'geojson',
             styleBy: layer.styleBy,
             legend: categorical ? layer.legend : undefined,
@@ -344,7 +444,7 @@ export default function App() {
       patch({ text: stopped ? '⏹ Stopped. Anything already on the map stays; ask me something else.'
                             : `Request failed: ${e.message}`,
               streaming: false });
-    } finally { setBusy(false); abortRef.current = null; }
+    } finally { setBusy(false); abortRef.current = null; snapshotSession(); }
   }, [asAgentConfig, putLayer, fitView, resolveUrl, spatial, drawnRegion, loadVectorArtifacts]);
 
   const drawFromToolArgs = useCallback((name: string, args: any) => {
@@ -432,6 +532,18 @@ export default function App() {
       try {
         const recs: FileRecord[] = await uploadFiles(files, asAgentConfig());
         pendingFileIds.current.push(...recs.map((r) => r.file_id));
+        sessionFileIds.current.push(...recs.map((r) => r.file_id));
+        // The preview layer above was built from the local File, so it has no url and could
+        // not survive a reload. Now that the same bytes live in the file store, record where
+        // to re-fetch them so a restored session shows the upload too.
+        for (const r of recs) {
+          const stem = (r.filename || '').replace(/\.(geo)?json$/i, '');
+          if (stem && r.download_url) {
+            setLayers((prev) => prev.map((l) => (
+              l.id === `upload-${stem}` && l.kind === 'geojson'
+                ? { ...l, sourceUrl: r.download_url } : l)));
+          }
+        }
         pushMsg({ role: 'agent', text: `Uploaded ${recs.length} file(s) to the agent: ${recs.map((r) => r.filename).join(', ')}. They're attached to this conversation — ask me about them.` });
       } catch (e: any) { pushMsg({ role: 'agent', text: `Upload to agent failed: ${e.message}` }); }
     } else {
@@ -441,7 +553,35 @@ export default function App() {
 
   return (
     <div className={`app ${mapVisible ? 'map-on' : 'chat-only'}`}>
-      <TopNav onToggleSettings={() => setShowSettings((s) => !s)} />
+      <TopNav onToggleSettings={() => setShowSettings((s) => !s)}
+        onToggleHistory={() => { setShowHistory((v) => !v); void listSessions().then(setSessions); }}
+        sessionCount={sessions.length} />
+      {showHistory && (
+        <div className="history" role="dialog" aria-label="Past conversations">
+          <div className="history-head">
+            <strong>Past conversations</strong>
+            <button className="hbtn" onClick={startNewSession}>New conversation</button>
+            <button className="hbtn" onClick={() => setShowHistory(false)}>Close</button>
+          </div>
+          {!sessions.length && <p className="hempty">No saved conversations yet. They are kept in this browser only.</p>}
+          <ul className="hlist">
+            {sessions.map((s2) => (
+              <li key={s2.id} className={s2.id === sessionIdRef.current ? 'hrow current' : 'hrow'}>
+                <button className="hopen" onClick={() => void restoreSession(s2.id)} title="Open and continue">
+                  <span className="htitle">{s2.title}</span>
+                  <span className="hmeta">
+                    {new Date(s2.updatedAt).toLocaleString()} · {s2.messageCount} messages
+                    {s2.layerCount ? ` · ${s2.layerCount} layers` : ''}
+                    {s2.fileCount ? ` · ${s2.fileCount} files` : ''}
+                  </span>
+                </button>
+                <button className="hdel" title="Delete this conversation"
+                  onClick={() => void deleteSession(s2.id).then(() => listSessions()).then(setSessions)}>×</button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       <div className="workspace">
         {mapVisible && (
           <LeftPanel
