@@ -85,10 +85,13 @@ export function parseIntent(text: string): Intent {
   return { kind: 'clarify', text };
 }
 
+// Starter prompts for the LIVE agent. The first two need nothing set up; the rest name
+// their prerequisite (an upload, a drawn region) so it is obvious what to do first.
+// These replace the mock-era examples ("Show cafés here", "Buffer the cafés by 2 km"),
+// which exercised the offline demo rather than the real toolkit.
 export const SUGGESTIONS = [
-  'Find flood risk datasets',
-  'Show cafés here',
-  'Show rivers here',
-  'Highlight rivers that intersect the upload',
-  'Buffer the cafés by 2 km',
+  'Find flood risk datasets on I-GUIDE',
+  'Show hospitals near Chicago on the map',
+  'Aggregate my uploaded points into a 1 km grid',
+  'Embed the selected region with the GSE model',
 ];

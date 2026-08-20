@@ -62,6 +62,11 @@ a { color: var(--link); }
 
 /* composer attach + footer */
 .circle.attach { color: #6b7280; }
+/* Map toggle, left of Attach in the composer. Filled when the map is open so the
+   control reflects state without needing a label. */
+.circle.map { color: #6b7280; }
+.circle.map.on { background: var(--brand); border-color: var(--brand); color: #fff; }
+.circle.map.on:hover { filter: brightness(1.06); background: var(--brand); }
 .footline { display: flex; align-items: center; gap: 10px; margin-top: 8px; flex-wrap: wrap; }
 .footline .conn { border: 0; background: none; box-shadow: none; color: #9aa0a6; font-size: 12px; padding: 0; cursor: pointer; }
 .footline .conn:hover { text-decoration: underline; background: none; }

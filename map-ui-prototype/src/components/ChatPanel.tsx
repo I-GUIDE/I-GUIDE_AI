@@ -150,12 +150,7 @@ export function ChatPanel(p: Props) {
       {p.spatial && (
         <>
           <div className="toolbar">
-            {/* Opens the map. Selecting a region needs a visible map, and TopNav only offers
-                its toggle once layers exist — so without this there is no way in on a fresh
-                session. Right-drag then selects; there is no draw MODE to enter. */}
-            <button className={p.mapVisible ? 'active' : ''} onClick={p.onToggleMap}
-                    title="Show the map, then right-drag on it to select a region">Map</button>
-            {p.mapVisible && <span className="hint">right-drag to select a region</span>}
+            {p.mapVisible && <span className="hint">right-drag the map to select a region</span>}
             {/* Shown only when there IS a region: a permanently greyed-out button is just
                 clutter — the toolbar should offer what can actually be done right now. */}
             {p.hasRegion && <button onClick={p.onClearRegion}>Clear region</button>}
@@ -191,12 +186,23 @@ export function ChatPanel(p: Props) {
 
       <div className="composer">
         <div className="box">
+          {/* Map lives with the composer controls, left of Attach: it is a thing you reach
+              for while composing, and selecting a region needs the map open first. */}
+          <button type="button" className={`circle map ${p.mapVisible ? 'on' : ''}`}
+                  onClick={p.onToggleMap} aria-label={p.mapVisible ? 'Hide map' : 'Show map'}
+                  title={p.mapVisible ? 'Hide the map' : 'Show the map, then right-drag on it to select a region'}>
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+                 strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M9 3.5 3.4 5.6a1 1 0 0 0-.65.94v13.2a.7.7 0 0 0 .95.65L9 18.5l6 2 5.6-2.1a1 1 0 0 0 .65-.94V4.26a.7.7 0 0 0-.95-.65L15 5.5Z" />
+              <path d="M9 3.5v15M15 5.5v15" />
+            </svg>
+          </button>
           <label className="circle attach" title="Attach files">
             <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.5l-8.5 8.5a5 5 0 01-7-7l9-9a3.5 3.5 0 015 5l-9 9a2 2 0 01-3-3l8-8" /></svg>
             <input type="file" multiple style={{ display: 'none' }} onChange={(e) => { const fs = Array.from(e.target.files || []); if (fs.length) p.onUpload(fs); (e.target as HTMLInputElement).value = ''; }} />
           </label>
           <textarea value={text}
-            placeholder={p.mode === 'live' ? 'Ask me anything…' : 'Ask the mock… “show rivers here”'}
+            placeholder={p.mode === 'live' ? 'Ask me anything…' : 'Offline demo — try “show hospitals here”'}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(text); } }} />
           {p.busy ? (

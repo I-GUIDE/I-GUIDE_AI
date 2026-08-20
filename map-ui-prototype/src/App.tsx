@@ -349,7 +349,7 @@ export default function App() {
     pushMsg({ role: 'user', text });
     const intent = parseIntent(text);
     if (intent.kind === 'clear') { setLayers([]); pushMsg({ role: 'agent', text: 'Cleared all layers.' }); return; }
-    if (intent.kind === 'help') { pushMsg({ role: 'agent', text: 'Try: “find flood datasets”, “show rivers/cafés here”, “rivers that intersect the upload”, “buffer 2km”, “heatmap”.' }); return; }
+    if (intent.kind === 'help') { pushMsg({ role: 'agent', text: 'Offline demo. Try: “find flood datasets”, “show hospitals here”, “features that intersect the upload”, “buffer 2 km”, “heatmap”. Switch to the live agent (⚙ Connection) for the full toolkit.' }); return; }
     if (intent.kind === 'kb') {
       const region = intent.useRegion ? (drawnRegion ?? viewportPolygon()) : drawnRegion;
       const filter = region ? { geometry: region as Geometry, relation: 'intersects' as const } : null;
