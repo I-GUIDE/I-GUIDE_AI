@@ -1072,9 +1072,14 @@ def make_spatial_stats_tools(default_input_file_ids: Optional[List[str]] = None)
                                 hint="e.g. bound_column='population', min_bound=50000 — max-p "
                                      "derives the region COUNT from that constraint, so pick "
                                      "another method if you want a specific n_regions")
-                needed = cols + [str(bound_column)]
+                # Dedupe, order-preserving: the bound column is USUALLY also a clustering
+                # variable ("regions similar in population, each with >=1,000,000 people"), and
+                # a duplicated name makes frame[needed] a DataFrame-per-name, so pygeoda's
+                # GetRealCol does DataFrame.to_list() and dies with an AttributeError that says
+                # nothing about the real cause.
+                needed = list(dict.fromkeys(cols + [str(bound_column)]))
             else:
-                needed = cols
+                needed = list(dict.fromkeys(cols))
 
             frame, err = _load(file_id, siblings, needed, notes)
             if err:

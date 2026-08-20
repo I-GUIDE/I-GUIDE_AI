@@ -469,3 +469,21 @@ def test_kernel_weights_build(lattice):
     r = json.loads(_tools()["spatial_weights"].invoke(
         {"file_id": lattice, "weights": "kernel", "k": 5}))
     assert r["ok"] is True and r["connectivity"]["n"] == SIDE * SIDE
+
+
+def test_maxp_accepts_a_bound_column_that_is_also_a_clustering_variable(lattice):
+    """The natural max-p call — "regions similar in population, each with >= N people" — names
+    the same column twice. That duplicated it into the frame handed to pygeoda, where
+    frame[name] is a DataFrame rather than a Series, so GetRealCol did DataFrame.to_list() and
+    the tool died with an AttributeError that named nothing relevant. Reproduced on 3,265
+    Illinois tracts and on this lattice."""
+    tools = _tools([lattice])
+    r = json.loads(tools["regionalize"].invoke({
+        "file_id": lattice, "columns": ["pop"], "method": "maxp",
+        "bound_column": "pop", "min_bound": 5000.0}))
+    assert r.get("ok") is True, r.get("error")
+    assert r.get("method") == "maxp"
+    ml = r.get("map_layer") or {}
+    assert ml.get("render") == "categories"
+    # a categorical layer must carry its palette or the client cannot colour the classes
+    assert len(ml.get("legend") or []) == r["regions_found"]
