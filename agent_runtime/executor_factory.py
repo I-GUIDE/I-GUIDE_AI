@@ -226,25 +226,82 @@ DEFAULT_OPENAI_MODEL = "gpt-4o-2024-11-20"
 # Offered in the picker. AnvilGPT's list is fetched live because it changes and a stale
 # hardcoded id 404s; these are the fallback if the fetch fails.
 _ANVIL_FALLBACK_MODELS = ("qwen3.6:27b", "qwen3:32b", "qwen3-coder:30b", "qwen3-vl:32b")
-# Verified present on this account via GET /v1/models. The gpt-5.x line are REASONING models:
-# they accept reasoning_effort and require max_completion_tokens rather than max_tokens.
-_OPENAI_MODELS = (
-    "gpt-4o-2024-11-20", "gpt-4o-mini", "gpt-4.1-2025-04-14",
-    "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra",
-    "gpt-5.5-pro", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-chat-latest", "gpt-5.2",
-    "o4-mini-2025-04-16",
-)
 
-# reasoning_effort is accepted by the gpt-5.x family and the o-series. The values are the ones
-# the API itself lists on rejection: "Supported values are: 'none', 'low', 'medium', 'high',
-# and 'xhigh'." Note 'minimal' is NOT accepted by gpt-5.6-luna even though older docs list it.
-REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh")
+# This agent ALWAYS binds function tools, and on /v1/chat/completions the legal
+# reasoning_effort values depend on the model — a prefix rule got it wrong in both
+# directions and produced hard 400s mid-turn. The table below is what the API actually
+# answered when probed with tools attached (one row per model, three probes each, repeated):
+#
+#   gpt-4o*, gpt-4.1      any effort -> "Unrecognized request argument supplied:
+#                         reasoning_effort".  Must not be sent at all.
+#   gpt-5.6-*             NO effort -> "Function tools with reasoning_effort are not supported
+#                         ... use /v1/responses or set reasoning_effort to 'none'"; 'none' ->
+#                         ok; 'low' -> same rejection. So 'none' is REQUIRED, not optional.
+#   gpt-5.5, gpt-5.4,     omitted or 'none' -> ok; any real level -> the same "Function tools
+#   gpt-5.4-mini          with reasoning_effort are not supported" rejection.
+#   gpt-5.2               omitted, 'none', or any level -> ok. The only model that can both
+#                         call tools and actually think harder on request.
+#   o4-mini               any level -> ok; 'none' -> "does not support 'none' with this model.
+#                         Supported values are: 'low', 'medium', 'high', 'xhigh'".
+#
+# Two ids that were offered cannot serve a tool-using agent at all and are no longer listed:
+# gpt-5.5-pro ("This is not a chat model") and gpt-5.3-chat-latest ("has been deprecated").
+_EFFORT_NONE: tuple = ()
+_EFFORT_ONLY_NONE = ("none",)
+_EFFORT_LEVELS = ("low", "medium", "high", "xhigh")
+_TOOL_EFFORT: Dict[str, Dict[str, Any]] = {
+    "gpt-4o-2024-11-20": {"options": _EFFORT_NONE, "required": None},
+    "gpt-4o-mini": {"options": _EFFORT_NONE, "required": None},
+    "gpt-4.1-2025-04-14": {"options": _EFFORT_NONE, "required": None},
+    "gpt-5.6-luna": {"options": _EFFORT_ONLY_NONE, "required": "none"},
+    "gpt-5.6-sol": {"options": _EFFORT_ONLY_NONE, "required": "none"},
+    "gpt-5.6-terra": {"options": _EFFORT_ONLY_NONE, "required": "none"},
+    "gpt-5.5": {"options": _EFFORT_ONLY_NONE, "required": None},
+    "gpt-5.4": {"options": _EFFORT_ONLY_NONE, "required": None},
+    "gpt-5.4-mini": {"options": _EFFORT_ONLY_NONE, "required": None},
+    "gpt-5.2": {"options": ("none", *_EFFORT_LEVELS), "required": None},
+    "o4-mini-2025-04-16": {"options": _EFFORT_LEVELS, "required": None},
+}
+_OPENAI_MODELS = tuple(_TOOL_EFFORT)
+
+# Every value the API named across those probes, for validating an incoming request.
+REASONING_EFFORTS = ("none", *_EFFORT_LEVELS)
+
+
+def effort_options(model: Optional[str]) -> List[str]:
+    """reasoning_effort values this model accepts WITH function tools attached.
+
+    Empty means the argument must not be sent. An unknown id also returns empty: omitting
+    the parameter is what every tool-capable model here tolerates, so a model added upstream
+    degrades to working-without-effort rather than to a 400.
+    """
+    return list((_TOOL_EFFORT.get((model or "").strip()) or {}).get("options") or ())
+
+
+def required_effort(model: Optional[str]) -> Optional[str]:
+    """The value this model REQUIRES when tools are attached, if any (gpt-5.6-*)."""
+    return (_TOOL_EFFORT.get((model or "").strip()) or {}).get("required")
 
 
 def supports_reasoning_effort(model: Optional[str]) -> bool:
-    """Whether `model` takes a reasoning_effort argument."""
-    m = (model or "").strip().lower()
-    return m.startswith("gpt-5") or m.startswith(("o1", "o3", "o4"))
+    """Whether `model` takes a reasoning_effort argument at all (tools attached)."""
+    return bool(effort_options(model))
+
+
+def resolve_effort(model: Optional[str], effort: Optional[str]) -> Optional[str]:
+    """The value to actually send for (model, requested effort).
+
+    Coerces rather than raising: the request is already in flight with tools bound, and a
+    rejected argument fails the whole turn. The caller logs what it sent.
+    """
+    want = (effort or "").strip().lower() or None
+    allowed = effort_options(model)
+    forced = required_effort(model)
+    if forced:
+        return forced                      # gpt-5.6-*: tools are refused without it
+    if not allowed or not want:
+        return None
+    return want if want in allowed else None
 
 
 def build_llm(provider: Optional[str] = None, model: Optional[str] = None,
@@ -292,10 +349,15 @@ def build_llm(provider: Optional[str] = None, model: Optional[str] = None,
         base_url = normalize_openai_base_url(os.getenv("OPENAI_BASE_URL"))
         if base_url:
             kwargs["base_url"] = base_url
-        # Only send it where it is accepted: gpt-4o rejects the argument outright, so a UI
-        # that leaves the control set while switching models must not break the request.
-        if effort and supports_reasoning_effort(kwargs["model"]):
-            kwargs["reasoning_effort"] = effort
+        # Send only what this model accepts alongside tools, and send what it REQUIRES even
+        # when the caller asked for nothing: a UI that leaves the control set while switching
+        # models, or that leaves it empty for gpt-5.6, must not turn into a 400.
+        sending = resolve_effort(kwargs["model"], effort)
+        if sending:
+            kwargs["reasoning_effort"] = sending
+        if effort and sending != effort:
+            logger.info("reasoning_effort %r not usable with tools on %s; sent %r",
+                        effort, kwargs["model"], sending)
         return ChatOpenAI(**kwargs)
     raise ValueError(f"unknown provider {provider!r}; expected 'openai' or 'anvilgpt'")
 
@@ -323,6 +385,15 @@ def list_available_models(*, timeout: float = 6.0) -> Dict[str, Any]:
         # Which of them accept reasoning_effort, so the picker can show the control
         # conditionally instead of offering a setting that 400s.
         "reasoning_models": [m for m in openai_models if m and supports_reasoning_effort(m)],
+        # The legal values PER MODEL. A single global list is what let the UI offer 'high' on
+        # a model that refuses any real level once tools are attached; the picker can now
+        # offer exactly what the API accepts, and nothing else.
+        "effort_options": {m: effort_options(m) for m in openai_models
+                           if m and effort_options(m)},
+        # Models that refuse tools unless this exact value is sent, so the UI can show the
+        # control as fixed rather than as a choice the user appears to have.
+        "effort_required": {m: required_effort(m) for m in openai_models
+                            if m and required_effort(m)},
     })
 
     anvil: Dict[str, Any] = {"provider": "anvilgpt", "label": "AnvilGPT (Purdue RCAC)",
