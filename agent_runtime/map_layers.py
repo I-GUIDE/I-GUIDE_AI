@@ -96,6 +96,19 @@ def build_map_layer(tool_name: str, output: Any) -> Optional[Dict[str, Any]]:
                 "sampled": bool(ml.get("sampled")),
                 "total": ml.get("total"),
             }
+            # A RASTER is an image draped over an extent: no features, no CRS to mis-declare,
+            # no style column. The GeoJSON checks below have nothing to say about it, so it
+            # returns here — leaving it to fall through would let a stricter QA downgrade it
+            # to 'shapes' and the client would stop drawing it as a raster.
+            if render == "raster":
+                bounds = ml.get("bounds")
+                if not (isinstance(bounds, (list, tuple)) and len(bounds) == 4):
+                    logger.warning("raster map_layer %r has no usable bounds; dropping", out["id"])
+                    return None
+                out["bounds"] = [float(v) for v in bounds]
+                out["opacity"] = float(ml.get("opacity") or 0.85)
+                return out
+
             # A CATEGORICAL layer carries its own palette: the tool that assigned the classes
             # is the only thing that knows what they mean, so the legend travels WITH the layer
             # instead of being hardcoded per-tool in the client. Dropped when malformed rather
@@ -147,15 +160,6 @@ def build_map_layer(tool_name: str, output: Any) -> Optional[Dict[str, Any]]:
                 out["render"] = "shapes"
                 out["legend_missing"] = True
 
-            # A raster layer (e.g. an embedding PCA image) is draped over a geographic
-            # extent rather than parsed as GeoJSON, so it travels with its bounds.
-            if render == "raster":
-                bounds = ml.get("bounds")
-                if not (isinstance(bounds, (list, tuple)) and len(bounds) == 4):
-                    logger.warning("raster map_layer %r has no usable bounds; dropping", out["id"])
-                    return None
-                out["bounds"] = [float(v) for v in bounds]
-                out["opacity"] = float(ml.get("opacity") or 0.85)
             return out
     features = _features_from(obj)
     if not features:

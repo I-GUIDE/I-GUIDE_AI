@@ -41,3 +41,29 @@ def test_a_malformed_legend_counts_as_no_legend():
         legend=[{"label": "High-High", "color": "red"}, {"color": [1, 2, 3, 4]}]))
     assert out["render"] == "shapes"
     assert "legend" not in out
+
+
+def test_raster_layer_skips_the_geojson_quality_checks():
+    """A raster's url is a PNG. The vector QA has nothing to say about an image, and a
+    stricter QA would downgrade it to 'shapes' — which stops the client drawing it at all."""
+    import json
+
+    from agent_runtime.map_layers import build_map_layer
+
+    out = build_map_layer("embed_region", json.dumps({"map_layer": {
+        "url": "/agent/files/file_abc/download", "label": "gse embedding (PCA-RGB)",
+        "render": "raster", "bounds": [-88.3, 40.1, -88.2, 40.2], "opacity": 0.6}}))
+    assert out["render"] == "raster", "must not be downgraded"
+    assert out["bounds"] == [-88.3, 40.1, -88.2, 40.2]
+    assert out["opacity"] == 0.6
+    assert "degenerate" not in out and "legend_missing" not in out
+
+
+def test_raster_without_bounds_is_dropped_not_shipped():
+    """Bounds are what place the image; without them there is nothing to draw."""
+    import json
+
+    from agent_runtime.map_layers import build_map_layer
+
+    assert build_map_layer("embed_region", json.dumps(
+        {"map_layer": {"url": "/agent/files/f/download", "render": "raster"}})) is None
