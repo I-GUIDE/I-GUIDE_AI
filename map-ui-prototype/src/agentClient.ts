@@ -22,7 +22,12 @@ export interface ModelCatalogue {
   providers: { provider: string; label: string; configured: boolean;
                models: string[]; stale?: boolean;
                /** Subset of `models` that accept reasoning_effort. */
-               reasoning_models?: string[] }[];
+               reasoning_models?: string[];
+               /** Legal reasoning_effort values PER model, with function tools attached.
+                *  A global list offered 'high' on models that refuse any real level. */
+               effort_options?: Record<string, string[]>;
+               /** Models that REFUSE tools unless this exact value is sent (gpt-5.6-*). */
+               effort_required?: Record<string, string> }[];
 }
 
 /** Ask the agent which models a request may select. */

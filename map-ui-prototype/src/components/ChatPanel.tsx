@@ -149,7 +149,18 @@ export function ChatPanel(p: Props) {
                         // similarly-named models, and the server should not have to guess.
                         const owner = p.models?.providers.find(
                           (g: ModelCatalogue['providers'][number]) => g.models.includes(model));
-                        p.onSetCfg({ ...p.cfg, model, provider: model ? (owner?.provider || '') : '' });
+                        // Repair the effort on switch. Leaving a stale value behind is how a
+                        // pick of 'high' on one model turned every later turn into a 400 on a
+                        // model that refuses any level once tools are attached — and the value
+                        // persists to localStorage, so it outlived the reload too.
+                        const legal = owner?.effort_options?.[model] || [];
+                        const forced = owner?.effort_required?.[model];
+                        const kept = forced
+                          ? forced
+                          : (p.cfg.reasoningEffort && legal.includes(p.cfg.reasoningEffort)
+                              ? p.cfg.reasoningEffort : '');
+                        p.onSetCfg({ ...p.cfg, model, provider: model ? (owner?.provider || '') : '',
+                                     reasoningEffort: kept });
                       }}>
                 <option value="">
                   Agent default{p.models ? ` (${p.models.default.model})` : ''}
@@ -163,21 +174,30 @@ export function ChatPanel(p: Props) {
                 ))}
               </select>
             </label>
-            {/* Reasoning effort applies only to the gpt-5.x / o-series models, so the control
-                appears only when one is selected rather than offering a setting that 400s. */}
+            {/* The legal efforts depend on the model AND on tools being attached, which they
+                always are here. Offer exactly what the API accepts: a model with one forced
+                value is shown as fixed, and a model with no options shows no control. */}
             {(() => {
-              const reasoning = p.models?.providers.some(
-                (g: ModelCatalogue['providers'][number]) =>
-                  (g.reasoning_models || []).includes(p.cfg.model || ''));
-              if (!reasoning) return null;
+              const owner = p.models?.providers.find(
+                (g: ModelCatalogue['providers'][number]) => g.models.includes(p.cfg.model || ''));
+              const legal = owner?.effort_options?.[p.cfg.model || ''] || [];
+              const forced = owner?.effort_required?.[p.cfg.model || ''];
+              if (!legal.length) return null;
+              if (forced) {
+                return (
+                  <label>Reasoning effort
+                    <select value={forced} disabled title={`${p.cfg.model} requires reasoning_effort='${forced}' when tools are attached`}>
+                      <option value={forced}>{forced} (required)</option>
+                    </select>
+                  </label>
+                );
+              }
               return (
                 <label>Reasoning effort
                   <select value={p.cfg.reasoningEffort || ''}
                           onChange={(e) => p.onSetCfg({ ...p.cfg, reasoningEffort: e.target.value })}>
                     <option value="">Model default</option>
-                    {(p.models?.reasoning_efforts || []).map((v: string) => (
-                      <option key={v} value={v}>{v}</option>
-                    ))}
+                    {legal.map((v: string) => <option key={v} value={v}>{v}</option>)}
                   </select>
                 </label>
               );

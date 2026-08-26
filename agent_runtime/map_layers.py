@@ -66,6 +66,32 @@ def _features_from(obj: Any) -> List[Dict[str, Any]]:
     return out
 
 
+def build_map_layers(tool_name: str, output: Any) -> List[Dict[str, Any]]:
+    """Every layer a tool result delivers, in order.
+
+    One tool call can legitimately produce more than one view — embed_zones returns the
+    pixel-level embedding raster AND the zones grouped by it, and dropping either leaves the
+    user looking at half the answer. Descriptors live under ``map_layers``; ``map_layer``
+    stays the single-layer form.
+    """
+    obj = _coerce_obj(output)
+    extra = obj.get("map_layers") if isinstance(obj, dict) else None
+    if isinstance(extra, list) and extra:
+        out: List[Dict[str, Any]] = []
+        seen = set()
+        for ml in extra:
+            if not isinstance(ml, dict):
+                continue
+            built = build_map_layer(tool_name, {"map_layer": ml})
+            if built and built["id"] not in seen:
+                seen.add(built["id"])
+                out.append(built)
+        if out:
+            return out
+    one = build_map_layer(tool_name, output)
+    return [one] if one else []
+
+
 def build_map_layer(tool_name: str, output: Any) -> Optional[Dict[str, Any]]:
     """Return a ``LayerArtifact``-shaped dict for a geometry-bearing tool result, else None."""
     obj = _coerce_obj(output)
@@ -96,6 +122,19 @@ def build_map_layer(tool_name: str, output: Any) -> Optional[Dict[str, Any]]:
                 "sampled": bool(ml.get("sampled")),
                 "total": ml.get("total"),
             }
+            # A RASTER is an image draped over an extent: no features, no CRS to mis-declare,
+            # no style column. The GeoJSON checks below have nothing to say about it, so it
+            # returns here — leaving it to fall through would let a stricter QA downgrade it
+            # to 'shapes' and the client would stop drawing it as a raster.
+            if render == "raster":
+                bounds = ml.get("bounds")
+                if not (isinstance(bounds, (list, tuple)) and len(bounds) == 4):
+                    logger.warning("raster map_layer %r has no usable bounds; dropping", out["id"])
+                    return None
+                out["bounds"] = [float(v) for v in bounds]
+                out["opacity"] = float(ml.get("opacity") or 0.85)
+                return out
+
             # A CATEGORICAL layer carries its own palette: the tool that assigned the classes
             # is the only thing that knows what they mean, so the legend travels WITH the layer
             # instead of being hardcoded per-tool in the client. Dropped when malformed rather
@@ -147,15 +186,6 @@ def build_map_layer(tool_name: str, output: Any) -> Optional[Dict[str, Any]]:
                 out["render"] = "shapes"
                 out["legend_missing"] = True
 
-            # A raster layer (e.g. an embedding PCA image) is draped over a geographic
-            # extent rather than parsed as GeoJSON, so it travels with its bounds.
-            if render == "raster":
-                bounds = ml.get("bounds")
-                if not (isinstance(bounds, (list, tuple)) and len(bounds) == 4):
-                    logger.warning("raster map_layer %r has no usable bounds; dropping", out["id"])
-                    return None
-                out["bounds"] = [float(v) for v in bounds]
-                out["opacity"] = float(ml.get("opacity") or 0.85)
             return out
     features = _features_from(obj)
     if not features:

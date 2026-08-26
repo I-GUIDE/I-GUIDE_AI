@@ -442,4 +442,296 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
     ]
 
 
-__all__ = ["make_rs_embed_tools", "RS_EMBED_URL"]
+
+
+# --- zonal embeddings: pixels inside a polygon, aggregated ----------------------
+RS_EMBED_PYTHON = os.getenv("RS_EMBED_PYTHON", "")
+_ZONAL_TIMEOUT_S = float(os.getenv("RS_EMBED_ZONAL_TIMEOUT_S", "900"))
+# Path to a checkout of rs-embed whose `src` should win over whatever the interpreter's
+# editable install points at — how to run a fixed version without touching that checkout.
+RS_EMBED_SRC = os.getenv("RS_EMBED_SRC", "")
+# Distinct, colour-blind-safe hues for cluster classes (Okabe-Ito, alpha added).
+_CLUSTER_COLORS = [
+    [0, 114, 178, 190], [230, 159, 0, 190], [0, 158, 115, 190], [204, 121, 167, 190],
+    [86, 180, 233, 190], [213, 94, 0, 190], [240, 228, 66, 190], [120, 120, 120, 190],
+]
+
+
+def _zonal_python() -> Optional[str]:
+    """Interpreter that can import rs_embed. The agent's own cannot (deliberately)."""
+    if RS_EMBED_PYTHON:
+        return RS_EMBED_PYTHON
+    for guess in ("/Users/yfkang/Documents/Github/rs-embed/rsembed/bin/python",):
+        if Path(guess).exists():
+            return guess
+    return None
+
+
+def run_zonal_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Run the zonal worker under the rs-embed interpreter; return its JSON result."""
+    import subprocess
+
+    py = _zonal_python()
+    if not py:
+        return {"ok": False,
+                "error": "no interpreter with rs_embed installed",
+                "hint": "Set RS_EMBED_PYTHON to a python that can `import rs_embed` "
+                        "(the rs-embed repo's venv), then retry."}
+    worker = str(Path(__file__).with_name("rs_embed_zonal_worker.py"))
+    out = Path(tempfile.mkdtemp(prefix="rsembed_zonal_")) / "result.json"
+    payload = {**payload, "out_path": str(out)}
+    # The agent process has torch loaded, so a second OpenMP runtime in a child that
+    # inherits its state raised "OMP: Error #179: pthread_mutex_init failed" and wedged the
+    # turn. Pin the child to one OpenMP thread and let a duplicate runtime load.
+    env = {**os.environ, "OMP_NUM_THREADS": "1", "KMP_INIT_AT_FORK": "FALSE",
+           "KMP_DUPLICATE_LIB_OK": "TRUE"}
+    if RS_EMBED_SRC:
+        env["PYTHONPATH"] = RS_EMBED_SRC + os.pathsep + env.get("PYTHONPATH", "")
+    try:
+        proc = subprocess.run([py, worker], input=json.dumps(payload), text=True,
+                              capture_output=True, timeout=_ZONAL_TIMEOUT_S, env=env)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": f"zonal embedding exceeded {_ZONAL_TIMEOUT_S:.0f}s",
+                "hint": "Lower max_tiles, raise tile_px, or pass fewer zones."}
+    if not out.exists():
+        tail = (proc.stderr or proc.stdout or "")[-600:]
+        return {"ok": False, "error": "the zonal worker produced no result", "detail": tail}
+    return json.loads(out.read_text())
+
+
+def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None) -> List[Any]:
+    """Tools that aggregate per-pixel embeddings inside polygons."""
+    from langchain_core.tools import StructuredTool
+
+    meta = {"category": "geo"}
+
+    def embed_zones(file_id: str, zone_id_field: Optional[str] = None, model: str = "gse",
+                    year: int = 2022, clusters: int = 5, tile_px: int = 200,
+                    max_tiles: int = 24, name: Optional[str] = None,
+                    sibling_file_ids: Optional[List[str]] = None) -> str:
+        """Give every POLYGON its own satellite-embedding vector, and map the result.
+
+        Divides the polygons' area into pixels, embeds each pixel with a remote-sensing
+        foundation model, and averages the pixels that fall INSIDE each polygon — so each
+        zone (census tract, county, field, watershed, drawn box) gets one vector describing
+        what it looks like from space. Works with any polygon layer: GeoJSON, shapefile,
+        GeoPackage.
+
+        Returns a CSV of per-zone vectors ready for machine learning (use fit_zone_model),
+        and puts the zones on the map grouped into `clusters` look-alike groups. Each zone
+        also carries `pixels` and `area_km2` — its support — plus the raw SUM, so zones can
+        be rolled up to a coarser partition exactly.
+        """
+        tmp = None
+        try:
+            import numpy as np
+
+            from agent_runtime.file_store import create_output_file_from_path
+            from agent_runtime.langchain_geo_tools import _stage, artifact_name  # type: ignore
+        except Exception:  # pragma: no cover - import shape differs in some builds
+            from agent_runtime.file_store import create_output_file_from_path
+            import numpy as np
+            from agent_runtime.langchain_geo_tools import artifact_name
+            _stage = None  # type: ignore
+
+        try:
+            from agent_runtime.langchain_geo_tools import _stage_vector_source, _index_attached
+
+            attached = _index_attached(default_input_file_ids)
+            read_path, tmp = _stage_vector_source(file_id, sibling_file_ids, attached)
+        except Exception as exc:  # noqa: BLE001
+            return json.dumps({"ok": False, "error": f"could not read {file_id}: {exc}"})
+
+        png_path = Path(tempfile.mkdtemp(prefix="rsembed_zonal_")) / artifact_name(
+            name, "png", default=f"{model}_zone_pixels")
+        res = run_zonal_worker({"polygons_path": str(read_path), "zone_id_field": zone_id_field,
+                                "model": model, "year": int(year), "tile_px": int(tile_px),
+                                "max_tiles": int(max_tiles),
+                                "clusters": max(2, min(int(clusters), len(_CLUSTER_COLORS))),
+                                "image": True, "out_png": str(png_path)})
+        if not res.get("ok"):
+            return json.dumps({"ok": False, **{k: v for k, v in res.items() if k != "zones"}})
+
+        zones = res["zones"]
+        dims = int(res["dims"])
+        with_px = [z for z in zones if z["pixels"]]
+
+        # --- CSV of per-zone vectors: the artifact an ML step consumes ---
+        stem = artifact_name(name, "csv", default=f"{model}_zone_embeddings")
+        out_csv = Path(tempfile.mkdtemp(prefix="rsembed_zonal_")) / stem
+        cols = ["zone_id", "pixels", "area_km2"] + [f"e{i:03d}" for i in range(dims)]
+        lines = [",".join(cols)]
+        for z in with_px:
+            lines.append(",".join([str(z["zone_id"]), str(z["pixels"]), f"{z['area_km2']:.6f}"]
+                                  + [f"{v:.6f}" for v in z["mean"]]))
+        out_csv.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        csv_rec = create_output_file_from_path(out_csv, filename=out_csv.name)
+
+        # --- the map layer: look-alike groups, clustered BY THE WORKER (sklearn must not
+        # run in this process; it already has torch loaded and a second OpenMP runtime
+        # crashed the turn). Groups are the one view of a 64-dim vector worth looking at —
+        # a choropleth of a single dimension is a picture of an arbitrary axis.
+        layer = None
+        cluster_note = None
+        try:
+            import geopandas as gpd
+
+            gdf = gpd.read_file(read_path)
+            if gdf.crs is None:
+                gdf = gdf.set_crs("EPSG:4326")
+            gdf = gdf.to_crs("EPSG:4326")
+            ids = ([str(v) for v in gdf[zone_id_field]]
+                   if zone_id_field and zone_id_field in gdf.columns
+                   else [str(i) for i in range(len(gdf))])
+            grouped = {z["zone_id"]: z for z in with_px if z.get("group")}
+            keep = [i for i, zid in enumerate(ids) if zid in grouped]
+            if keep:
+                sub = gdf.iloc[keep][["geometry"]].copy()
+                sub["zone_id"] = [ids[i] for i in keep]
+                sub["pixels"] = [grouped[ids[i]]["pixels"] for i in keep]
+                sub["area_km2"] = [round(grouped[ids[i]]["area_km2"], 4) for i in keep]
+                sub["look_alike_group"] = [f"group {grouped[ids[i]]['group']}" for i in keep]
+                gj = Path(tempfile.mkdtemp(prefix="rsembed_zonal_")) / artifact_name(
+                    name, "geojson", default=f"{model}_zone_groups")
+                sub.to_file(gj, driver="GeoJSON")
+                rec = create_output_file_from_path(gj, filename=gj.name)
+                present = sorted({str(v) for v in sub["look_alike_group"]})
+                layer = {"url": rec.get("download_url"),
+                         "label": f"{model} zone groups (k={len(present)})",
+                         "render": "categories", "style_by": "look_alike_group",
+                         "source": "analysis", "count": len(keep),
+                         "legend": [{"label": g,
+                                     "color": _CLUSTER_COLORS[i % len(_CLUSTER_COLORS)]}
+                                    for i, g in enumerate(present)]}
+        except Exception as exc:  # noqa: BLE001
+            cluster_note = f"zones computed but not mapped: {type(exc).__name__}: {exc}"[:200]
+
+        out: Dict[str, Any] = {
+            "ok": True, "model": model, "year": int(year), "dims": dims,
+            "zones_total": res["zones_total"], "zones_with_pixels": res["zones_with_pixels"],
+            # scale_m is EPSG:3857 metres; the ground figure is what a pixel really covers.
+            "scale_m_mercator": res["scale_m"], "pixel_ground_m": res["pixel_ground_m"],
+            "tiles_fetched": res["tiles_fetched"], "tiles_planned": res["tiles_planned"],
+            "vectors_csv": {"file_id": csv_rec["file_id"], "filename": csv_rec.get("filename"),
+                            "download_url": csv_rec.get("download_url"),
+                            "size_bytes": csv_rec.get("size_bytes")},
+            "support": {"pixels_min": min((z["pixels"] for z in with_px), default=0),
+                        "pixels_median": int(np.median([z["pixels"] for z in with_px])) if with_px else 0,
+                        "pixels_max": max((z["pixels"] for z in with_px), default=0)},
+            "note": "Each zone's vector is the MEAN of the pixels inside it. `pixels` is its "
+                    "support: a model fitted on small zones is extrapolating when applied to "
+                    "a much larger one, because pooling averages away variance.",
+        }
+        if res.get("tiles_capped"):
+            out["truncated"] = (f"stopped after max_tiles={max_tiles} of {res['tiles_planned']} "
+                                f"tiles — zones outside those tiles have no pixels")
+        if res.get("pixel_size_warnings"):
+            out["pixel_size_warnings"] = res["pixel_size_warnings"]
+        if res.get("tile_errors"):
+            out["tile_errors"] = res["tile_errors"]
+        if cluster_note:
+            out["cluster_note"] = cluster_note
+        # Two views, both delivered: the pixel-level embedding masked to the shapes (what the
+        # zone vectors are computed FROM), and the zones grouped by those vectors. Asking for
+        # "the embedding of these polygons" and getting only a group colour hid the actual data.
+        layers = []
+        img = res.get("image") or {}
+        if img.get("path") and Path(img["path"]).exists() and img.get("bounds"):
+            rec_png = create_output_file_from_path(Path(img["path"]),
+                                                   filename=Path(img["path"]).name)
+            out["pixel_image"] = {"file_id": rec_png["file_id"],
+                                  "download_url": rec_png.get("download_url"),
+                                  "size_bytes": rec_png.get("size_bytes"),
+                                  "size_px": img.get("size_px"),
+                                  "pixels_shown": img.get("pixels_shown"),
+                                  "colour": img.get("colour")}
+            layers.append(_raster_layer(rec_png, [float(v) for v in img["bounds"]],
+                                        f"{model} pixel embedding in zones"))
+        elif img.get("error"):
+            out["image_note"] = img["error"]
+        if layer:
+            layers.append(layer)
+        if layers:
+            out["map_layer"] = layers[0]
+            if len(layers) > 1:
+                out["map_layers"] = layers
+            out["on_map"] = True
+        return json.dumps(out)
+
+
+    def fit_zone_model(vectors_csv_file_id: str, polygons_file_id: str, label_column: str,
+                       zone_id_field: Optional[str] = None, blocks: int = 5,
+                       name: Optional[str] = None,
+                       sibling_file_ids: Optional[List[str]] = None) -> str:
+        """Predict a per-zone VALUE from zone embeddings, and map the prediction.
+
+        Takes the CSV from embed_zones plus the polygon layer carrying the truth in
+        `label_column` (tree canopy, yield, hardship index, ...), fits a ridge model and
+        scores it with SPATIAL BLOCK cross-validation: folds are contiguous blocks of space,
+        so no zone is scored by a model that trained on its neighbours.
+
+        Reports the blocked score, the score a naive random split WOULD have claimed, and a
+        predict-the-mean baseline — the gap between the first two is how much of an apparent
+        result was just adjacency. Puts out-of-fold predictions on the map with residuals.
+        """
+        tmp = None
+        try:
+            from agent_runtime.file_store import create_output_file_from_path
+            from agent_runtime.langchain_geo_tools import (_index_attached, _resolve,
+                                                          _stage_vector_source, artifact_name)
+
+            csv_path, _rec = _resolve(vectors_csv_file_id)
+            attached = _index_attached(default_input_file_ids)
+            poly_path, tmp = _stage_vector_source(polygons_file_id, sibling_file_ids, attached)
+            gj = Path(tempfile.mkdtemp(prefix="rsembed_fit_")) / artifact_name(
+                name, "geojson", default=f"{label_column}_predicted")
+
+            # Every numeric step runs in the worker's interpreter: sklearn in this process
+            # meets a second OpenMP runtime alongside torch and takes the turn down.
+            res = run_zonal_worker({"mode": "fit", "vectors_csv": str(csv_path),
+                                    "polygons_path": str(poly_path),
+                                    "label_column": label_column,
+                                    "zone_id_field": zone_id_field,
+                                    "blocks": int(blocks), "out_geojson": str(gj)})
+            if not res.get("ok"):
+                return json.dumps({"ok": False, **res})
+
+            rec = create_output_file_from_path(gj, filename=gj.name)
+            blocked = res["spatial_block_cv"]
+            naive = res.get("naive_random_split_cv") or {}
+            out = {
+                "ok": True, **{k: v for k, v in res.items() if k != "ok"},
+                "predictions_file_id": rec["file_id"],
+                "download_url": rec.get("download_url"),
+                "on_map": True,
+                "map_layer": {"url": rec.get("download_url"),
+                              "label": f"{label_column} predicted from embeddings",
+                              "render": "choropleth", "style_by": "predicted",
+                              "source": "analysis", "count": res.get("zones_fitted")},
+                "note": "r2/rmse are OUT-OF-FOLD under spatial block CV, so they estimate "
+                        "performance in an area the model has not seen. Mapped values are "
+                        "those out-of-fold predictions, not fitted values. Quote the blocked "
+                        "score, not the random-split one.",
+            }
+            if isinstance(blocked.get("r2"), (int, float)) and blocked["r2"] <= 0:
+                out["verdict"] = ("no skill: the model does no better than predicting the mean, "
+                                  "so the embeddings do not explain this variable at this "
+                                  "sample size. Report that, do not present the map as a result.")
+            elif isinstance(naive.get("r2"), (int, float)) and \
+                    naive["r2"] - blocked["r2"] > 0.15:
+                out["verdict"] = (f"a random split would have claimed r2={naive['r2']}, versus "
+                                  f"{blocked['r2']} when whole blocks are held out — most of "
+                                  f"that apparent skill was spatial adjacency, not prediction.")
+            return json.dumps(out)
+        except Exception as exc:  # noqa: BLE001
+            return json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+        finally:
+            if tmp:
+                import shutil
+                shutil.rmtree(tmp, ignore_errors=True)
+
+    return [StructuredTool.from_function(func=embed_zones, name="embed_zones", metadata=meta),
+            StructuredTool.from_function(func=fit_zone_model, name="fit_zone_model", metadata=meta)]
+
+
+__all__ = ["make_rs_embed_tools", "make_rs_embed_zonal_tools", "run_zonal_worker", "RS_EMBED_URL"]
