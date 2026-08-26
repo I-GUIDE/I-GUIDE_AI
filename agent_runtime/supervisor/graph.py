@@ -1688,7 +1688,8 @@ def _run_qgis_map_workflow(query: str, *, input_file_ids: Optional[List[str]],
 # zoomed or clicked, so this is not a wording quibble — the deliverable was missing. Verified
 # structurally (like the unrun-code check) rather than demanded in the prompt.
 _MAP_LAYER_TOOLS = ("add_map_layer", "overpass_search", "spatial_search",
-                    "embed_region", "segment_region")
+                    "embed_region", "segment_region", "embed_zones",
+                    "fit_zone_model")
 _WANTS_MAP_RE = re.compile(
     r"\b(?:on|in|onto|to)\s+(?:the\s+|a\s+|my\s+)?(?:interactive\s+)?map\b"
     r"|\binteractive\s+map\b|\bmap\s+view\b|\bheat\s?map\b|\bchoropleth\b"
@@ -1877,6 +1878,14 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
             tools.extend(make_rs_embed_tools(default_input_file_ids=input_file_ids))
         except Exception:
             pass
+        # Per-zone embeddings + the model fitted on them. Needs an uploaded polygon layer,
+        # so it is gated on attached files unlike the region tools above.
+        if input_file_ids:
+            try:
+                from agent_runtime.rs_embed_tools import make_rs_embed_zonal_tools
+                tools.extend(make_rs_embed_zonal_tools(default_input_file_ids=input_file_ids))
+            except Exception:
+                pass
         from agent_runtime.code_execution import is_code_exec_enabled
 
         if code_exec if code_exec is not None else is_code_exec_enabled():
@@ -2089,6 +2098,14 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
             tools.extend(make_rs_embed_tools(default_input_file_ids=input_file_ids))
         except Exception:
             pass
+        # Per-zone embeddings + the model fitted on them. Needs an uploaded polygon layer,
+        # so it is gated on attached files unlike the region tools above.
+        if input_file_ids:
+            try:
+                from agent_runtime.rs_embed_tools import make_rs_embed_zonal_tools
+                tools.extend(make_rs_embed_zonal_tools(default_input_file_ids=input_file_ids))
+            except Exception:
+                pass
         from agent_runtime.code_execution import is_code_exec_enabled
 
         if code_exec if code_exec is not None else is_code_exec_enabled():

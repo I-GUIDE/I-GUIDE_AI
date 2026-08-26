@@ -66,6 +66,32 @@ def _features_from(obj: Any) -> List[Dict[str, Any]]:
     return out
 
 
+def build_map_layers(tool_name: str, output: Any) -> List[Dict[str, Any]]:
+    """Every layer a tool result delivers, in order.
+
+    One tool call can legitimately produce more than one view — embed_zones returns the
+    pixel-level embedding raster AND the zones grouped by it, and dropping either leaves the
+    user looking at half the answer. Descriptors live under ``map_layers``; ``map_layer``
+    stays the single-layer form.
+    """
+    obj = _coerce_obj(output)
+    extra = obj.get("map_layers") if isinstance(obj, dict) else None
+    if isinstance(extra, list) and extra:
+        out: List[Dict[str, Any]] = []
+        seen = set()
+        for ml in extra:
+            if not isinstance(ml, dict):
+                continue
+            built = build_map_layer(tool_name, {"map_layer": ml})
+            if built and built["id"] not in seen:
+                seen.add(built["id"])
+                out.append(built)
+        if out:
+            return out
+    one = build_map_layer(tool_name, output)
+    return [one] if one else []
+
+
 def build_map_layer(tool_name: str, output: Any) -> Optional[Dict[str, Any]]:
     """Return a ``LayerArtifact``-shaped dict for a geometry-bearing tool result, else None."""
     obj = _coerce_obj(output)
