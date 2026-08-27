@@ -208,16 +208,26 @@ def assign_look_alike_groups(zones: list, clusters: int) -> int:
 
     Groups are 1-based because the map layer treats a missing group as "not embedded", and
     zones with no pixels are left untagged for the same reason. Mutates ``zones`` in place;
-    ``clusters < 2`` or too few covered zones is a no-op, not an error.
+    ``clusters < 2`` means "do not group" and is a no-op.
+
+    ``clusters`` is a ceiling, not a requirement: asking for five groups across three zones
+    gives three. It used to give NONE, and since the group layer is the only thing embed_zones
+    puts on the map, "embed this one polygon" — the commonest request there is — delivered a
+    CSV and an empty map with nothing saying why.
     """
     import numpy as np
 
     with_px = [z for z in zones if z.get("pixels")]
-    if clusters < 2 or len(with_px) < clusters:
+    if clusters < 2 or not with_px:
         return 0
+    k = min(int(clusters), len(with_px))
+    if k < 2:
+        # One covered zone: there is nothing to cluster, but it still belongs on the map.
+        with_px[0]["group"] = 1
+        return 1
     X = np.asarray([z["mean"] for z in with_px], dtype=np.float64)
     Xn = X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-9)
-    lab = kmeans_labels(Xn, clusters)
+    lab = kmeans_labels(Xn, k)
     for z, v in zip(with_px, lab, strict=True):
         z["group"] = int(v) + 1
     return int(len(set(lab)))
@@ -500,9 +510,13 @@ def fit(req: dict) -> dict:
         return out
 
     block_folds = group_kfold_indices(groups, blocks)
+    # Fewer distinct clusters than blocks means fewer folds, and the naive split has to use
+    # the SAME count: the two r2 values are subtracted to decide whether apparent skill was
+    # only adjacency, and a 5-fold naive score against a 4-fold blocked one moves that
+    # difference by enough to flip the verdict on its own.
+    blocks = len(block_folds)
     oof = _oof(block_folds)
     naive = _oof(kfold_indices(n, blocks, seed=0))
-    blocks = len(block_folds)          # report the folds that actually ran
     ss_tot = float(np.sum((y - y.mean()) ** 2))
     def _r2(p):
         return 1.0 - float(np.sum((y - p) ** 2)) / ss_tot if ss_tot > 0 else float("nan")

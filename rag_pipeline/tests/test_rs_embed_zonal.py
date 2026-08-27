@@ -281,3 +281,166 @@ json.dump({
     lab = kmeans_labels(blobs, 3)
     ours_partition = sorted(sorted(int(i) for i in np.flatnonzero(lab == c)) for c in set(lab))
     assert ours_partition == ref["kmeans"], "the same zones must land in the same group"
+
+
+def test_one_covered_zone_still_lands_on_the_map():
+    """"Embed this one polygon" is the commonest form of the request, and the group layer is
+    the only thing embed_zones puts on the map. Asking for five groups across one zone used to
+    tag nothing, so the turn delivered a CSV, an empty map, and no explanation."""
+    from agent_runtime.rs_embed_zonal_worker import assign_look_alike_groups
+
+    zones = [{"pixels": 8431, "mean": [0.1, 0.2]}, {"pixels": 0, "mean": None}]
+    assert assign_look_alike_groups(zones, 5) == 1
+    assert zones[0]["group"] == 1
+    assert "group" not in zones[1]
+
+
+def test_clusters_is_a_ceiling_not_a_requirement():
+    """Five groups across three zones is three groups, not zero."""
+    from agent_runtime.rs_embed_zonal_worker import assign_look_alike_groups
+
+    zones = [{"pixels": 10, "mean": [1.0, 0.0]}, {"pixels": 10, "mean": [0.0, 1.0]},
+             {"pixels": 10, "mean": [-1.0, 0.0]}]
+    assert assign_look_alike_groups(zones, 5) == 3
+    assert sorted(z["group"] for z in zones) == [1, 2, 3]
+    assert assign_look_alike_groups([{"pixels": 10, "mean": [1.0]}], 0) == 0, \
+        "clusters < 2 still means 'do not group'"
+
+
+def test_a_zone_id_that_cannot_key_uniquely_is_refused_with_the_alternative(tmp_path, monkeypatch):
+    """The id is the only thing joining a vector back to a polygon — on the map, in the CSV,
+    and in fit_zone_model's merge. A duplicated value does not fail: it paints one zone's
+    vector onto every polygon sharing it, and puts one feature row on both sides of a CV
+    split. The column is in hand here, so this is catchable before anything is paid for."""
+    import geopandas as gpd
+    from shapely.geometry import box
+
+    import agent_runtime.rs_embed_tools as T
+
+    called = []
+    monkeypatch.setattr(T, "_svc", lambda *a, **k: called.append(1) or _service_reply())
+
+    def _write(values):
+        gdf = gpd.GeoDataFrame({"name": values,
+                                "geometry": [box(i, 0, i + 1, 1) for i in range(len(values))]},
+                               crs="EPSG:4326")
+        p = tmp_path / f"z{len(called)}_{abs(hash(tuple(map(str, values))))}.geojson"
+        gdf.to_file(p, driver="GeoJSON")
+        return str(p)
+
+    out = T.run_zonal_worker({"polygons_path": _write(["a", "a", "b"]), "zone_id_field": "name"})
+    assert out["ok"] is False and "uniquely" in out["error"]
+    assert "row number" in out["hint"], "the failure must name what to do instead"
+
+    out = T.run_zonal_worker({"polygons_path": _write(["a", None, "b"]), "zone_id_field": "name"})
+    assert out["ok"] is False and "no value" in out["error"]
+    assert "row number" in out["hint"]
+    assert not called, "neither layer can produce a usable answer, so neither is sent"
+
+
+def test_numeric_zone_ids_travel_as_text(tmp_path, monkeypatch):
+    """A GEOID is a number to pandas. Sent as one it comes back as 17031836500.0, which
+    str()-matches no polygon on the way home, and the zone silently vanishes from the map."""
+    import geopandas as gpd
+    from shapely.geometry import box
+
+    import agent_runtime.rs_embed_tools as T
+
+    gdf = gpd.GeoDataFrame({"geoid": [17031836500, 17031836600],
+                            "geometry": [box(0, 0, 1, 1), box(1, 0, 2, 1)]}, crs="EPSG:4326")
+    path = tmp_path / "numeric.geojson"
+    gdf.to_file(path, driver="GeoJSON")
+
+    sent = {}
+    monkeypatch.setattr(T, "_svc", lambda path_, body=None, **k: (sent.update(body=body)
+                                                                  or _service_reply()))
+    T.run_zonal_worker({"polygons_path": str(path), "zone_id_field": "geoid", "clusters": 2})
+    values = [f["properties"]["geoid"] for f in sent["body"]["zones_geojson"]["features"]]
+    assert values == ["17031836500", "17031836600"], f"ids must be sent as text, got {values}"
+
+
+def test_both_cross_validation_scores_use_the_same_fold_count(tmp_path, monkeypatch):
+    """fit reports the blocked r2 and the r2 a naive random split WOULD have claimed, and the
+    difference decides whether the answer says the skill was really adjacency. Scoring them
+    over different fold counts moves that difference on its own."""
+    import geopandas as gpd
+    import numpy as np
+    from shapely.geometry import box
+
+    import agent_runtime.rs_embed_zonal_worker as W
+
+    n, dims = 24, 6
+    rng = np.random.default_rng(3)
+    feats = rng.normal(size=(n, dims))
+    labels = feats[:, 0] * 2 + rng.normal(scale=0.2, size=n)
+    csv = tmp_path / "vectors.csv"
+    header = ["zone_id", "pixels", "area_km2"] + [f"e{i:03d}" for i in range(dims)]
+    rows = [",".join(header)]
+    for i in range(n):
+        rows.append(",".join([str(i), "100", "1.0"] + [f"{v:.6f}" for v in feats[i]]))
+    csv.write_text("\n".join(rows) + "\n")
+
+    gdf = gpd.GeoDataFrame({"zid": [str(i) for i in range(n)], "truth": labels,
+                            "geometry": [box(i % 6, i // 6, i % 6 + 1, i // 6 + 1)
+                                         for i in range(n)]}, crs="EPSG:4326")
+    poly = tmp_path / "poly.geojson"
+    gdf.to_file(poly, driver="GeoJSON")
+
+    seen = []
+    real_kfold = W.kfold_indices
+    monkeypatch.setattr(W, "kfold_indices",
+                        lambda n_, splits, seed=0: seen.append(splits) or real_kfold(n_, splits, seed))
+    # Three spatial blocks come back where five were asked for — what happens whenever the
+    # zones sit at fewer distinct locations than the requested block count.
+    real_group = W.group_kfold_indices
+    monkeypatch.setattr(W, "group_kfold_indices",
+                        lambda groups, splits: real_group(groups, splits)[:3])
+
+    out = W.fit({"vectors_csv": str(csv), "polygons_path": str(poly), "label_column": "truth",
+                 "zone_id_field": "zid", "blocks": 5, "out_geojson": str(tmp_path / "out.geojson")})
+    assert out["ok"] is True
+    assert out["spatial_block_cv"]["blocks"] == 3, "report the folds that actually ran"
+    assert seen == [3], f"the naive split must use the same fold count, got {seen}"
+
+
+def test_embed_zones_puts_a_single_polygon_on_the_map(tmp_path, monkeypatch):
+    """The whole tool, end to end over a stubbed service, for the request it gets most: one
+    polygon, by geoid. It must come back with a vectors CSV AND a map layer — nothing below
+    the tool is allowed to decide that one zone is not worth mapping."""
+    import geopandas as gpd
+    from shapely.geometry import box
+
+    import agent_runtime.file_store as FS
+    import agent_runtime.langchain_geo_tools as G
+    import agent_runtime.rs_embed_tools as T
+
+    gdf = gpd.GeoDataFrame({"geoid": ["17031836500"], "geometry": [box(-87.61, 41.82, -87.60, 41.83)]},
+                           crs="EPSG:4326")
+    src = tmp_path / "one.geojson"
+    gdf.to_file(src, driver="GeoJSON")
+
+    monkeypatch.setattr(G, "_stage_vector_source", lambda *a, **k: (str(src), None))
+    monkeypatch.setattr(G, "_index_attached", lambda *a, **k: {})
+    monkeypatch.setattr(FS, "create_output_file_from_path",
+                        lambda p, filename=None: {"file_id": f"id_{filename}", "filename": filename,
+                                                  "download_url": f"/files/{filename}",
+                                                  "size_bytes": 10})
+    monkeypatch.setattr(T, "_svc", lambda *a, **k: {
+        "ok": True, "model": "gse", "year": 2022, "zones": 1, "dim": 3,
+        "rows": [{"zone_id": "17031836500", "pixels": 8431, "area_km2": 0.468075,
+                  "e000": 0.1, "e001": -0.2, "e002": 0.3}],
+        "meta": {"model": "gse", "dims": 3, "bands": [], "scale_m": 10.0,
+                 "pixel_ground_m": 7.44, "tiles_planned": 1, "tiles_fetched": 1,
+                 "tiles_capped": False, "zone_id_field": "geoid", "zones_total": 1,
+                 "zones_with_pixels": 1, "tile_errors": [], "pixel_size_warnings": []}})
+
+    tool = {t.name: t for t in T.make_rs_embed_zonal_tools()}["embed_zones"]
+    out = json.loads(tool.func(file_id="file_x", zone_id_field="geoid", model="gse"))
+
+    assert out["ok"] is True and out["zones_with_pixels"] == 1
+    assert out["vectors_csv"]["file_id"], "the CSV of per-zone vectors is the ML artifact"
+    assert out.get("on_map") is True, "one polygon is still a map"
+    layer = out["map_layer"]
+    assert layer["render"] == "categories" and layer["style_by"] == "look_alike_group"
+    assert layer["count"] == 1 and len(layer["legend"]) == 1
+    assert "cluster_note" not in out, "nothing went wrong, so nothing to apologise for"

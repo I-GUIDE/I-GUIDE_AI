@@ -507,18 +507,47 @@ def run_zonal_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         gdf = gdf.to_crs("EPSG:4326")
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"could not read the polygons: {exc}"}
-    if id_field and id_field not in gdf.columns:
-        return {"ok": False,
-                "error": f"zone_id_field {id_field!r} is not in the layer",
-                "available_columns": [c for c in gdf.columns if c != "geometry"][:40]}
+    if id_field:
+        if id_field not in gdf.columns:
+            return {"ok": False,
+                    "error": f"zone_id_field {id_field!r} is not in the layer",
+                    "available_columns": [c for c in gdf.columns if c != "geometry"][:40],
+                    "hint": "Name a column that identifies each polygon, or omit zone_id_field "
+                            "to key zones by row number — but then use the same setting when "
+                            "fitting, or the vectors and the labels will not meet."}
+        # The id is the ONLY thing joining a returned vector back to a polygon — on the map,
+        # in the CSV, and in fit_zone_model's merge. A column that cannot key uniquely does
+        # not fail: it quietly paints one zone's vector onto every polygon that shares its
+        # value, and puts the same feature row in both sides of a cross-validation split.
+        blank = gdf[id_field].isna()
+        if bool(blank.any()):
+            return {"ok": False,
+                    "error": f"{int(blank.sum())} of {len(gdf)} polygons have no value in "
+                             f"{id_field!r}, so their vectors could not be joined back",
+                    "hint": "Fill the column, pick another, or omit zone_id_field to key zones "
+                            "by row number — but then use the same setting when fitting."}
+        dup = gdf[id_field][gdf[id_field].duplicated(keep=False)]
+        if len(dup):
+            examples = sorted({str(v) for v in dup})[:4]
+            return {"ok": False,
+                    "error": f"{id_field!r} does not identify a polygon uniquely: {len(dup)} "
+                             f"polygons share {dup.nunique()} value(s), e.g. {examples}",
+                    "hint": "Pick a unique column, or omit zone_id_field to key zones by row "
+                            "number — but then use the same setting when fitting.",
+                    "available_columns": [c for c in gdf.columns if c != "geometry"][:40]}
 
     # Only the identifier travels with the geometry. The service keys zones by row index when
     # no field is named, and dropping columns cannot reorder rows, so the mapping is safe —
     # while a tract layer's forty attribute columns would otherwise be re-encoded into the
-    # request body for nothing.
+    # request body for nothing. The id goes as text: the round trip through JSON turns a
+    # numeric id into a number and back, and 17031836500 that returns as "17031836500.0"
+    # matches no polygon on the way home.
     keep = [id_field, "geometry"] if id_field else ["geometry"]
+    sending = gdf[keep].copy()
+    if id_field:
+        sending[id_field] = sending[id_field].astype(str)
     body: Dict[str, Any] = {
-        "zones_geojson": json.loads(gdf[keep].to_json()),
+        "zones_geojson": json.loads(sending.to_json()),
         "model": model, "year": year, "zone_id_field": id_field,
         "tile_px": int(payload.get("tile_px") or 256),
     }
@@ -671,6 +700,7 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
             if gdf.crs is None:
                 gdf = gdf.set_crs("EPSG:4326")
             gdf = gdf.to_crs("EPSG:4326")
+            # str() of the same values run_zonal_worker sent, so the ids match on the way back.
             ids = ([str(v) for v in gdf[zone_id_field]]
                    if zone_id_field and zone_id_field in gdf.columns
                    else [str(i) for i in range(len(gdf))])
@@ -696,6 +726,12 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                                     for i, g in enumerate(present)]}
         except Exception as exc:  # noqa: BLE001
             cluster_note = f"zones computed but not mapped: {type(exc).__name__}: {exc}"[:200]
+        if layer is None and cluster_note is None:
+            # The group layer is the only thing this tool puts on the map, so "no layer" is a
+            # failed delivery, not a detail. Say it in the payload the model reads.
+            cluster_note = ("no zone could be placed on the map: none of the embedded zone ids "
+                            "matched a polygon in the layer. Say the vectors were computed but "
+                            "not mapped — do not describe a map.")
 
         out: Dict[str, Any] = {
             "ok": True, "model": model, "year": int(year), "dims": dims,
