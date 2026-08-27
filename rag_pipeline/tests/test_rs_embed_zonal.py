@@ -444,3 +444,77 @@ def test_embed_zones_puts_a_single_polygon_on_the_map(tmp_path, monkeypatch):
     assert layer["render"] == "categories" and layer["style_by"] == "look_alike_group"
     assert layer["count"] == 1 and len(layer["legend"]) == 1
     assert "cluster_note" not in out, "nothing went wrong, so nothing to apologise for"
+
+
+def _stage_layer(tmp_path, geoms, ids, name="layer.geojson"):
+    import geopandas as gpd
+
+    from agent_runtime.file_store import create_output_file_from_path
+
+    gdf = gpd.GeoDataFrame({"geoid": ids}, geometry=geoms, crs="EPSG:4326")
+    p = tmp_path / name
+    gdf.to_file(p, driver="GeoJSON")
+    return create_output_file_from_path(p, filename=name)["file_id"]
+
+
+def test_embed_region_declines_a_polygon_layer_and_names_embed_zones(tmp_path):
+    """Observed: "get the embeddings for the area with geoid 17031330100" called BOTH
+    embed_zones and embed_region, and reported embed_region — a bbox tool that accepts a
+    file_id looks like the direct answer. It embedded the tract's bounding box; the tract
+    fills 69% of it, so 46% of what was embedded lay outside, mostly Lake Michigan."""
+    import json
+
+    from shapely.geometry import Polygon
+
+    from agent_runtime.rs_embed_tools import make_rs_embed_tools
+
+    # An L-shape fills well under its bounding box, which is the point.
+    poly = Polygon([(0, 0), (2, 0), (2, 1), (1, 1), (1, 2), (0, 2)])
+    fid = _stage_layer(tmp_path, [poly], ["z0"])
+    tools = {t.name: t for t in make_rs_embed_tools()}
+    out = json.loads(tools["embed_region"].func(file_id=fid, models=["gse"]))
+
+    assert out["ok"] is False
+    assert out["use_instead"] == "embed_zones"
+    assert "RECTANGLE" in out["error"] and "%" in out["error"]
+    assert out["bounding_box"], "the box is still reported for a deliberate rectangle"
+
+
+def test_the_redirect_still_leaves_a_way_to_get_a_pixel_image(tmp_path):
+    """embed_zones returns vectors, not a picture, so refusing the polygon must not close the
+    only image route — the hint has to say how to still get one, and that it is the rectangle."""
+    import json
+
+    from shapely.geometry import Polygon
+
+    from agent_runtime.rs_embed_tools import make_rs_embed_tools
+
+    fid = _stage_layer(tmp_path, [Polygon([(0, 0), (2, 0), (2, 1), (1, 1), (1, 2), (0, 2)])],
+                       ["z0"])
+    tools = {t.name: t for t in make_rs_embed_tools()}
+    hint = json.loads(tools["embed_region"].func(file_id=fid, models=["gse"]))["hint"]
+
+    assert "bbox=" in hint, "must name the parameter that still yields an image"
+    assert "rectangle" in hint.lower(), "and say the image is wider than the shape"
+
+
+def test_an_explicit_bbox_is_still_honoured():
+    import json
+
+    from agent_runtime.rs_embed_tools import make_rs_embed_tools
+
+    tools = {t.name: t for t in make_rs_embed_tools()}
+    out = json.loads(tools["embed_region"].func(bbox=[-87.63, 41.84, -87.60, 41.87],
+                                                models=["definitely-not-a-model"]))
+    assert "unknown model" in out["error"], "the region check must be past, not blocking"
+
+
+def test_a_point_layer_may_still_use_its_extent(tmp_path):
+    """A point cloud has no shape to respect, so its extent is a fair reading of the area."""
+    from shapely.geometry import Point
+
+    from agent_runtime.rs_embed_tools import _resolve_bbox
+
+    fid = _stage_layer(tmp_path, [Point(0, 0), Point(1, 1)], ["a", "b"], name="pts.geojson")
+    got = _resolve_bbox(None, None, None, fid, 2048.0, polygon_extent_ok=False)
+    assert isinstance(got, list) and len(got) == 4
