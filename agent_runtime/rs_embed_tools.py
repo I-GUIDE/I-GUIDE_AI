@@ -81,6 +81,40 @@ def _mercator_square(lon: float, lat: float, buffer_m: float) -> List[float]:
     return [round(minlon, 6), round(minlat, 6), round(maxlon, 6), round(maxlat, 6)]
 
 
+def _vector_extent(file_id: str) -> Optional[Dict[str, Any]]:
+    """WGS84 bbox of an uploaded vector dataset, plus what its geometry IS.
+
+    The geometry kind decides whether a bounding box is a fair reading of "this area": a
+    point cloud has no shape to respect, a polygon layer does.
+    """
+    try:
+        from agent_runtime.langchain_geo_tools import _resolve, read_vector
+
+        path, _rec = _resolve(file_id)
+        gdf = read_vector(path)
+        if getattr(gdf, "crs", None) is not None:
+            gdf = gdf.to_crs("EPSG:4326")
+        b = [float(v) for v in gdf.total_bounds]
+        if not all(v == v for v in b):
+            return None
+        kinds = {str(k) for k in gdf.geometry.geom_type.unique()}
+        shaped = bool(kinds & {"Polygon", "MultiPolygon", "LineString", "MultiLineString"})
+        fill = None
+        if shaped:
+            try:
+                m = gdf.to_crs("EPSG:3857")
+                total = float(m.geometry.area.sum())
+                bx = m.total_bounds
+                env = float(bx[2] - bx[0]) * float(bx[3] - bx[1])
+                fill = round(total / env, 4) if env > 0 and total > 0 else None
+            except Exception:  # noqa: BLE001
+                fill = None
+        return {"bounds": [round(v, 6) for v in b], "geom_kinds": sorted(kinds),
+                "features": int(len(gdf)), "shaped": shaped, "fill_fraction": fill}
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _bounds_of_file(file_id: str) -> Optional[List[float]]:
     """WGS84 bbox of an uploaded vector dataset, or None."""
     try:
@@ -97,7 +131,8 @@ def _bounds_of_file(file_id: str) -> Optional[List[float]]:
 
 
 def _resolve_bbox(bbox: Optional[List[float]], lon: Optional[float], lat: Optional[float],
-                  file_id: Optional[str], buffer_m: float) -> Any:
+                  file_id: Optional[str], buffer_m: float,
+                  polygon_extent_ok: bool = True) -> Any:
     """Return ``[minlon, minlat, maxlon, maxlat]`` or an error dict naming the options."""
     if bbox:
         vals = [float(v) for v in bbox]
@@ -112,9 +147,28 @@ def _resolve_bbox(bbox: Optional[List[float]], lon: Optional[float], lat: Option
     if lon is not None and lat is not None:
         return _mercator_square(float(lon), float(lat), buffer_m)
     if file_id:
-        b = _bounds_of_file(file_id)
-        if b:
-            return b
+        info = _vector_extent(file_id)
+        if info and info["shaped"] and not polygon_extent_ok:
+            # Observed: asked for "the embeddings for the area with geoid 17031330100", the
+            # agent called BOTH embed_zones and this tool, and reported this one — because a
+            # bbox tool that accepts a file_id looks like the direct answer. It embedded the
+            # tract's bounding box: the tract fills 69% of it, so 46% of what was embedded was
+            # outside the tract, most of it Lake Michigan. Name the tool that keeps the shape.
+            pct = f"{info['fill_fraction'] * 100:.0f}%" if info.get("fill_fraction") else "part"
+            return {"error": f"{file_id} contains {info['features']} "
+                             f"{'/'.join(info['geom_kinds'])} feature(s), and this tool embeds a "
+                             f"RECTANGLE — the shapes cover only {pct} of their bounding box, so "
+                             f"the rest of the rectangle would be embedded too.",
+                    "use_instead": "embed_zones",
+                    "hint": "For the VECTOR of each shape use embed_zones(file_id=..., "
+                            "zone_id_field=...), which averages only the pixels inside it. For a "
+                            "pixel-level PCA PICTURE, call this tool again with an explicit "
+                            "bbox=[minlon, minlat, maxlon, maxlat] — the image will then be of "
+                            "that rectangle, which is wider than the shape, and the answer "
+                            "should say so.",
+                    "bounding_box": info["bounds"]}
+        if info:
+            return info["bounds"]
         return {"error": f"could not read a geographic extent from {file_id}",
                 "hint": "Pass bbox=[minlon, minlat, maxlon, maxlat], or lon/lat for a point."}
     return {"error": "no region given",
@@ -223,10 +277,11 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
         colour. Also saves a downloadable .npz holding the real vectors for reuse.
 
         Region: pass `bbox` [minlon, minlat, maxlon, maxlat] (what the map's Region tool gives),
-        or `lon`+`lat` for a point (a `buffer_m` square around it), or `file_id` of an uploaded
-        layer to use its extent. `start`/`end` are months, "YYYY-MM".
+        or `lon`+`lat` for a point (a `buffer_m` square around it). A `file_id` is accepted
+        only for POINT layers; for polygons use embed_zones, which keeps their shape.
+        `start`/`end` are months, "YYYY-MM".
         """
-        box = _resolve_bbox(bbox, lon, lat, file_id, buffer_m)
+        box = _resolve_bbox(bbox, lon, lat, file_id, buffer_m, polygon_extent_ok=False)
         if isinstance(box, dict):
             return json.dumps({"ok": False, **box})
 
@@ -629,7 +684,11 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                     year: int = 2022, clusters: int = 5, tile_px: int = 200,
                     max_tiles: int = 24, name: Optional[str] = None,
                     sibling_file_ids: Optional[List[str]] = None) -> str:
-        """Give every POLYGON its own satellite-embedding vector, and map the result.
+        """Embed one or many POLYGONS — the pixels INSIDE each shape — and map the result.
+
+        This is the tool for "the embedding of this area" whenever the area is a shape rather
+        than a rectangle, whether the layer holds one feature or eight hundred. embed_region
+        embeds a RECTANGLE, which for a lakefront polygon also takes in open water.
 
         Divides the polygons' area into pixels, embeds each pixel with a remote-sensing
         foundation model, and averages the pixels that fall INSIDE each polygon — so each
@@ -733,6 +792,18 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                             "matched a polygon in the layer. Say the vectors were computed but "
                             "not mapped — do not describe a map.")
 
+        # One zone (or a few) is the commonest "embed this area" request, and a path to a CSV
+        # does not answer it — which is why the model went looking for a tool that returned a
+        # vector and found the bounding-box one.
+        inline = []
+        if len(with_px) <= 5:
+            for z in with_px:
+                vec = np.asarray(z["mean"], dtype=float)
+                inline.append({"zone_id": z["zone_id"], "pixels": z["pixels"],
+                               "area_km2": z["area_km2"], "dim": int(vec.size),
+                               "vector_norm": round(float(np.linalg.norm(vec)), 4),
+                               "vector_first_10": [round(float(v), 6) for v in vec[:10]]})
+
         out: Dict[str, Any] = {
             "ok": True, "model": model, "year": int(year), "dims": dims,
             "zones_total": res["zones_total"], "zones_with_pixels": res["zones_with_pixels"],
@@ -754,6 +825,8 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                                 f"tiles — zones outside those tiles have no pixels")
         if res.get("pixel_size_warnings"):
             out["pixel_size_warnings"] = res["pixel_size_warnings"]
+        if inline:
+            out["zone_vectors"] = inline
         if res.get("tile_errors"):
             out["tile_errors"] = res["tile_errors"]
         if cluster_note:
