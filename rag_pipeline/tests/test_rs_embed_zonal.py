@@ -518,3 +518,95 @@ def test_a_point_layer_may_still_use_its_extent(tmp_path):
     fid = _stage_layer(tmp_path, [Point(0, 0), Point(1, 1)], ["a", "b"], name="pts.geojson")
     got = _resolve_bbox(None, None, None, fid, 2048.0, polygon_extent_ok=False)
     assert isinstance(got, list) and len(got) == 4
+
+
+def _tiny_png_data_uri(w=4, h=3):
+    import base64
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGBA", (w, h), (10, 120, 90, 255)).save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def test_the_pixel_image_asked_for_and_carried_back(tmp_path, monkeypatch):
+    """A 64-number average does not answer "what does this area look like to the model" — the
+    picture does, and it was the half that went missing when the sweep moved behind the
+    service. The request must ask for it and the result must carry it."""
+    import agent_runtime.rs_embed_tools as T
+
+    sent = {}
+    reply = _service_reply()
+    reply["image"] = {"png": _tiny_png_data_uri(), "bounds": [-87.61, 41.82, -87.60, 41.83],
+                      "size_px": [3, 4], "pixels_shown": 7, "colour": "PCA to RGB"}
+    monkeypatch.setattr(T, "_svc", lambda p_, body=None, **k: sent.update(body=body) or reply)
+
+    out = T.run_zonal_worker({"polygons_path": str(_two_squares(tmp_path)),
+                              "zone_id_field": "geoid", "clusters": 2})
+    assert sent["body"]["image"] is True, "the picture has to be requested to arrive"
+    assert out["image"]["png"].startswith("data:image/png;base64,")
+    assert out["image"]["bounds"] == [-87.61, 41.82, -87.60, 41.83]
+
+
+def test_embed_zones_delivers_the_picture_and_the_groups(tmp_path, monkeypatch):
+    """Both views, as before the service move: the pixels the vectors came from, and the zones
+    grouped by those vectors. Delivering only the group colour hid the actual data."""
+    import geopandas as gpd
+    from shapely.geometry import box
+
+    import agent_runtime.file_store as FS
+    import agent_runtime.langchain_geo_tools as G
+    import agent_runtime.rs_embed_tools as T
+
+    gdf = gpd.GeoDataFrame({"geoid": ["a", "b"],
+                            "geometry": [box(-87.61, 41.82, -87.605, 41.83),
+                                         box(-87.605, 41.82, -87.60, 41.83)]}, crs="EPSG:4326")
+    src = tmp_path / "two.geojson"
+    gdf.to_file(src, driver="GeoJSON")
+
+    monkeypatch.setattr(G, "_stage_vector_source", lambda *a, **k: (str(src), None))
+    monkeypatch.setattr(G, "_index_attached", lambda *a, **k: {})
+    monkeypatch.setattr(FS, "create_output_file_from_path",
+                        lambda p, filename=None: {"file_id": f"id_{filename}", "filename": filename,
+                                                  "download_url": f"/files/{filename}",
+                                                  "size_bytes": 10})
+    reply = {"ok": True, "model": "gse", "year": 2022, "zones": 2, "dim": 3,
+             "rows": [{"zone_id": "a", "pixels": 100, "area_km2": 1.0,
+                       "e000": 1.0, "e001": 0.0, "e002": 0.0},
+                      {"zone_id": "b", "pixels": 120, "area_km2": 1.1,
+                       "e000": 0.0, "e001": 1.0, "e002": 0.0}],
+             "image": {"png": _tiny_png_data_uri(), "bounds": [-87.61, 41.82, -87.60, 41.83],
+                       "size_px": [3, 4], "pixels_shown": 220, "colour": "PCA to RGB"},
+             "meta": {"model": "gse", "dims": 3, "bands": [], "scale_m": 10.0,
+                      "pixel_ground_m": 7.44, "tiles_planned": 1, "tiles_fetched": 1,
+                      "tiles_capped": False, "zone_id_field": "geoid", "zones_total": 2,
+                      "zones_with_pixels": 2, "tile_errors": [], "pixel_size_warnings": []}}
+    monkeypatch.setattr(T, "_svc", lambda *a, **k: reply)
+
+    tool = {t.name: t for t in T.make_rs_embed_zonal_tools()}["embed_zones"]
+    out = json.loads(tool.func(file_id="file_x", zone_id_field="geoid", model="gse"))
+
+    assert out["ok"] is True and out["on_map"] is True
+    kinds = [layer["render"] for layer in out["map_layers"]]
+    assert kinds == ["raster", "categories"], f"both views must be delivered, got {kinds}"
+    assert out["map_layers"][0]["bounds"] == [-87.61, 41.82, -87.60, 41.83]
+    assert out["pixel_image"]["pixels_shown"] == 220
+    assert "image_note" not in out
+
+
+def test_a_declined_picture_says_why_and_what_would_get_one(tmp_path, monkeypatch):
+    """Too large to render is a legitimate answer — but the vectors still stand, and an
+    unexplained missing picture reads as a failed analysis."""
+    import agent_runtime.rs_embed_tools as T
+
+    reply = _service_reply()
+    reply["image"] = {"error": "the zones span about 25,800,000 pixels at 10 m, past the "
+                               "4,000,000 this route will request in one call",
+                      "hint": "The per-zone vectors are unaffected. Embed fewer zones."}
+    monkeypatch.setattr(T, "_svc", lambda *a, **k: reply)
+    out = T.run_zonal_worker({"polygons_path": str(_two_squares(tmp_path)),
+                              "zone_id_field": "geoid", "clusters": 2})
+    assert out["ok"] is True, "the vectors are the answer; the picture is extra"
+    assert "25,800,000" in out["image"]["error"] and out["image"]["hint"]

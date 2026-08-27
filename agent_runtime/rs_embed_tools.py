@@ -160,11 +160,12 @@ def _resolve_bbox(bbox: Optional[List[float]], lon: Optional[float], lat: Option
                              f"RECTANGLE — the shapes cover only {pct} of their bounding box, so "
                              f"the rest of the rectangle would be embedded too.",
                     "use_instead": "embed_zones",
-                    "hint": "For the VECTOR of each shape use embed_zones(file_id=..., "
-                            "zone_id_field=...), which averages only the pixels inside it. For a "
-                            "pixel-level PCA PICTURE, call this tool again with an explicit "
-                            "bbox=[minlon, minlat, maxlon, maxlat] — the image will then be of "
-                            "that rectangle, which is wider than the shape, and the answer "
+                    "hint": "Use embed_zones(file_id=..., zone_id_field=...): it averages only "
+                            "the pixels inside each shape AND returns a pixel-level PCA picture "
+                            "cut to the same shape, so it answers both halves of the question. "
+                            "Call this tool again with an explicit bbox=[minlon, minlat, maxlon, "
+                            "maxlat] only when a rectangle is what you actually want — the image "
+                            "will then be of that rectangle, wider than the shape, and the answer "
                             "should say so.",
                     "bounding_box": info["bounds"]}
         if info:
@@ -605,6 +606,10 @@ def run_zonal_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         "zones_geojson": json.loads(sending.to_json()),
         "model": model, "year": year, "zone_id_field": id_field,
         "tile_px": int(payload.get("tile_px") or 256),
+        # The pixels themselves, masked to the zones. A 64-number average does not answer
+        # "what does this area look like to the model", and the service declines the render
+        # rather than degrade it when the extent is too large for one request.
+        "image": bool(payload.get("image", True)),
     }
     if payload.get("max_tiles"):
         body["max_tiles"] = int(payload["max_tiles"])
@@ -659,12 +664,10 @@ def run_zonal_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         "tile_errors": list(meta.get("tile_errors") or []),
         "pixel_size_warnings": list(meta.get("pixel_size_warnings") or []),
         "zones": zones,
-        # The pixel-level raster was a by-product of holding the whole grid in memory here.
-        # The service aggregates and returns vectors, so that view is not produced on this
-        # route; embed_region still renders a PCA-RGB image for a bbox.
-        "image": {"error": "the zones service returns aggregated vectors, so the pixel-level "
-                           "image is not produced on this route — embed_region renders one "
-                           "for a bbox if the pixels themselves are the point"},
+        # The PCA-RGB picture of the pixels inside the shapes, rendered by the service
+        # alongside the sweep and cut to the same polygons with the same rasterisation, so
+        # the picture is of the pixels the vectors were computed from.
+        "image": res.get("image") or {"error": "the service returned no pixel image"},
         "error": None if covered else "no zone received any pixels",
     }
     if not covered:
@@ -697,7 +700,8 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
         GeoPackage.
 
         Returns a CSV of per-zone vectors ready for machine learning (use fit_zone_model),
-        and puts the zones on the map grouped into `clusters` look-alike groups. Each zone
+        and puts TWO things on the map: a PCA-RGB picture of the pixels themselves, cut to the
+        shapes, and the zones grouped into `clusters` look-alike groups. Each zone
         also carries `pixels` and `area_km2` — its support — and because the pixel count is
         there, the per-zone SUM is recoverable exactly, so zones roll up to a coarser
         partition without error.
@@ -728,7 +732,7 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                                 "model": model, "year": int(year), "tile_px": int(tile_px),
                                 "max_tiles": int(max_tiles),
                                 "clusters": max(2, min(int(clusters), len(_CLUSTER_COLORS))),
-                                "image": True, "out_png": str(png_path)})
+                                "image": True})
         if not res.get("ok"):
             return json.dumps({"ok": False, **{k: v for k, v in res.items() if k != "zones"}})
 
@@ -836,9 +840,14 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
         # "the embedding of these polygons" and getting only a group colour hid the actual data.
         layers = []
         img = res.get("image") or {}
-        if img.get("path") and Path(img["path"]).exists() and img.get("bounds"):
-            rec_png = create_output_file_from_path(Path(img["path"]),
-                                                   filename=Path(img["path"]).name)
+        rec_png = None
+        if img.get("bounds"):
+            if img.get("png"):                       # base64 from the service
+                rec_png = _save_png(str(img["png"]), png_path.stem)
+            elif img.get("path") and Path(img["path"]).exists():
+                rec_png = create_output_file_from_path(Path(img["path"]),
+                                                       filename=Path(img["path"]).name)
+        if rec_png:
             out["pixel_image"] = {"file_id": rec_png["file_id"],
                                   "download_url": rec_png.get("download_url"),
                                   "size_bytes": rec_png.get("size_bytes"),
@@ -848,7 +857,9 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
             layers.append(_raster_layer(rec_png, [float(v) for v in img["bounds"]],
                                         f"{model} pixel embedding in zones"))
         elif img.get("error"):
-            out["image_note"] = img["error"]
+            # Say why there is no picture, and what would get one — the vectors are unaffected
+            # either way, and an unexplained absence reads as a failed analysis.
+            out["image_note"] = " ".join(str(img[k]) for k in ("error", "hint") if img.get(k))
         if layer:
             layers.append(layer)
         if layers:
