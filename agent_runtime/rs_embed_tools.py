@@ -36,21 +36,23 @@ _DEFAULT_BUFFER_M = 2048          # matches the service's own point footprint
 _MAX_MODELS_PER_CALL = 5
 
 
-def _svc(path: str, payload: Optional[Dict[str, Any]] = None, *, method: str = "POST") -> Dict[str, Any]:
+def _svc(path: str, payload: Optional[Dict[str, Any]] = None, *, method: str = "POST",
+         timeout: Optional[float] = None) -> Dict[str, Any]:
     """Call the rs-embed service, or return an error dict that says what to do."""
     import requests
 
     url = f"{RS_EMBED_URL}{path}"
+    timeout = float(timeout or _TIMEOUT_S)
     try:
-        r = (requests.get(url, timeout=_TIMEOUT_S) if method == "GET"
-             else requests.post(url, json=payload or {}, timeout=_TIMEOUT_S))
+        r = (requests.get(url, timeout=timeout) if method == "GET"
+             else requests.post(url, json=payload or {}, timeout=timeout))
     except requests.exceptions.ConnectionError:
         return {"error": f"the rs-embed service is not reachable at {RS_EMBED_URL}",
                 "hint": "Start it with: python -m uvicorn server:app --app-dir examples/webapp "
                         "--port 8077 (from the rs-embed repo), or set RS_EMBED_URL to where it runs. "
                         "Without it no embedding tool can run — say so rather than inventing values."}
     except requests.exceptions.Timeout:
-        return {"error": f"the rs-embed service did not answer within {_TIMEOUT_S:.0f}s",
+        return {"error": f"the rs-embed service did not answer within {timeout:.0f}s",
                 "hint": "On-the-fly models download checkpoints on first use. Retry, use a smaller "
                         "region, or use a precomputed model (gse / tessera / copernicus)."}
     if r.status_code >= 400:
@@ -445,11 +447,7 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
 
 
 # --- zonal embeddings: pixels inside a polygon, aggregated ----------------------
-RS_EMBED_PYTHON = os.getenv("RS_EMBED_PYTHON", "")
 _ZONAL_TIMEOUT_S = float(os.getenv("RS_EMBED_ZONAL_TIMEOUT_S", "900"))
-# Path to a checkout of rs-embed whose `src` should win over whatever the interpreter's
-# editable install points at — how to run a fixed version without touching that checkout.
-RS_EMBED_SRC = os.getenv("RS_EMBED_SRC", "")
 # Distinct, colour-blind-safe hues for cluster classes (Okabe-Ito, alpha added).
 _CLUSTER_COLORS = [
     [0, 114, 178, 190], [230, 159, 0, 190], [0, 158, 115, 190], [204, 121, 167, 190],
@@ -457,46 +455,139 @@ _CLUSTER_COLORS = [
 ]
 
 
-def _zonal_python() -> Optional[str]:
-    """Interpreter that can import rs_embed. The agent's own cannot (deliberately)."""
-    if RS_EMBED_PYTHON:
-        return RS_EMBED_PYTHON
-    for guess in ("/Users/yfkang/Documents/Github/rs-embed/rsembed/bin/python",):
-        if Path(guess).exists():
-            return guess
-    return None
+def _dimension_keys(rows: List[Dict[str, Any]]) -> List[str]:
+    """The eNNN columns, in dimension order.
+
+    Sorted by the number, not the string: the service zero-pads today, so lexicographic
+    order happens to agree, but a rename to unpadded ``e9``/``e10`` would silently transpose
+    two dimensions of every vector — the kind of wrong answer nothing downstream can detect.
+    Read from the first row that HAS them, because an uncovered zone carries none.
+    """
+    for row in rows:
+        keys = [k for k in row if str(k).startswith("e") and str(k)[1:].isdigit()]
+        if keys:
+            return sorted(keys, key=lambda k: int(str(k)[1:]))
+    return []
 
 
 def run_zonal_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Run the zonal worker under the rs-embed interpreter; return its JSON result."""
-    import subprocess
+    """Per-zone embeddings from the rs-embed SERVICE, in the shape the tools already expect.
 
-    py = _zonal_python()
-    if not py:
-        return {"ok": False,
-                "error": "no interpreter with rs_embed installed",
-                "hint": "Set RS_EMBED_PYTHON to a python that can `import rs_embed` "
-                        "(the rs-embed repo's venv), then retry."}
-    worker = str(Path(__file__).with_name("rs_embed_zonal_worker.py"))
-    out = Path(tempfile.mkdtemp(prefix="rsembed_zonal_")) / "result.json"
-    payload = {**payload, "out_path": str(out)}
-    # The agent process has torch loaded, so a second OpenMP runtime in a child that
-    # inherits its state raised "OMP: Error #179: pthread_mutex_init failed" and wedged the
-    # turn. Pin the child to one OpenMP thread and let a duplicate runtime load.
-    env = {**os.environ, "OMP_NUM_THREADS": "1", "KMP_INIT_AT_FORK": "FALSE",
-           "KMP_DUPLICATE_LIB_OK": "TRUE"}
-    if RS_EMBED_SRC:
-        env["PYTHONPATH"] = RS_EMBED_SRC + os.pathsep + env.get("PYTHONPATH", "")
+    This used to fork a subprocess under a second interpreter that had ``rs_embed``
+    installed, because the library had no zones API: the tile sweep, the EPSG:3857 affine,
+    the rasterising and the per-zone accumulation were all done here. Two things followed.
+    The interpreter was located by a hardcoded path that existed on one laptop and nowhere
+    else, so the deployed container answered "the rs_embed runtime is unavailable" for every
+    request. And forking a process that already had torch loaded raised an OpenMP mutex
+    failure that wedged the turn.
+
+    ``rs_embed.embed_zones`` does the sweep now, so it belongs behind the service — where the
+    model runtime, the Earth Engine credentials and the warm weights cache already are — and
+    this is one HTTP call. The result keeps the old keys, so ``embed_zones`` and
+    ``fit_zone_model`` downstream needed no edits.
+    """
+    if payload.get("mode") == "fit":
+        # Fitting a ridge on vectors that already exist is pandas, numpy and a linear solve
+        # over a CSV: no model runtime, no Earth Engine, nothing the service owns. It stays
+        # in this process rather than crossing the boundary for nothing — which is why the
+        # worker's fit path is scikit-learn-free: its k-means segfaults a process that has
+        # torch loaded, and a segfault takes the worker down, not just the turn.
+        from agent_runtime.rs_embed_zonal_worker import fit as _fit
+        return _fit(payload)
+
+    import geopandas as gpd
+
+    id_field = payload.get("zone_id_field")
+    model = str(payload.get("model") or "gse")
+    year = int(payload.get("year") or 2022)
     try:
-        proc = subprocess.run([py, worker], input=json.dumps(payload), text=True,
-                              capture_output=True, timeout=_ZONAL_TIMEOUT_S, env=env)
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": f"zonal embedding exceeded {_ZONAL_TIMEOUT_S:.0f}s",
-                "hint": "Lower max_tiles, raise tile_px, or pass fewer zones."}
-    if not out.exists():
-        tail = (proc.stderr or proc.stdout or "")[-600:]
-        return {"ok": False, "error": "the zonal worker produced no result", "detail": tail}
-    return json.loads(out.read_text())
+        gdf = gpd.read_file(payload.get("polygons_path"))
+        if gdf.crs is None:
+            gdf = gdf.set_crs("EPSG:4326")
+        gdf = gdf.to_crs("EPSG:4326")
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"could not read the polygons: {exc}"}
+    if id_field and id_field not in gdf.columns:
+        return {"ok": False,
+                "error": f"zone_id_field {id_field!r} is not in the layer",
+                "available_columns": [c for c in gdf.columns if c != "geometry"][:40]}
+
+    # Only the identifier travels with the geometry. The service keys zones by row index when
+    # no field is named, and dropping columns cannot reorder rows, so the mapping is safe —
+    # while a tract layer's forty attribute columns would otherwise be re-encoded into the
+    # request body for nothing.
+    keep = [id_field, "geometry"] if id_field else ["geometry"]
+    body: Dict[str, Any] = {
+        "zones_geojson": json.loads(gdf[keep].to_json()),
+        "model": model, "year": year, "zone_id_field": id_field,
+        "tile_px": int(payload.get("tile_px") or 256),
+    }
+    if payload.get("max_tiles"):
+        body["max_tiles"] = int(payload["max_tiles"])
+    res = _svc("/api/zones", body, timeout=_ZONAL_TIMEOUT_S)
+    if res.get("error") or not res.get("ok"):
+        out = {"ok": False,
+               "error": str(res.get("error") or "the zones service returned no result")[:400]}
+        # _svc's hint names the next action (start the service, point RS_EMBED_URL at it).
+        # Dropping it turned a fixable failure into "unavailable" with nowhere to go.
+        for key in ("hint", "detail"):
+            if res.get(key):
+                out[key] = res[key]
+        return out
+
+    meta = res.get("meta") or {}
+    rows = res.get("rows") or []
+    dim_keys = _dimension_keys(rows)
+    zones: List[Dict[str, Any]] = []
+    for row in rows:
+        pixels = int(row.get("pixels") or 0)
+        zones.append({
+            "zone_id": str(row.get("zone_id")),
+            "pixels": pixels,
+            "area_km2": float(row.get("area_km2") or 0.0),
+            "mean": [float(row.get(k) or 0.0) for k in dim_keys] if pixels else None,
+        })
+    covered = sum(1 for z in zones if z["pixels"])
+    if covered:
+        # One clustering implementation, shared with the standalone worker: the map's groups
+        # are L2-normalised k-means over the zone vectors, 1-based because the layer treats
+        # a missing group as "not embedded".
+        from agent_runtime.rs_embed_zonal_worker import assign_look_alike_groups
+        assign_look_alike_groups(zones, int(payload.get("clusters") or 0))
+
+    out: Dict[str, Any] = {
+        "ok": covered > 0,
+        "model": str(meta.get("model") or model),
+        "year": year,
+        "dims": int(meta.get("dims") or len(dim_keys)),
+        "bands": list(meta.get("bands") or []),
+        "zone_id_field": meta.get("zone_id_field", id_field),
+        # zones_total counts the polygons SENT, not the rows returned: a zone no tile reached
+        # comes back with pixels == 0 and must still be accounted for.
+        "zones_total": int(meta.get("zones_total") or len(zones)),
+        "zones_with_pixels": int(meta.get("zones_with_pixels") or covered),
+        # scale_m is EPSG:3857 metres; pixel_ground_m is what a pixel actually covers.
+        "scale_m": meta.get("scale_m"),
+        "pixel_ground_m": meta.get("pixel_ground_m"),
+        "tiles_planned": meta.get("tiles_planned"),
+        "tiles_fetched": meta.get("tiles_fetched"),
+        "tiles_capped": bool(meta.get("tiles_capped")),
+        "tile_errors": list(meta.get("tile_errors") or []),
+        "pixel_size_warnings": list(meta.get("pixel_size_warnings") or []),
+        "zones": zones,
+        # The pixel-level raster was a by-product of holding the whole grid in memory here.
+        # The service aggregates and returns vectors, so that view is not produced on this
+        # route; embed_region still renders a PCA-RGB image for a bbox.
+        "image": {"error": "the zones service returns aggregated vectors, so the pixel-level "
+                           "image is not produced on this route — embed_region renders one "
+                           "for a bbox if the pixels themselves are the point"},
+        "error": None if covered else "no zone received any pixels",
+    }
+    if not covered:
+        out["hint"] = ("Check that the polygons are where you think they are, that the model "
+                       "has coverage for this year, and that max_tiles is not cutting the "
+                       "sweep short before it reaches them.")
+    return out
 
 
 def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None) -> List[Any]:
@@ -519,8 +610,9 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
 
         Returns a CSV of per-zone vectors ready for machine learning (use fit_zone_model),
         and puts the zones on the map grouped into `clusters` look-alike groups. Each zone
-        also carries `pixels` and `area_km2` — its support — plus the raw SUM, so zones can
-        be rolled up to a coarser partition exactly.
+        also carries `pixels` and `area_km2` — its support — and because the pixel count is
+        there, the per-zone SUM is recoverable exactly, so zones roll up to a coarser
+        partition without error.
         """
         tmp = None
         try:
@@ -567,10 +659,9 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
         out_csv.write_text("\n".join(lines) + "\n", encoding="utf-8")
         csv_rec = create_output_file_from_path(out_csv, filename=out_csv.name)
 
-        # --- the map layer: look-alike groups, clustered BY THE WORKER (sklearn must not
-        # run in this process; it already has torch loaded and a second OpenMP runtime
-        # crashed the turn). Groups are the one view of a 64-dim vector worth looking at —
-        # a choropleth of a single dimension is a picture of an arbitrary axis.
+        # --- the map layer: look-alike groups. Groups are the one view of a 64-dim vector
+        # worth looking at — a choropleth of a single dimension is a picture of an arbitrary
+        # axis, and it looks like a result.
         layer = None
         cluster_note = None
         try:
@@ -686,8 +777,8 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
             gj = Path(tempfile.mkdtemp(prefix="rsembed_fit_")) / artifact_name(
                 name, "geojson", default=f"{label_column}_predicted")
 
-            # Every numeric step runs in the worker's interpreter: sklearn in this process
-            # meets a second OpenMP runtime alongside torch and takes the turn down.
+            # Fitting needs no model runtime and no Earth Engine, so it runs here rather
+            # than behind the service — see run_zonal_worker's "fit" branch.
             res = run_zonal_worker({"mode": "fit", "vectors_csv": str(csv_path),
                                     "polygons_path": str(poly_path),
                                     "label_column": label_column,
