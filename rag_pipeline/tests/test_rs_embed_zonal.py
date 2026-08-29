@@ -441,8 +441,7 @@ def test_embed_zones_puts_a_single_polygon_on_the_map(tmp_path, monkeypatch):
     assert out["vectors_csv"]["file_id"], "the CSV of per-zone vectors is the ML artifact"
     assert out.get("on_map") is True, "one polygon is still a map"
     layer = out["map_layer"]
-    assert layer["render"] == "categories" and layer["style_by"] == "look_alike_group"
-    assert layer["count"] == 1 and len(layer["legend"]) == 1
+    assert layer["count"] == 1 and layer["url"]
     assert "cluster_note" not in out, "nothing went wrong, so nothing to apologise for"
 
 
@@ -610,3 +609,88 @@ def test_a_declined_picture_says_why_and_what_would_get_one(tmp_path, monkeypatc
                               "zone_id_field": "geoid", "clusters": 2})
     assert out["ok"] is True, "the vectors are the answer; the picture is extra"
     assert "25,800,000" in out["image"]["error"] and out["image"]["hint"]
+
+
+def test_zone_ids_selects_without_carving_up_the_file_first(tmp_path, monkeypatch):
+    """Asked for one tract out of 801, the model extracted it into a new file with four
+    execute_code steps and then embedded that. Naming the ids is the same answer in one step,
+    and only the named zones may reach the service — the sweep is bounded by their extent."""
+    import agent_runtime.rs_embed_tools as T
+
+    sent = {}
+    monkeypatch.setattr(T, "_svc", lambda p_, body=None, **k: sent.update(body=body)
+                        or {"ok": True, "rows": [{"zone_id": "b", "pixels": 9, "area_km2": 1.0,
+                                                  "e000": 0.5}],
+                            "meta": {"dims": 1, "zones_total": 1, "zones_with_pixels": 1}})
+    out = T.run_zonal_worker({"polygons_path": str(_two_squares(tmp_path)),
+                              "zone_id_field": "geoid", "zone_ids": ["b"], "clusters": 2})
+    props = [f["properties"]["geoid"] for f in sent["body"]["zones_geojson"]["features"]]
+    assert props == ["b"], f"only the requested zone should be sent, got {props}"
+    assert out["ok"] is True
+
+
+def test_zone_ids_that_match_nothing_say_so_rather_than_embedding_everything(tmp_path, monkeypatch):
+    """Silently falling back to the whole layer would bill an 801-tract sweep for a typo."""
+    import agent_runtime.rs_embed_tools as T
+
+    called = []
+    monkeypatch.setattr(T, "_svc", lambda *a, **k: called.append(1) or _service_reply())
+
+    out = T.run_zonal_worker({"polygons_path": str(_two_squares(tmp_path)),
+                              "zone_id_field": "geoid", "zone_ids": ["nope"]})
+    assert out["ok"] is False and "zone_ids" in out["error"]
+    assert "drop zone_ids" in out["hint"]
+
+    out = T.run_zonal_worker({"polygons_path": str(_two_squares(tmp_path)),
+                              "zone_ids": ["a"]})
+    assert out["ok"] is False and "zone_id_field" in out["error"]
+    assert not called, "neither request could succeed, so neither was sent"
+
+
+def test_zone_ids_partly_missing_are_named_not_quietly_dropped(tmp_path, monkeypatch):
+    """"I asked for three and got two" is exactly what goes unnoticed."""
+    import agent_runtime.rs_embed_tools as T
+
+    monkeypatch.setattr(T, "_svc", lambda *a, **k: {
+        "ok": True, "rows": [{"zone_id": "a", "pixels": 9, "area_km2": 1.0, "e000": 0.5}],
+        "meta": {"dims": 1, "zones_total": 1, "zones_with_pixels": 1}})
+    out = T.run_zonal_worker({"polygons_path": str(_two_squares(tmp_path)),
+                              "zone_id_field": "geoid", "zone_ids": ["a", "ghost"]})
+    assert out["ok"] is True
+    assert out["zone_ids_not_found"] == ["ghost"]
+
+
+def test_a_single_zone_is_labelled_for_what_it_is_not_as_a_cluster_of_one(tmp_path, monkeypatch):
+    """"gse zone groups (k=1)" is a cluster analysis of one thing, with a one-entry legend
+    explaining nothing — and it did not read as the area that was asked about, so the model
+    added a second layer of the same polygon beside it."""
+    import geopandas as gpd
+    from shapely.geometry import box
+
+    import agent_runtime.file_store as FS
+    import agent_runtime.langchain_geo_tools as G
+    import agent_runtime.rs_embed_tools as T
+
+    gdf = gpd.GeoDataFrame({"geoid": ["17031330100"],
+                            "geometry": [box(-87.62, 41.85, -87.61, 41.86)]}, crs="EPSG:4326")
+    src = tmp_path / "one.geojson"
+    gdf.to_file(src, driver="GeoJSON")
+    monkeypatch.setattr(G, "_stage_vector_source", lambda *a, **k: (str(src), None))
+    monkeypatch.setattr(G, "_index_attached", lambda *a, **k: {})
+    monkeypatch.setattr(FS, "create_output_file_from_path",
+                        lambda p, filename=None: {"file_id": f"id_{filename}", "filename": filename,
+                                                  "download_url": f"/files/{filename}",
+                                                  "size_bytes": 10})
+    monkeypatch.setattr(T, "_svc", lambda *a, **k: {
+        "ok": True, "rows": [{"zone_id": "17031330100", "pixels": 50451, "area_km2": 2.793586,
+                              "e000": 0.1, "e001": 0.2}],
+        "meta": {"dims": 2, "zones_total": 1, "zones_with_pixels": 1, "scale_m": 10.0,
+                 "pixel_ground_m": 7.45, "tiles_planned": 1, "tiles_fetched": 1}})
+
+    tool = {t.name: t for t in T.make_rs_embed_zonal_tools()}["embed_zones"]
+    out = json.loads(tool.func(file_id="f", zone_id_field="geoid", model="gse"))
+
+    layer = out["map_layer"]
+    assert layer["render"] == "shapes", "one zone is not a categorical map"
+    assert "17031330100" in layer["label"] and "k=" not in layer["label"]
+    assert "legend" not in layer, "a legend of one class explains nothing"

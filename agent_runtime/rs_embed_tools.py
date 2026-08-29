@@ -592,6 +592,28 @@ def run_zonal_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
                             "number — but then use the same setting when fitting.",
                     "available_columns": [c for c in gdf.columns if c != "geometry"][:40]}
 
+    wanted = payload.get("zone_ids")
+    if wanted:
+        if not id_field:
+            return {"ok": False,
+                    "error": "zone_ids needs zone_id_field, or there is nothing to match them "
+                             "against",
+                    "hint": "Pass zone_id_field=<the column holding the identifier>, or drop "
+                            "zone_ids to embed every polygon in the layer."}
+        wanted = {str(z) for z in wanted}
+        gdf = gdf[gdf[id_field].astype(str).isin(wanted)].reset_index(drop=True)
+        if gdf.empty:
+            return {"ok": False,
+                    "error": f"none of the {len(wanted)} requested zone_ids are in "
+                             f"{id_field!r}",
+                    "hint": "Check the identifiers against the layer, or drop zone_ids to "
+                            "embed every polygon."}
+        missing = wanted - {str(v) for v in gdf[id_field]}
+        if missing:
+            # Embedding the ones that exist beats refusing the lot, but a silently short answer
+            # is how "I asked for five and got three" goes unnoticed.
+            payload = {**payload, "_missing_zone_ids": sorted(missing)[:10]}
+
     # Only the identifier travels with the geometry. The service keys zones by row index when
     # no field is named, and dropping columns cannot reorder rows, so the mapping is safe —
     # while a tract layer's forty attribute columns would otherwise be re-encoded into the
@@ -670,6 +692,8 @@ def run_zonal_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         "image": res.get("image") or {"error": "the service returned no pixel image"},
         "error": None if covered else "no zone received any pixels",
     }
+    if payload.get("_missing_zone_ids"):
+        out["zone_ids_not_found"] = payload["_missing_zone_ids"]
     if not covered:
         out["hint"] = ("Check that the polygons are where you think they are, that the model "
                        "has coverage for this year, and that max_tiles is not cutting the "
@@ -686,12 +710,18 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
     def embed_zones(file_id: str, zone_id_field: Optional[str] = None, model: str = "gse",
                     year: int = 2022, clusters: int = 5, tile_px: int = 200,
                     max_tiles: int = 24, name: Optional[str] = None,
+                    zone_ids: Optional[List[str]] = None,
                     sibling_file_ids: Optional[List[str]] = None) -> str:
         """Embed one or many POLYGONS — the pixels INSIDE each shape — and map the result.
 
         This is the tool for "the embedding of this area" whenever the area is a shape rather
         than a rectangle, whether the layer holds one feature or eight hundred. embed_region
         embeds a RECTANGLE, which for a lakefront polygon also takes in open water.
+
+        Asked for ONE area out of many — "the embedding for geoid 17031330100" against a file
+        of 801 tracts — pass `zone_ids=["17031330100"]` with `zone_id_field`. Do not extract
+        the polygon into a new file first: that is four extra steps, and the sweep is bounded
+        by the zones' own extent either way.
 
         Divides the polygons' area into pixels, embeds each pixel with a remote-sensing
         foundation model, and averages the pixels that fall INSIDE each polygon — so each
@@ -731,6 +761,7 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
         res = run_zonal_worker({"polygons_path": str(read_path), "zone_id_field": zone_id_field,
                                 "model": model, "year": int(year), "tile_px": int(tile_px),
                                 "max_tiles": int(max_tiles),
+                                "zone_ids": [str(z) for z in zone_ids] if zone_ids else None,
                                 "clusters": max(2, min(int(clusters), len(_CLUSTER_COLORS))),
                                 "image": True})
         if not res.get("ok"):
@@ -767,6 +798,11 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
             ids = ([str(v) for v in gdf[zone_id_field]]
                    if zone_id_field and zone_id_field in gdf.columns
                    else [str(i) for i in range(len(gdf))])
+            if zone_ids:
+                wanted = {str(z) for z in zone_ids}
+                rows = [i for i, zid in enumerate(ids) if zid in wanted]
+                gdf = gdf.iloc[rows].reset_index(drop=True)
+                ids = [ids[i] for i in rows]
             grouped = {z["zone_id"]: z for z in with_px if z.get("group")}
             keep = [i for i, zid in enumerate(ids) if zid in grouped]
             if keep:
@@ -780,13 +816,22 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                 sub.to_file(gj, driver="GeoJSON")
                 rec = create_output_file_from_path(gj, filename=gj.name)
                 present = sorted({str(v) for v in sub["look_alike_group"]})
-                layer = {"url": rec.get("download_url"),
-                         "label": f"{model} zone groups (k={len(present)})",
-                         "render": "categories", "style_by": "look_alike_group",
-                         "source": "analysis", "count": len(keep),
-                         "legend": [{"label": g,
-                                     "color": _CLUSTER_COLORS[i % len(_CLUSTER_COLORS)]}
-                                    for i, g in enumerate(present)]}
+                if len(keep) == 1:
+                    # "zone groups (k=1)" is a cluster analysis of one thing, and a legend with
+                    # a single entry explains nothing. Say which zone it is: the model was
+                    # adding a SECOND layer of the same polygon because this one did not read
+                    # as the area it had asked about.
+                    layer = {"url": rec.get("download_url"),
+                             "label": f"{model} embedded zone {sub['zone_id'].iloc[0]}",
+                             "render": "shapes", "source": "analysis", "count": 1}
+                else:
+                    layer = {"url": rec.get("download_url"),
+                             "label": f"{model} zone groups (k={len(present)})",
+                             "render": "categories", "style_by": "look_alike_group",
+                             "source": "analysis", "count": len(keep),
+                             "legend": [{"label": g,
+                                         "color": _CLUSTER_COLORS[i % len(_CLUSTER_COLORS)]}
+                                        for i, g in enumerate(present)]}
         except Exception as exc:  # noqa: BLE001
             cluster_note = f"zones computed but not mapped: {type(exc).__name__}: {exc}"[:200]
         if layer is None and cluster_note is None:
