@@ -823,7 +823,10 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                     # as the area it had asked about.
                     layer = {"url": rec.get("download_url"),
                              "label": f"{model} embedded zone {sub['zone_id'].iloc[0]}",
-                             "render": "shapes", "source": "analysis", "count": 1}
+                             # Outline, not fill: this layer sits over the pixel image of the
+                             # same polygon, and a filled one covers the picture it frames.
+                             "render": "shapes", "outline": True,
+                             "source": "analysis", "count": 1}
                 else:
                     layer = {"url": rec.get("download_url"),
                              "label": f"{model} zone groups (k={len(present)})",

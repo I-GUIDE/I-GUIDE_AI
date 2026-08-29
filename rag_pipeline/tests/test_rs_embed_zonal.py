@@ -694,3 +694,6 @@ def test_a_single_zone_is_labelled_for_what_it_is_not_as_a_cluster_of_one(tmp_pa
     assert layer["render"] == "shapes", "one zone is not a categorical map"
     assert "17031330100" in layer["label"] and "k=" not in layer["label"]
     assert "legend" not in layer, "a legend of one class explains nothing"
+    # It is drawn over the pixel image of the same polygon. Filled, it covers the picture it
+    # is framing — observed as a solid violet slab where the embedding had been.
+    assert layer["outline"] is True

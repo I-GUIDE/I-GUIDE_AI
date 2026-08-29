@@ -71,6 +71,7 @@ export interface MapLayerEvent {
   geojson?: import('geojson').FeatureCollection;
   url?: string;                 // fetch instead of inlining (large layers)
   render?: string;              // 'heatmap' | 'choropleth' | 'categories' | 'points' | 'shapes'
+  outline?: boolean;            // boundary only, so anything drawn beneath stays visible
   styleBy?: string;             // property to shade by (numeric, or a class name for 'categories')
   legend?: { label: string; color: [number, number, number, number] }[];
   style_by?: string;            // snake_case as the agent sends it
@@ -264,7 +265,7 @@ export async function streamChat(
             id: layer.id || 'agent-layer', source: layer.source || 'analysis',
             label: layer.label || 'Agent layer', count: layer.count,
             url: layer.url, render: layer.render, styleBy: layer.style_by ?? layer.styleBy,
-            legend: _legend(layer),
+            legend: _legend(layer), outline: layer.outline === true,
             sampled: !!layer.sampled, total: layer.total,
             // A raster layer is an image + its footprint; without bounds it cannot be placed.
             bounds: Array.isArray(layer.bounds) && layer.bounds.length === 4
@@ -279,7 +280,7 @@ export async function streamChat(
             count: layer.count,
             geojson: layer.geojson,
             render: layer.render, styleBy: layer.style_by ?? layer.styleBy,
-            legend: _legend(layer),
+            legend: _legend(layer), outline: layer.outline === true,
             sampled: !!layer.sampled, total: layer.total,
           });
         }
