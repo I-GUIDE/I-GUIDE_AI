@@ -67,3 +67,25 @@ def test_raster_without_bounds_is_dropped_not_shipped():
 
     assert build_map_layer("embed_region", json.dumps(
         {"map_layer": {"url": "/agent/files/f/download", "render": "raster"}})) is None
+
+
+def test_outline_survives_the_descriptor():
+    """build_map_layer builds a FIXED dict, so every field a tool sets has to be named here
+    or it is silently dropped. Cost of learning that: an agent flag and a client renderer that
+    both worked, and a zone that still came back as a violet slab over its own pixel image."""
+    import json
+
+    from agent_runtime.map_layers import build_map_layers
+
+    out = build_map_layers("embed_zones", json.dumps({
+        "ok": True,
+        "map_layer": {"url": "http://x/z.geojson", "label": "gse embedded zone 17031330100",
+                      "render": "shapes", "outline": True, "source": "analysis", "count": 1},
+    }))
+    assert len(out) == 1
+    assert out[0]["outline"] is True
+
+    plain = build_map_layers("add_map_layer", json.dumps({
+        "ok": True, "map_layer": {"url": "http://x/y.geojson", "render": "shapes"},
+    }))
+    assert plain[0]["outline"] is False, "a normal layer still fills"

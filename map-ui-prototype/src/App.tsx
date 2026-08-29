@@ -417,6 +417,10 @@ export default function App() {
             render: heat ? 'heatmap' : categorical ? 'categories' : 'geojson',
             styleBy: layer.styleBy,
             legend: categorical ? layer.legend : undefined,
+            // Boundary-only, for a layer whose job is to frame what is drawn beneath it.
+            // Dropped here once already: the flag reached the client and died in this call,
+            // so the zone came back as a violet slab over its own pixel image.
+            outline: layer.outline === true ? true : undefined,
             partial: layer.sampled && layer.total
               ? { shown: layer.count ?? fc.features.length, total: layer.total }
               : undefined,

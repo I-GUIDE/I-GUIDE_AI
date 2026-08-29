@@ -116,6 +116,10 @@ def build_map_layer(tool_name: str, output: Any) -> Optional[Dict[str, Any]]:
                 "render": render,
                 "style_by": ml.get("style_by"),
                 "count": ml.get("count"),
+                # Boundary-only. A layer drawn over a raster of its own polygon has to frame
+                # it, not cover it — and this dict is a fixed shape, so a flag the tool sets
+                # and the client honours still arrives as nothing unless it is named here.
+                "outline": bool(ml.get("outline")),
                 # Whether the layer is a SUBSET is part of the layer, not a remark in the
                 # answer text: the client shows "shown/total" from these. Dropping them here
                 # silently turned every sampled layer into one that looked complete.
