@@ -53,6 +53,7 @@ def run_supervisor_orchestration(query: str, chat_history: Optional[List[Any]], 
         code_fn=default_code_fn(
             llm=cfg.llm, skill_roots=cfg.skill_roots, code_exec=cfg.code_exec,
             input_file_ids=cfg.input_file_ids, code_peer=cfg.code_peer,
+            code_peer_model=cfg.code_peer_model,
         ),
         # The search NODE needs the allowlist too, so its no-platform-evidence web fallback
         # respects a request that excluded web_search.

@@ -18,7 +18,7 @@ export interface ChatMessage {
 export type Mode = 'live' | 'local';
 export interface AgentCfg { endpoint: string; uploadEndpoint: string; apiKey: string;
                             model?: string; provider?: string; reasoningEffort?: string;
-                            codePeer?: string }
+                            codePeer?: string; codePeerModel?: string }
 
 const RS_ACTIONS = [
   { label: 'Embed',   prompt: 'Embed this drawn region with the gse model for June–September 2022 and put the embedding on the map.' },
@@ -210,7 +210,12 @@ export function ChatPanel(p: Props) {
             {p.models?.code_peers && (
               <label>Code peer
                 <select value={p.cfg.codePeer || ''}
-                        onChange={(e) => p.onSetCfg({ ...p.cfg, codePeer: e.target.value })}>
+                        onChange={(e) => {
+                          // Drop a model chosen for the previous peer. Carrying 'opus'
+                          // onto a backend that never heard of it is how a stale
+                          // reasoning_effort used to 400 every later turn.
+                          p.onSetCfg({ ...p.cfg, codePeer: e.target.value, codePeerModel: '' });
+                        }}>
                   <option value="">
                     Server default ({p.models.code_peers.default})
                   </option>
@@ -224,6 +229,21 @@ export function ChatPanel(p: Props) {
                 </select>
               </label>
             )}
+            {/* Only for a peer that HAS selectable models, and only once one is chosen:
+                the built-in peer codes with whatever `Model` above already picked. */}
+            {(() => {
+              const peer = p.models?.code_peers?.peers.find((x) => x.id === p.cfg.codePeer);
+              if (!peer?.models?.length) return null;
+              return (
+                <label>Peer model
+                  <select value={p.cfg.codePeerModel || ''}
+                          onChange={(e) => p.onSetCfg({ ...p.cfg, codePeerModel: e.target.value })}>
+                    <option value="">Peer default{peer.model ? ` (${peer.model})` : ''}</option>
+                    {peer.models.map((m) => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                </label>
+              );
+            })()}
             <label className="wide">Chat endpoint
               <input value={p.cfg.endpoint} onChange={(e) => p.onSetCfg({ ...p.cfg, endpoint: e.target.value })} />
             </label>

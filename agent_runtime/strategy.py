@@ -38,6 +38,8 @@ class OrchestrationConfig:
     input_file_ids: Optional[List[str]] = None
     # Which code-peer backend this request wants; None falls back to AGENT_CODE_PEER.
     code_peer: Optional[str] = None
+    # Model for that peer when it is a CLI backend; None falls back to its own env default.
+    code_peer_model: Optional[str] = None
 
 
 # (query, chat_history, cfg) -> orchestration result dict (OrchestratorState keys)

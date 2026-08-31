@@ -335,8 +335,9 @@ def test_supervisor_code_fn_dispatches_to_claude(monkeypatch):
     monkeypatch.setenv("AGENT_CODE_PEER", "claude")
     called = {}
 
-    def fake_peer(query, evidence=None, state=None, input_file_ids=None):
+    def fake_peer(query, evidence=None, state=None, input_file_ids=None, model=None):
         called["query"] = query
+        called["model"] = model
         return {"answer": "ok", "tool_calls": [], "tool_results": []}
 
     monkeypatch.setattr(ccp, "run_claude_code_peer", fake_peer)
@@ -345,6 +346,10 @@ def test_supervisor_code_fn_dispatches_to_claude(monkeypatch):
     out = default_code_fn()("compute something", [], {})
     assert called["query"] == "compute something"
     assert out["answer"] == "ok"
+    assert called["model"] is None, "no per-request model means the peer's own default"
+
+    default_code_fn(code_peer_model="opus")("again", [], {})
+    assert called["model"] == "opus", "a chosen model reaches the peer"
 
 
 def test_a_per_request_choice_overrides_the_env_default(monkeypatch):
@@ -389,3 +394,21 @@ def test_langchain_is_a_real_choice_not_just_an_absent_one(monkeypatch):
     # CLI branch was skipped.
     with pytest.raises(Exception):
         default_code_fn(code_peer="langchain")("q", [], {})
+
+
+def test_a_requested_model_overrides_the_env_default(monkeypatch):
+    """The picker offers aliases, so a deployment pinned to sonnet can still run one
+    request on opus without a restart."""
+    monkeypatch.setenv("AGENT_CLAUDE_MODEL", "sonnet")
+    assert ccp.resolve_claude_settings()["model"] == "sonnet"
+    assert ccp.resolve_claude_settings("opus")["model"] == "opus"
+    assert ccp.resolve_claude_settings("")["model"] == "sonnet", "empty is not a choice"
+
+
+def test_the_offered_models_are_aliases_not_pinned_ids():
+    """An alias resolves to the current model of its family. A pinned id in a picker
+    rots silently: the option keeps working until the day the id retires."""
+    for alias in ccp.SELECTABLE_MODELS:
+        assert "-" not in alias and not alias.startswith("claude"), \
+            f"{alias!r} looks like a pinned id, not an alias"
+    assert "sonnet" in ccp.SELECTABLE_MODELS and "opus" in ccp.SELECTABLE_MODELS

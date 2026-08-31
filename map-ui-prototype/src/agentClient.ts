@@ -16,6 +16,9 @@ export interface AgentConfig {
   /** Which agent writes the CODE — a different axis from `model`, which is what
    *  writes the ANSWER. 'langchain' | 'claude' | 'opencode'. Empty = server default. */
   codePeer?: string;
+  /** Model for a CLI code peer, e.g. 'sonnet' | 'opus'. Empty = that peer's default.
+   *  Independent of `model`, which is what writes the ANSWER. */
+  codePeerModel?: string;
 }
 
 export interface ModelCatalogue {
@@ -38,7 +41,9 @@ export interface ModelCatalogue {
     peers: { id: string; label: string; available: boolean;
              /** Why not, when unavailable: 'no credential' | 'image not built'. */
              reason?: string | null;
-             model?: string; auth?: string | null }[];
+             model?: string; auth?: string | null;
+             /** Selectable models for this peer, as aliases. Absent = not selectable. */
+             models?: string[] }[];
   };
 }
 
@@ -206,6 +211,7 @@ export async function streamChat(
     // Absent = the deployment's AGENT_CODE_PEER default, so a client that never
     // sets it behaves exactly as it did before the control existed.
     ...(cfg.codePeer ? { code_peer: cfg.codePeer } : {}),
+    ...(cfg.codePeerModel ? { code_peer_model: cfg.codePeerModel } : {}),
   };
 
   const resp = await fetch(cfg.endpoint, {

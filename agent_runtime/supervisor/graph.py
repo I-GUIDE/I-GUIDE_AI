@@ -2006,7 +2006,8 @@ _CODE_NOT_RUN_OBSERVATION = (
 def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str]] = None,
                     code_exec: Optional[bool] = None,
                     input_file_ids: Optional[List[str]] = None,
-                    code_peer: Optional[str] = None) -> CodeFn:
+                    code_peer: Optional[str] = None,
+                    code_peer_model: Optional[str] = None) -> CodeFn:
     """Code peer: writes code, and can request_capability(search/analyze) when it
     lacks the context to do so (model-driven — no nested search tool)."""
 
@@ -2033,6 +2034,7 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
 
             return run_claude_code_peer(
                 query, evidence=evidence, state=state, input_file_ids=input_file_ids,
+                model=code_peer_model,
             )
         from agent_runtime.executor_factory import (
             agent_config,

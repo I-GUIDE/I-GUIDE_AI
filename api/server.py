@@ -114,6 +114,10 @@ def _normalize_agent_chat_request(data: dict) -> dict:
     # "opencode" or "claude". Absent, the AGENT_CODE_PEER env default applies, so a
     # client that never sends it behaves exactly as before.
     code_peer = _coalesce(data.get("codePeer"), data.get("code_peer"))
+    # Model for a CLI code peer — an alias like "sonnet"/"opus", or a full id. Only
+    # meaningful when that peer is the one running; the built-in peer uses the same
+    # model as the answer, which the `model` field above already selects.
+    code_peer_model = _coalesce(data.get("codePeerModel"), data.get("code_peer_model"))
 
     return {
         "user_query": str(user_query).strip() if user_query is not None else "",
@@ -136,6 +140,7 @@ def _normalize_agent_chat_request(data: dict) -> dict:
         "use_supervisor": use_supervisor,
         "code_exec": code_exec,
         "code_peer": (str(code_peer).strip() or None) if code_peer else None,
+        "code_peer_model": (str(code_peer_model).strip() or None) if code_peer_model else None,
         "llm_provider": (str(llm_provider).strip() or None) if llm_provider else None,
         "llm_model": (str(llm_model).strip() or None) if llm_model else None,
         "reasoning_effort": (str(reasoning_effort).strip() or None) if reasoning_effort else None,
@@ -524,8 +529,8 @@ def _list_code_peers():
     import os as _os
     import subprocess as _sp
 
-    from agent_runtime.claude_peer import (DEFAULT_CLAUDE_IMAGE, resolve_claude_settings,
-                                           selects_claude)
+    from agent_runtime.claude_peer import (DEFAULT_CLAUDE_IMAGE, SELECTABLE_MODELS,
+                                           resolve_claude_settings, selects_claude)
     from agent_runtime.opencode_peer import (CODE_PEER_ENV, DEFAULT_OPENCODE_IMAGE,
                                              resolve_llm_settings, selects_opencode)
 
@@ -556,7 +561,10 @@ def _list_code_peers():
              "available": bool(claude["credential"]) and claude_image,
              "reason": None if (claude["credential"] and claude_image)
                        else ("no credential" if not claude["credential"] else "image not built"),
-             "model": claude["model"], "auth": claude["auth"]},
+             "model": claude["model"], "auth": claude["auth"],
+             # Aliases, so the list cannot pin itself to a retired id. The CLI refuses
+             # an unknown one locally, before any API call, so a bad pick costs nothing.
+             "models": list(SELECTABLE_MODELS)},
             {"id": "opencode", "label": "opencode CLI (sandboxed, iterates on its own)",
              "available": opencode_ready and opencode_image,
              "reason": None if (opencode_ready and opencode_image)
@@ -1430,6 +1438,7 @@ def agent_chat():
             use_supervisor=normalized.get("use_supervisor"),
             code_exec=normalized.get("code_exec"),
             code_peer=normalized.get("code_peer"),
+            code_peer_model=normalized.get("code_peer_model"),
             llm_provider=normalized.get("llm_provider"),
             llm_model=normalized.get("llm_model"),
             reasoning_effort=normalized.get("reasoning_effort"),
@@ -1941,6 +1950,7 @@ def agent_chat_stream():
                     use_supervisor=normalized.get("use_supervisor"),
                     code_exec=normalized.get("code_exec"),
                     code_peer=normalized.get("code_peer"),
+                    code_peer_model=normalized.get("code_peer_model"),
                     llm_provider=normalized.get("llm_provider"),
                     llm_model=normalized.get("llm_model"),
                     reasoning_effort=normalized.get("reasoning_effort"),

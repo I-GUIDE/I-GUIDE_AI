@@ -85,6 +85,12 @@ _OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 
 _ACCEPTED_FLAG_VALUES = {"claude", "claude-code", "claude_code"}
 
+# What the picker offers. ALIASES, not pinned ids: the CLI resolves each to the
+# current model of that family, so the list does not rot when an id is retired.
+# `haiku` was verified against the installed CLI (an unknown alias is refused
+# locally, before any API call), the others are named in its own --help.
+SELECTABLE_MODELS = ("sonnet", "opus", "haiku", "fable")
+
 # Files a Claude Code session picks up from the working directory as INSTRUCTIONS
 # rather than as data. Staged conversation files are user uploads, so one named
 # CLAUDE.md would be read as a brief by an agent running with tool permissions
@@ -108,7 +114,7 @@ def is_claude_peer_enabled() -> bool:
     return selects_claude(os.getenv(CODE_PEER_ENV))
 
 
-def resolve_claude_settings() -> Dict[str, Optional[str]]:
+def resolve_claude_settings(model: Optional[str] = None) -> Dict[str, Optional[str]]:
     """Model / credential / base URL for the Claude Code peer.
 
     Two credentials are accepted, and they are not interchangeable:
@@ -131,7 +137,10 @@ def resolve_claude_settings() -> Dict[str, Optional[str]]:
     token = (os.getenv("AGENT_CLAUDE_OAUTH_TOKEN") or os.getenv(_OAUTH_TOKEN_ENV) or "").strip()
     key = (os.getenv("AGENT_CLAUDE_API_KEY") or os.getenv(_API_KEY_ENV) or "").strip()
     base = (os.getenv("AGENT_CLAUDE_BASE_URL") or os.getenv("ANTHROPIC_BASE_URL") or "").strip()
-    model = (os.getenv("AGENT_CLAUDE_MODEL") or DEFAULT_CLAUDE_MODEL).strip()
+    # A per-request model beats the deployment default. An unknown one is rejected by
+    # the CLI LOCALLY — duration_api_ms 0, cost 0 — so a bad pick costs nothing but an
+    # error, which is why this is not validated against a hardcoded list here.
+    model = (model or os.getenv("AGENT_CLAUDE_MODEL") or DEFAULT_CLAUDE_MODEL).strip()
     credential, auth = (token, "subscription") if token else ((key, "api_key") if key else (None, None))
     return {
         "model": model or DEFAULT_CLAUDE_MODEL,
@@ -305,9 +314,10 @@ def run_claude(
     *,
     input_file_ids: Optional[List[str]] = None,
     timeout: Optional[int] = None,
+    model: Optional[str] = None,
 ) -> Dict[str, Any]:
     """One sandboxed ``claude --print`` run; returns a JSON-serializable result dict."""
-    settings = resolve_claude_settings()
+    settings = resolve_claude_settings(model)
     model = str(settings["model"])
     if not settings["credential"]:
         return {
@@ -395,6 +405,7 @@ def run_claude_code_peer(
     evidence: Optional[List[Any]] = None,
     state: Optional[Dict[str, Any]] = None,
     input_file_ids: Optional[List[str]] = None,
+    model: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Code-peer adapter: the same flat shape as ``default_code_fn`` and the
     opencode peer, so synthesis and the trace pipeline stay agnostic to which
@@ -416,9 +427,9 @@ def run_claude_code_peer(
         query, evidence, (state or {}).get("analysis_results"),
         staged_names=staged_names or None,
     )
-    call_args = {"model": resolve_claude_settings()["model"], "prompt_chars": len(prompt)}
+    call_args = {"model": resolve_claude_settings(model)["model"], "prompt_chars": len(prompt)}
     emit_trace_event("tool_call", {"name": "claude_run", "args": call_args}, node="code")
-    result = run_claude(prompt, input_file_ids=input_file_ids)
+    result = run_claude(prompt, input_file_ids=input_file_ids, model=model)
     emit_trace_event(
         "tool_result",
         {
