@@ -191,6 +191,17 @@ only on the API-key path, and the CLAUDE.md auto-discovery it would have suppres
 instead by renaming any staged upload named `CLAUDE.md` — an uploaded file must not become a
 brief for an agent running with permissions skipped.
 
+**A Claude subscription token is an inference credential, and it still will not run the
+agent.** `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` is scoped `user:inference`; sent as
+`Authorization: Bearer` plus `anthropic-beta: oauth-2025-04-20` it authenticates `/v1/messages`
+and returns real tool calls (sent as `x-api-key` it is a 401 — that is the whole of the
+"it is not an API key" story). `build_llm` accepts it, so Claude is selectable as an ANSWERING
+model with no API key. What stops it is commercial, and the API says so itself: *"Third-party
+apps now draw from extra usage, not plan limits."* The plan's included quota covers Claude Code,
+not an app built on the same token, so a turn 400s until someone adds extra usage — which is
+metered spending, i.e. an API key by another name. The CODE PEER is unaffected: it runs the CLI,
+which is not a third-party app.
+
 Do not assume a CLI's flags. Claude Code 2.1.x has **no** `--max-turns`, and an unknown flag
 makes the CLI exit non-zero — which reads as "the peer failed", not "somebody guessed". Check
 `--help` in the built image and pin the check in a test.
