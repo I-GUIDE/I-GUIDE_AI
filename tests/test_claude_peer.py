@@ -434,18 +434,38 @@ def test_a_blank_output_reaches_the_answer_not_just_a_field(monkeypatch, tmp_pat
 # Claude as an ANSWERING provider — a different credential from the peer's
 # ---------------------------------------------------------------------------
 
-def test_the_answering_provider_will_not_accept_the_peer_token(monkeypatch):
-    """CLAUDE_CODE_OAUTH_TOKEN authenticates the CLI against a subscription. It cannot
-    call the Messages API, so build_llm must refuse rather than send it and fail with an
-    auth error naming the wrong thing."""
+def test_the_subscription_token_drives_the_answering_provider(monkeypatch):
+    """It authenticates /v1/messages — verified live, 200 with tool calls. But ONLY as a
+    Bearer token: the same credential on x-api-key returns 401 "invalid x-api-key", and
+    the SDK sends x-api-key whenever it has one, so the client must be built with
+    auth_token instead."""
     from agent_runtime.executor_factory import build_llm
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-not-an-api-key")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-subscription")
+    llm = build_llm(provider="anthropic", model="claude-sonnet-5")
+
+    assert llm.default_headers == {"anthropic-beta": "oauth-2025-04-20"}, \
+        "the API rejects the token without the oauth beta header"
+    client = llm._client
+    assert getattr(client, "api_key", None) in (None, ""), \
+        "an api_key on the client means x-api-key is sent and wins, and it is not valid"
+    assert getattr(client, "auth_token", None) == "sk-ant-oat-subscription"
+
+
+def test_neither_credential_is_refused_by_name(monkeypatch):
+    """Say what would work. The earlier message asserted this token 'cannot call the
+    Messages API', which is false — it is scoped user:inference — and would have sent
+    someone looking for an API key they did not need."""
+    from agent_runtime.executor_factory import build_llm
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     with pytest.raises(ValueError) as exc:
         build_llm(provider="anthropic", model="claude-sonnet-5")
     assert "ANTHROPIC_API_KEY" in str(exc.value)
-    assert "CLAUDE_CODE_OAUTH_TOKEN" in str(exc.value), "name the credential that will NOT work"
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in str(exc.value)
+    assert "setup-token" in str(exc.value)
 
 
 def test_a_claude_model_id_infers_its_provider(monkeypatch):
@@ -454,6 +474,7 @@ def test_a_claude_model_id_infers_its_provider(monkeypatch):
     from agent_runtime.executor_factory import build_llm
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     with pytest.raises(ValueError) as exc:
         build_llm(model="claude-opus-5")
     assert "anthropic" in str(exc.value).lower()
@@ -465,10 +486,12 @@ def test_the_catalogue_offers_claude_even_with_no_key(monkeypatch):
     from agent_runtime.executor_factory import list_available_models
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     cat = list_available_models(timeout=0.01)
     anth = next(p for p in cat["providers"] if p["provider"] == "anthropic")
     assert anth["configured"] is False
-    assert anth["needs"] == "ANTHROPIC_API_KEY"
+    assert anth["needs"] == "ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN", \
+        "either credential works, so name both"
     assert anth["models"], "still shown, so the option is visibly available-if-configured"
     assert all(m.startswith("claude-") for m in anth["models"]), \
         "ids, not the CLI's sonnet/opus aliases — this path is the Messages API"

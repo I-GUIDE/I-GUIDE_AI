@@ -340,11 +340,12 @@ def build_llm(provider: Optional[str] = None, model: Optional[str] = None,
                           api_key=key, base_url=base_url, temperature=0.0)
     if prov == "anthropic":
         key = os.getenv("ANTHROPIC_API_KEY")
-        if not key:
+        token = os.getenv("CLAUDE_CODE_OAUTH_TOKEN")
+        if not key and not token:
             raise ValueError(
-                "provider='anthropic' needs ANTHROPIC_API_KEY. Note this is NOT the same "
-                "credential as CLAUDE_CODE_OAUTH_TOKEN: that one authenticates the Claude "
-                "Code CLI against a subscription and cannot call the Messages API.")
+                "provider='anthropic' needs ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN "
+                "from `claude setup-token` (a subscription credential scoped user:inference, "
+                "which this path sends as a Bearer token).")
         try:
             from langchain_anthropic import ChatAnthropic
         except ImportError as exc:  # pragma: no cover - depends on the install
@@ -356,9 +357,14 @@ def build_llm(provider: Optional[str] = None, model: Optional[str] = None,
         if effort:
             logger.info("reasoning_effort %r is an OpenAI parameter; not sent to Anthropic",
                         effort)
-        return ChatAnthropic(model=model or os.getenv("ANTHROPIC_MODEL")
-                             or _ANTHROPIC_FALLBACK_MODELS[1],
-                             api_key=key, temperature=0.0, max_tokens=8192)
+        llm = ChatAnthropic(model=model or os.getenv("ANTHROPIC_MODEL")
+                            or _ANTHROPIC_FALLBACK_MODELS[1],
+                            api_key=key or "unused-when-bearer", temperature=0.0,
+                            max_tokens=8192,
+                            default_headers=_OAUTH_BETA_HEADER if not key else None)
+        if not key:
+            _use_bearer_client(llm, token)
+        return llm
     if prov in ("openai", "default"):
         key = os.getenv("OPENAI_KEY") or os.getenv("OPENAI_API_KEY")
         if not key:
@@ -388,6 +394,35 @@ def build_llm(provider: Optional[str] = None, model: Optional[str] = None,
 # Fallback ids when Anthropic's own /v1/models cannot be reached (no key, or the call
 # failed). Real ids, not the CLI's `sonnet`/`opus` aliases: the Messages API takes ids,
 # and the aliases only exist inside Claude Code.
+# The subscription credential is a Bearer token, not an api key, and the API only accepts it
+# with this beta header — verified live: the same token sent as x-api-key returns 401
+# "invalid x-api-key", and sent as Authorization + this header returns 200.
+_OAUTH_BETA_HEADER = {"anthropic-beta": "oauth-2025-04-20"}
+
+
+def _use_bearer_client(llm: Any, token: str) -> None:
+    """Point a ChatAnthropic at SDK clients built with ``auth_token``.
+
+    ChatAnthropic exposes ``anthropic_api_key`` and ``default_headers`` but no auth_token,
+    and the SDK sends ``x-api-key`` whenever it has one — which the API prefers over the
+    Authorization header and rejects. Handing it clients constructed with ``auth_token``
+    omits x-api-key entirely, which is the only combination that authenticates.
+
+    Swapping the private clients is deliberate and pinned by a test: if a future
+    langchain-anthropic renames them, that test fails loudly instead of every Claude turn
+    failing with an auth error that names the wrong credential.
+    """
+    import anthropic
+
+    for attr, factory in (("_client", anthropic.Anthropic),
+                          ("_async_client", anthropic.AsyncAnthropic)):
+        if not hasattr(llm, attr):
+            raise ValueError(
+                f"this langchain-anthropic exposes no {attr}; a subscription token cannot be "
+                "attached. Set ANTHROPIC_API_KEY instead, or pin langchain-anthropic.")
+        setattr(llm, attr, factory(auth_token=token, default_headers=_OAUTH_BETA_HEADER))
+
+
 _ANTHROPIC_FALLBACK_MODELS = (
     "claude-opus-5",
     "claude-sonnet-5",
@@ -454,7 +489,8 @@ def list_available_models(*, timeout: float = 6.0) -> Dict[str, Any]:
     # retired 404s at request time instead of being absent from the picker.
     anthropic: Dict[str, Any] = {
         "provider": "anthropic", "label": "Anthropic (Claude)",
-        "configured": bool(os.getenv("ANTHROPIC_API_KEY")), "models": [],
+        "configured": bool(os.getenv("ANTHROPIC_API_KEY")
+                           or os.getenv("CLAUDE_CODE_OAUTH_TOKEN")), "models": [],
         # The peer's CLI takes `sonnet`/`opus` aliases; this path is the Messages API and
         # takes ids. Saying so here keeps the two pickers from looking interchangeable.
         "note": "answering models — the code peer selects its own model separately",
@@ -463,11 +499,15 @@ def list_available_models(*, timeout: float = 6.0) -> Dict[str, Any]:
         try:
             import requests
 
-            resp = requests.get(
-                "https://api.anthropic.com/v1/models",
-                headers={"x-api-key": os.getenv("ANTHROPIC_API_KEY"),
-                         "anthropic-version": "2023-06-01"},
-                timeout=timeout)
+            api_key = os.getenv("ANTHROPIC_API_KEY")
+            headers = {"anthropic-version": "2023-06-01"}
+            if api_key:
+                headers["x-api-key"] = api_key
+            else:
+                headers["Authorization"] = f"Bearer {os.getenv('CLAUDE_CODE_OAUTH_TOKEN')}"
+                headers.update(_OAUTH_BETA_HEADER)
+            resp = requests.get("https://api.anthropic.com/v1/models",
+                                headers=headers, timeout=timeout)
             resp.raise_for_status()
             ids = [m.get("id") for m in (resp.json().get("data") or []) if m.get("id")]
             anthropic["models"] = ids or list(_ANTHROPIC_FALLBACK_MODELS)
@@ -479,7 +519,7 @@ def list_available_models(*, timeout: float = 6.0) -> Dict[str, Any]:
         # Offered but not configured: the picker shows it disabled, so "we could speak
         # Claude here" is visible without pretending the key exists.
         anthropic["models"] = list(_ANTHROPIC_FALLBACK_MODELS)
-        anthropic["needs"] = "ANTHROPIC_API_KEY"
+        anthropic["needs"] = "ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN"
     out["providers"].append(anthropic)
     return out
 
