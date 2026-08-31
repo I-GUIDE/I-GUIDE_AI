@@ -230,7 +230,9 @@ export function ChatPanel(p: Props) {
                   {p.models.code_peers.peers.map((peer) => (
                     <option key={peer.id} value={peer.id} disabled={!peer.available}
                             title={peer.label}>
-                      {peer.id}{peer.model ? ` (${peer.model})` : ''}
+                      {/* Just the peer. Its model is the control next to this one, and
+                          showing "claude (sonnet)" here read as a fixed pairing. */}
+                      {peer.id}
                       {peer.available ? '' : ` — ${peer.reason || 'unavailable'}`}
                     </option>
                   ))}

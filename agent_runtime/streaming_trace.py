@@ -232,8 +232,26 @@ class StreamingTraceCallbackHandler(BaseCallbackHandler):
     def _emit(self, event: str, data: Optional[Dict[str, Any]] = None) -> None:
         _emit_with_state(self._state or _TRACE_STATE.get(), event, data)
 
+    @staticmethod
+    def _model_label(serialized: Optional[Dict[str, Any]], kwargs: Dict[str, Any]) -> str:
+        """Which MODEL is answering, not which LangChain class wraps it.
+
+        serialized["name"] is the class, and AnvilGPT, vLLM and any other
+        OpenAI-compatible endpoint all arrive as ChatOpenAI — so the trace read
+        "ChatOpenAI started" while qwen3.6:27b or gpt-oss:120b did the work. That is the
+        same confusion active_llm_description() exists to prevent: the transport does not
+        tell you who answered. The invocation params carry the id the user actually picked.
+        """
+        params = kwargs.get("invocation_params") or {}
+        meta = kwargs.get("metadata") or {}
+        for value in (params.get("model"), params.get("model_name"),
+                      meta.get("ls_model_name")):
+            if value:
+                return str(value)
+        return (serialized or {}).get("name") or (serialized or {}).get("id") or "chat_model"
+
     def on_chat_model_start(self, serialized: Dict[str, Any], messages: Any, **kwargs: Any) -> None:
-        name = (serialized or {}).get("name") or (serialized or {}).get("id") or "chat_model"
+        name = self._model_label(serialized, kwargs)
         message_count = sum(len(group or []) for group in messages or []) if isinstance(messages, list) else None
         self._emit(
             "llm_start",
@@ -246,7 +264,7 @@ class StreamingTraceCallbackHandler(BaseCallbackHandler):
         )
 
     def on_llm_start(self, serialized: Dict[str, Any], prompts: Any, **kwargs: Any) -> None:
-        name = (serialized or {}).get("name") or (serialized or {}).get("id") or "llm"
+        name = self._model_label(serialized, kwargs)
         self._emit(
             "llm_start",
             {
