@@ -533,3 +533,22 @@ def test_temperature_is_not_sent_to_anthropic(monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat")
     llm = build_llm(provider="anthropic", model="claude-sonnet-5")
     assert llm.temperature is None, "sending it fails the turn on the current models"
+
+
+def test_the_picker_reports_the_default_the_agent_would_actually_use(monkeypatch):
+    """AGENT_LLM_PROVIDER=anvilgpt is a supported setting, and the catalogue hardcoded the
+    default to OpenAI — so the first option read "Agent default (gpt-4o-2024-11-20)" while
+    every unqualified request ran gpt-oss:120b. A label that denies the switch is worse than
+    no label."""
+    from agent_runtime.executor_factory import list_available_models
+
+    monkeypatch.delenv("AGENT_LLM_PROVIDER", raising=False)
+    monkeypatch.setenv("OPENAI_CHAT_MODEL", "gpt-4o-2024-11-20")
+    assert list_available_models(timeout=0.01)["default"] == {
+        "provider": "openai", "model": "gpt-4o-2024-11-20"}
+
+    monkeypatch.setenv("AGENT_LLM_PROVIDER", "anvilgpt")
+    monkeypatch.setenv("ANVILGPT_KEY", "k")
+    monkeypatch.setenv("ANVILGPT_MODEL", "gpt-oss:120b")
+    assert list_available_models(timeout=0.01)["default"] == {
+        "provider": "anvilgpt", "model": "gpt-oss:120b"}

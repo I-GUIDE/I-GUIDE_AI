@@ -443,10 +443,16 @@ def list_available_models(*, timeout: float = 6.0) -> Dict[str, Any]:
     AnvilGPT is queried live: its catalogue changes, and offering an id it no longer serves
     produces a 404 at request time instead of an honest "unavailable" in the UI.
     """
+    # The default the PICKER shows must be the default the agent would actually use, and this
+    # dict used to hardcode OpenAI. With AGENT_LLM_PROVIDER=anvilgpt — a supported setting —
+    # the label read "Agent default (gpt-4o-2024-11-20)" while every unqualified request ran
+    # gpt-oss:120b. active_llm_description() is the one function that resolves the real
+    # default, so read it rather than restating its logic and drifting from it.
+    active = active_llm_description()
     out: Dict[str, Any] = {
-        "default": {"provider": DEFAULT_PROVIDER,
-                    "model": os.getenv("OPENAI_CHAT_MODEL") or os.getenv("OPENAI_MODEL")
-                    or DEFAULT_OPENAI_MODEL},
+        "default": {"provider": active.get("provider") or DEFAULT_PROVIDER,
+                    "model": active.get("model") or os.getenv("OPENAI_CHAT_MODEL")
+                    or os.getenv("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL},
         "providers": [],
     }
     openai_models = list(dict.fromkeys(
