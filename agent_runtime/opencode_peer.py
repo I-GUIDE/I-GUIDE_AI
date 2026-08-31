@@ -238,6 +238,11 @@ def _persist_artifacts(work: Path, exclude: set) -> List[Dict[str, Any]]:
                     "filename": rec["filename"],
                     "download_url": rec.get("download_url"),
                     "size_bytes": rec.get("size_bytes"),
+                    # The path RELATIVE to the work dir, which the basename cannot stand in
+                    # for once directories nest. A caller that persists across turns needs
+                    # to know exactly which files reached the store — the cap above and the
+                    # except below both mean "walked, not delivered".
+                    "path": str(rel),
                 }
             )
         except Exception:

@@ -66,6 +66,7 @@ Docker-out-of-Docker the work dir must live on the host-shared bind mount
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -142,7 +143,28 @@ _MANIFEST_NAME = ".agent_artifacts.json"
 _LOCK_NAME = ".agent_lock"
 # A lock older than this is a crashed run, not a running one: the wall-clock ceiling for a
 # run is DEFAULT_CLAUDE_TIMEOUT, so anything past it plus slack cannot still be alive.
-_LOCK_STALE_S = DEFAULT_CLAUDE_TIMEOUT * 2
+def _lock_stale_after() -> float:
+    """When a claim can only belong to a run that died.
+
+    Derived from the CONFIGURED timeout, not the default: a deployment that raises
+    AGENT_CLAUDE_TIMEOUT for long agentic loops would otherwise have every run past twenty
+    minutes declared crashed, and a second container would mount the same directory while
+    the first was still writing to it.
+    """
+    return _timeout_seconds() * 2 + 60
+
+
+def _work_root_path() -> Path:
+    """The directory session directories live under.
+
+    ``_work_root()`` returns None when AGENT_CODE_EXEC_WORK_ROOT is unset — which the
+    documented local-dev command never sets — and ``Path(None)`` raises TypeError, not the
+    OSError run_claude guards against. The old code passed the None straight to
+    ``mkdtemp(dir=...)``, where it means "the system temp dir", so this keeps that meaning
+    explicit instead of crashing the whole graph run on the local configuration.
+    """
+    root = _work_root()
+    return Path(root) if root else Path(tempfile.gettempdir())
 
 
 def persistence_enabled() -> bool:
@@ -196,7 +218,7 @@ def _acquire(work: Path) -> bool:
 
     lock = work / _LOCK_NAME
     try:
-        if lock.exists() and (time.time() - lock.stat().st_mtime) > _LOCK_STALE_S:
+        if lock.exists() and (time.time() - lock.stat().st_mtime) > _lock_stale_after():
             lock.unlink(missing_ok=True)          # a crashed run, not a live one
         fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
         os.close(fd)
@@ -207,32 +229,38 @@ def _acquire(work: Path) -> bool:
         return False
 
 
+def _throwaway(root: Path) -> Dict[str, Any]:
+    return {"path": Path(tempfile.mkdtemp(prefix="agentcc_", dir=str(root))),
+            "persistent": False, "resumed": False}
+
+
 def session_dir(thread_id: Optional[str]) -> Dict[str, Any]:
     """The directory this run works in: the conversation's own, or a throwaway.
 
     Returns ``{"path", "persistent", "resumed"}``. ``resumed`` means the CLI has session
     history here already, which is what ``--continue`` needs to mean anything.
     """
-    root = Path(_work_root())
+    root = _work_root_path()
     if not thread_id or not persistence_enabled():
-        return {"path": Path(tempfile.mkdtemp(prefix="agentcc_", dir=root)),
-                "persistent": False, "resumed": False}
+        return _throwaway(root)
     _sweep_sessions(root)
     from agent_runtime.executor_factory import child_thread_id
 
-    # Same scoping the execute_code sandbox and the QGIS jobs already use, so one
-    # conversation's peer state cannot collide with another's.
-    slug = re.sub(r"[^A-Za-z0-9_.-]", "_", str(child_thread_id(thread_id, "claudepeer")))[:80]
-    work = root / f"claudesess_{slug}"
+    # Same scoping the execute_code sandbox and the QGIS jobs already use. The name carries
+    # a DIGEST as well as a readable slug: sanitising alone is many-to-one — "sess:42" and
+    # "sess_42" both sanitise to "sess_42" — and two conversations sharing one directory
+    # means one reading the other's files and resuming the other's session.
+    scoped = str(child_thread_id(thread_id, "claudepeer"))
+    slug = re.sub(r"[^A-Za-z0-9_.-]", "_", scoped)[:40]
+    digest = hashlib.sha256(scoped.encode("utf-8")).hexdigest()[:16]
+    work = root / f"claudesess_{slug}_{digest}"
     try:
         work.mkdir(parents=True, exist_ok=True)
     except OSError:
-        return {"path": Path(tempfile.mkdtemp(prefix="agentcc_", dir=root)),
-                "persistent": False, "resumed": False}
+        return _throwaway(root)
     if not _acquire(work):
         logger.info("claude peer session %s is busy; using a throwaway directory", slug)
-        return {"path": Path(tempfile.mkdtemp(prefix="agentcc_", dir=root)),
-                "persistent": False, "resumed": False}
+        return _throwaway(root)
     return {"path": work, "persistent": True, "resumed": (work / ".claude").is_dir()}
 
 
@@ -281,10 +309,24 @@ def already_persisted(work: Path) -> set:
             if isinstance(meta, list) and current.get(rel) == meta}
 
 
-def record_persisted(work: Path) -> None:
-    """Remember what is on disk now, so the next turn only sends what changed."""
+def record_persisted(work: Path, delivered: Optional[List[str]] = None) -> None:
+    """Remember what actually REACHED the file store, so the next turn sends the rest.
+
+    Recording everything on disk was wrong in a way that only bites once the directory
+    persists: ``_persist_artifacts`` stops at MAX_ARTIFACTS and swallows per-file upload
+    errors, so files it merely WALKED were being marked delivered. On the next turn they
+    matched the manifest, went into the exclude set, and were withheld — permanently, and
+    a .geojson among them never became a map layer either. The rule is meant to be "a
+    duplicate is noise, a withheld one is a lost result"; this had it backwards.
+
+    Cumulative: files delivered on earlier turns stay recorded as long as they are
+    unchanged on disk.
+    """
+    current = _fingerprints(work)
+    keep = (already_persisted(work) | {str(rel) for rel in (delivered or [])}) & set(current)
     try:
-        _manifest_path(work).write_text(json.dumps(_fingerprints(work)), encoding="utf-8")
+        _manifest_path(work).write_text(
+            json.dumps({rel: current[rel] for rel in sorted(keep)}), encoding="utf-8")
     except OSError:  # pragma: no cover - a manifest that cannot be written re-sends, no worse
         logger.debug("claude peer: could not write the artifact manifest")
 
@@ -480,8 +522,14 @@ def neutralize_instruction_files(work: Path, staged: Optional[List[str]] = None)
     for entry in entries:
         if entry.name.lower() not in _INSTRUCTION_FILENAMES:
             continue
-        if staged is not None and entry.name not in allowed:
-            continue      # peer state, not something this turn's user sent
+        # `.claude` is the CLI's OWN state directory once the work dir persists, so it is
+        # only touched when THIS turn's upload created it. A CLAUDE.md is never legitimate
+        # peer state, so it is neutralised wherever it came from — including one the CLI
+        # re-created by renaming last turn's uploaded_CLAUDE.md back, which the
+        # staged-only rule would have waved through on a turn with no attachments.
+        if (entry.name.lower() == ".claude" and staged is not None
+                and entry.name not in allowed):
+            continue
         target = entry.with_name(f"uploaded_{entry.name}")
         try:
             entry.rename(target)
@@ -591,7 +639,7 @@ def run_claude(
                     | already_persisted(work))
         artifacts = _persist_artifacts(work, excluded)
         if persistent:
-            record_persisted(work)
+            record_persisted(work, [a.get("path") for a in artifacts if a.get("path")])
         # The tool path runs these checks inside add_map_layer. This peer has none of the
         # AGENT's tools, so
         # without this nothing between the CLI and the user ever looks at what it wrote —
