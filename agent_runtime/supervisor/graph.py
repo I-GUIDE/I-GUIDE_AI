@@ -2005,7 +2005,8 @@ _CODE_NOT_RUN_OBSERVATION = (
 
 def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str]] = None,
                     code_exec: Optional[bool] = None,
-                    input_file_ids: Optional[List[str]] = None) -> CodeFn:
+                    input_file_ids: Optional[List[str]] = None,
+                    code_peer: Optional[str] = None) -> CodeFn:
     """Code peer: writes code, and can request_capability(search/analyze) when it
     lacks the context to do so (model-driven — no nested search tool)."""
 
@@ -2013,15 +2014,23 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         # AGENT_CODE_PEER swaps the whole peer for a sandboxed agentic CLI, which
         # iterates internally — no request_capability, no nested tools. Two are
         # wired: `opencode` (OpenAI-compatible endpoint) and `claude` (Anthropic).
-        from agent_runtime.opencode_peer import is_opencode_peer_enabled, run_opencode_code_peer
+        # A per-request `code_peer` overrides the env default; anything else
+        # (including "langchain") means the built-in peer below.
+        import os as _os
 
-        if is_opencode_peer_enabled():
+        from agent_runtime.opencode_peer import CODE_PEER_ENV, selects_opencode
+        from agent_runtime.claude_peer import selects_claude
+
+        choice = code_peer if code_peer else _os.getenv(CODE_PEER_ENV)
+        if selects_opencode(choice):
+            from agent_runtime.opencode_peer import run_opencode_code_peer
+
             return run_opencode_code_peer(
                 query, evidence=evidence, state=state, input_file_ids=input_file_ids,
             )
-        from agent_runtime.claude_peer import is_claude_peer_enabled, run_claude_code_peer
+        if selects_claude(choice):
+            from agent_runtime.claude_peer import run_claude_code_peer
 
-        if is_claude_peer_enabled():
             return run_claude_code_peer(
                 query, evidence=evidence, state=state, input_file_ids=input_file_ids,
             )

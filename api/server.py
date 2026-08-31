@@ -110,6 +110,10 @@ def _normalize_agent_chat_request(data: dict) -> dict:
     # models that would reject the argument.
     reasoning_effort = _coalesce(data.get("reasoningEffort"), data.get("reasoning_effort"))
     code_exec = None if code_exec_raw is None else bool(code_exec_raw)
+    # Which code-peer backend runs THIS request: "langchain" (the built-in peer),
+    # "opencode" or "claude". Absent, the AGENT_CODE_PEER env default applies, so a
+    # client that never sends it behaves exactly as before.
+    code_peer = _coalesce(data.get("codePeer"), data.get("code_peer"))
 
     return {
         "user_query": str(user_query).strip() if user_query is not None else "",
@@ -131,6 +135,7 @@ def _normalize_agent_chat_request(data: dict) -> dict:
         "agent_dev": agent_dev,
         "use_supervisor": use_supervisor,
         "code_exec": code_exec,
+        "code_peer": (str(code_peer).strip() or None) if code_peer else None,
         "llm_provider": (str(llm_provider).strip() or None) if llm_provider else None,
         "llm_model": (str(llm_model).strip() or None) if llm_model else None,
         "reasoning_effort": (str(reasoning_effort).strip() or None) if reasoning_effort else None,
@@ -508,6 +513,40 @@ def agent_dashboard():
     return send_file(dashboard_path)
 
 
+def _list_code_peers():
+    """The code-peer backends a request may select, and which one is the default.
+
+    `available` is not the same as `selectable`: each CLI peer needs its sandbox
+    image built and a credential present, and a peer offered without those fails
+    at run time with a container error rather than being absent from the picker.
+    """
+    import os as _os
+
+    from agent_runtime.claude_peer import resolve_claude_settings, selects_claude
+    from agent_runtime.opencode_peer import CODE_PEER_ENV, resolve_llm_settings, selects_opencode
+
+    env_value = _os.getenv(CODE_PEER_ENV) or ""
+    default = ("opencode" if selects_opencode(env_value)
+               else "claude" if selects_claude(env_value) else "langchain")
+    claude = resolve_claude_settings()
+    try:
+        opencode_ready = bool(resolve_llm_settings().get("api_key"))
+    except Exception:  # noqa: BLE001
+        opencode_ready = False
+    return {
+        "default": default,
+        "peers": [
+            {"id": "langchain", "label": "Built-in peer (generates code, runs execute_code)",
+             "available": True},
+            {"id": "claude", "label": "Claude Code CLI (sandboxed, iterates on its own)",
+             "available": bool(claude["credential"]),
+             "model": claude["model"], "auth": claude["auth"]},
+            {"id": "opencode", "label": "opencode CLI (sandboxed, iterates on its own)",
+             "available": opencode_ready},
+        ],
+    }
+
+
 @app.route('/agent/models', methods=['GET'])
 def agent_models():
     """
@@ -536,12 +575,22 @@ def agent_models():
     """
     from agent_runtime.executor_factory import list_available_models
 
+    from agent_runtime.executor_factory import list_available_models
+
     try:
-        return jsonify(list_available_models())
+        catalogue = list_available_models()
     except Exception as exc:  # never let a catalogue lookup break the page
         logger.warning("model catalogue unavailable: %s", exc)
-        return jsonify({"default": {"provider": "openai", "model": "gpt-4o-2024-11-20"},
-                        "providers": [], "error": str(exc)}), 200
+        catalogue = {"default": {"provider": "openai", "model": "gpt-4o-2024-11-20"},
+                     "providers": [], "error": str(exc)}
+    # The code PEER is a second, independent axis: which agent writes the code, not
+    # which model writes the answer. It rides along on this endpoint so a client
+    # needs one call, but it is reported under its own key so nothing conflates them.
+    try:
+        catalogue["code_peers"] = _list_code_peers()
+    except Exception as exc:  # noqa: BLE001 - a peer list must never break the page
+        logger.warning("code peer catalogue unavailable: %s", exc)
+    return jsonify(catalogue)
 
 
 @app.route('/agent/files/upload', methods=['POST'])
@@ -1362,6 +1411,7 @@ def agent_chat():
             verbose=bool(normalized.get("verbose", False)),
             use_supervisor=normalized.get("use_supervisor"),
             code_exec=normalized.get("code_exec"),
+            code_peer=normalized.get("code_peer"),
             llm_provider=normalized.get("llm_provider"),
             llm_model=normalized.get("llm_model"),
             reasoning_effort=normalized.get("reasoning_effort"),
@@ -1872,6 +1922,7 @@ def agent_chat_stream():
                     agent_dev=normalized.get("agent_dev"),
                     use_supervisor=normalized.get("use_supervisor"),
                     code_exec=normalized.get("code_exec"),
+                    code_peer=normalized.get("code_peer"),
                     llm_provider=normalized.get("llm_provider"),
                     llm_model=normalized.get("llm_model"),
                     reasoning_effort=normalized.get("reasoning_effort"),

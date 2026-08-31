@@ -93,9 +93,19 @@ _ACCEPTED_FLAG_VALUES = {"claude", "claude-code", "claude_code"}
 _INSTRUCTION_FILENAMES = {"claude.md", "claude.local.md", ".claude"}
 
 
+def selects_claude(value: Optional[str]) -> bool:
+    """Does this AGENT_CODE_PEER value name this backend?
+
+    A pure predicate so the env default and a per-request override are decided by
+    the SAME accepted-value set — two copies of it would drift, and the drift
+    would show up as a request silently getting a different peer than it asked
+    for."""
+    return (value or "").strip().lower() in _ACCEPTED_FLAG_VALUES
+
+
 def is_claude_peer_enabled() -> bool:
-    """Whether the code peer should run Claude Code instead of the LangChain agent."""
-    return (os.getenv(CODE_PEER_ENV) or "").strip().lower() in _ACCEPTED_FLAG_VALUES
+    """Whether the deployment default selects Claude Code for the code peer."""
+    return selects_claude(os.getenv(CODE_PEER_ENV))
 
 
 def resolve_claude_settings() -> Dict[str, Optional[str]]:

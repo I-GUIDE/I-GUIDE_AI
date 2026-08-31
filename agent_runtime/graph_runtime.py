@@ -64,6 +64,7 @@ def run_agent_query(
     skill_roots: Optional[List[str]] = None,
     use_supervisor: Optional[bool] = None,
     code_exec: Optional[bool] = None,
+    code_peer: Optional[str] = None,
     input_file_ids: Optional[List[str]] = None,
 ) -> dict:
     """Run one query through the hybrid orchestrator graph."""
@@ -83,6 +84,7 @@ def run_agent_query(
         skill_roots=skill_roots,
         use_supervisor=use_supervisor,
         code_exec=code_exec,
+        code_peer=code_peer,
         input_file_ids=input_file_ids,
     )
     web_utils.begin_turn()  # reset the per-turn open-web budget (see note in the streaming path)
@@ -140,6 +142,7 @@ def stream_agent_query_events(
     agent_dev: Optional[bool] = None,
     use_supervisor: Optional[bool] = None,
     code_exec: Optional[bool] = None,
+    code_peer: Optional[str] = None,
     input_file_ids: Optional[List[str]] = None,
 ) -> Generator[Dict[str, Any], None, None]:
     """Yield structured SSE events while running a query.
@@ -206,6 +209,7 @@ def stream_agent_query_events(
                     skill_roots=skill_roots,
                     use_supervisor=use_supervisor,
                     code_exec=code_exec,
+                    code_peer=code_peer,
                     input_file_ids=input_file_ids,
                 )
                 final_state = graph.invoke(

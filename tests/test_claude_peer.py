@@ -345,3 +345,47 @@ def test_supervisor_code_fn_dispatches_to_claude(monkeypatch):
     out = default_code_fn()("compute something", [], {})
     assert called["query"] == "compute something"
     assert out["answer"] == "ok"
+
+
+def test_a_per_request_choice_overrides_the_env_default(monkeypatch):
+    """The deployment default is an env var; a request may name a different peer.
+    Both are decided by the same predicate, so a request cannot ask for one
+    backend and quietly get another."""
+    from agent_runtime.supervisor.graph import default_code_fn
+
+    seen = []
+    monkeypatch.setattr(ccp, "run_claude_code_peer",
+                        lambda q, **kw: seen.append("claude") or {"answer": "c", "tool_calls": [],
+                                                                  "tool_results": []})
+    import agent_runtime.opencode_peer as ocp
+    monkeypatch.setattr(ocp, "run_opencode_code_peer",
+                        lambda q, **kw: seen.append("opencode") or {"answer": "o", "tool_calls": [],
+                                                                    "tool_results": []})
+
+    monkeypatch.setenv("AGENT_CODE_PEER", "opencode")
+    default_code_fn(code_peer="claude")("q", [], {})
+    assert seen == ["claude"], "the request's choice wins over the env default"
+
+    seen.clear()
+    monkeypatch.delenv("AGENT_CODE_PEER", raising=False)
+    default_code_fn(code_peer="claude")("q", [], {})
+    assert seen == ["claude"], "and works with no env default at all"
+
+    seen.clear()
+    monkeypatch.setenv("AGENT_CODE_PEER", "claude")
+    default_code_fn()("q", [], {})
+    assert seen == ["claude"], "absent a request choice, the env default still applies"
+
+
+def test_langchain_is_a_real_choice_not_just_an_absent_one(monkeypatch):
+    """Naming the built-in peer has to override an env default that selects a CLI,
+    or a deployment with AGENT_CODE_PEER=claude could never opt one request out."""
+    from agent_runtime.supervisor.graph import default_code_fn
+
+    monkeypatch.setenv("AGENT_CODE_PEER", "claude")
+    monkeypatch.setattr(ccp, "run_claude_code_peer",
+                        lambda q, **kw: pytest.fail("should not reach the CLI peer"))
+    # The built-in peer needs an LLM; getting far enough to ask for one proves the
+    # CLI branch was skipped.
+    with pytest.raises(Exception):
+        default_code_fn(code_peer="langchain")("q", [], {})

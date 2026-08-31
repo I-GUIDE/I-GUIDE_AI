@@ -77,9 +77,15 @@ MAX_ANALYSIS_CHARS = 1500
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
+def selects_opencode(value: Optional[str]) -> bool:
+    """Does this AGENT_CODE_PEER value name this backend? (pure, so the env default
+    and a per-request override share one definition)."""
+    return (value or "").strip().lower() == "opencode"
+
+
 def is_opencode_peer_enabled() -> bool:
-    """Whether the code peer should run opencode instead of the LangChain agent."""
-    return (os.getenv(CODE_PEER_ENV) or "").strip().lower() == "opencode"
+    """Whether the deployment default selects opencode for the code peer."""
+    return selects_opencode(os.getenv(CODE_PEER_ENV))
 
 
 def _strip_ansi(text: str) -> str:

@@ -118,6 +118,7 @@ def build_orchestrator_graph(
     skill_roots: Optional[List[str]] = None,
     use_supervisor: Optional[bool] = None,
     code_exec: Optional[bool] = None,
+    code_peer: Optional[str] = None,
     input_file_ids: Optional[List[str]] = None,
 ) -> Any:
     """Compile the hybrid orchestrator graph for one request's configuration.
@@ -208,6 +209,7 @@ def build_orchestrator_graph(
             enabled_search_methods=enabled_search_methods, smart_tool_routing=smart_tool_routing,
             forced_intent=forced_intent, thread_id=thread_id, checkpointer=checkpointer,
             skill_roots=skill_roots, code_exec=code_exec, input_file_ids=input_file_ids,
+            code_peer=code_peer,
         )
         strategy = get_orchestration_strategy(use_supervisor)
         return strategy(state.get("query", ""), state.get("chat_history") or None, cfg)

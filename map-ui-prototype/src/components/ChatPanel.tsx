@@ -17,7 +17,8 @@ export interface ChatMessage {
 
 export type Mode = 'live' | 'local';
 export interface AgentCfg { endpoint: string; uploadEndpoint: string; apiKey: string;
-                            model?: string; provider?: string; reasoningEffort?: string }
+                            model?: string; provider?: string; reasoningEffort?: string;
+                            codePeer?: string }
 
 const RS_ACTIONS = [
   { label: 'Embed',   prompt: 'Embed this drawn region with the gse model for June–September 2022 and put the embedding on the map.' },
@@ -202,6 +203,27 @@ export function ChatPanel(p: Props) {
                 </label>
               );
             })()}
+            {/* A SECOND axis, deliberately its own control: `Model` picks what writes
+                the answer, this picks what writes the code. A peer whose sandbox image or
+                credential is missing is shown but disabled — absent from the list would
+                read as "not built", which is a different problem from "not configured". */}
+            {p.models?.code_peers && (
+              <label>Code peer
+                <select value={p.cfg.codePeer || ''}
+                        onChange={(e) => p.onSetCfg({ ...p.cfg, codePeer: e.target.value })}>
+                  <option value="">
+                    Server default ({p.models.code_peers.default})
+                  </option>
+                  {p.models.code_peers.peers.map((peer) => (
+                    <option key={peer.id} value={peer.id} disabled={!peer.available}
+                            title={peer.label}>
+                      {peer.id}{peer.model ? ` (${peer.model})` : ''}
+                      {peer.available ? '' : ' — not configured'}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
             <label className="wide">Chat endpoint
               <input value={p.cfg.endpoint} onChange={(e) => p.onSetCfg({ ...p.cfg, endpoint: e.target.value })} />
             </label>

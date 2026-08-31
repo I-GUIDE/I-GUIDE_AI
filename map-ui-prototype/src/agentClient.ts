@@ -13,6 +13,9 @@ export interface AgentConfig {
   provider?: string;
   /** Reasoning models only (gpt-5.x, o-series): 'none'|'low'|'medium'|'high'|'xhigh'. */
   reasoningEffort?: string;
+  /** Which agent writes the CODE — a different axis from `model`, which is what
+   *  writes the ANSWER. 'langchain' | 'claude' | 'opencode'. Empty = server default. */
+  codePeer?: string;
 }
 
 export interface ModelCatalogue {
@@ -28,6 +31,13 @@ export interface ModelCatalogue {
                effort_options?: Record<string, string[]>;
                /** Models that REFUSE tools unless this exact value is sent (gpt-5.6-*). */
                effort_required?: Record<string, string> }[];
+  /** The code-peer backends a request may select. A second axis, reported under its
+   *  own key so nothing conflates "which model answers" with "which agent codes". */
+  code_peers?: {
+    default: string;
+    peers: { id: string; label: string; available: boolean;
+             model?: string; auth?: string | null }[];
+  };
 }
 
 /** Ask the agent which models a request may select. */
@@ -191,6 +201,9 @@ export async function streamChat(
     ...(cfg.model ? { model: cfg.model } : {}),
     ...(cfg.provider ? { provider: cfg.provider } : {}),
     ...(cfg.reasoningEffort ? { reasoning_effort: cfg.reasoningEffort } : {}),
+    // Absent = the deployment's AGENT_CODE_PEER default, so a client that never
+    // sets it behaves exactly as it did before the control existed.
+    ...(cfg.codePeer ? { code_peer: cfg.codePeer } : {}),
   };
 
   const resp = await fetch(cfg.endpoint, {
