@@ -67,7 +67,9 @@ Docker-out-of-Docker the work dir must live on the host-shared bind mount
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -103,6 +105,8 @@ DEFAULT_SANDBOX_USER = "1000:1000"
 _API_KEY_ENV = "ANTHROPIC_API_KEY"
 _OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 
+logger = logging.getLogger(__name__)
+
 _ACCEPTED_FLAG_VALUES = {"claude", "claude-code", "claude_code"}
 
 # What the picker offers. ALIASES, not pinned ids: the CLI resolves each to the
@@ -117,6 +121,172 @@ SELECTABLE_MODELS = ("sonnet", "opus", "haiku", "fable")
 # skipped and network access. --bare disables that discovery; subscription auth
 # cannot use --bare, so the staging guard below closes the same door either way.
 _INSTRUCTION_FILENAMES = {"claude.md", "claude.local.md", ".claude"}
+
+
+# --- persistent per-thread project directory ------------------------------------------
+#
+# A run used to get mkdtemp + rmtree, so every turn started from nothing: files gone,
+# installed packages gone, and no memory of having worked on any of it. Keeping the
+# directory across turns of the same conversation gives the CLI a PROJECT — and, because
+# CLAUDE_CONFIG_DIR points inside it, its own session history too.
+#
+# Measured on the deployment before building this: run 1 wrote notes.txt containing ZEBRA;
+# run 2 with --continue answered "ZEBRA" without reading the file; a fresh run without
+# --continue answered "UNKNOWN — I have no record of writing anything to notes.txt". So
+# both halves survive, and the control rules out it having simply read the file.
+#
+# What does NOT persist is the container: every turn still gets a fresh hardened one, and
+# only the bind mount carries over. That is the whole reason this is safe to default on.
+DEFAULT_SESSION_TTL_HOURS = 72
+_MANIFEST_NAME = ".agent_artifacts.json"
+_LOCK_NAME = ".agent_lock"
+# A lock older than this is a crashed run, not a running one: the wall-clock ceiling for a
+# run is DEFAULT_CLAUDE_TIMEOUT, so anything past it plus slack cannot still be alive.
+_LOCK_STALE_S = DEFAULT_CLAUDE_TIMEOUT * 2
+
+
+def persistence_enabled() -> bool:
+    """Whether a conversation keeps its project directory between turns."""
+    return (os.getenv("AGENT_CLAUDE_PERSIST", "1") or "").strip().lower() not in {
+        "0", "false", "no", "off"}
+
+
+def _session_ttl_hours() -> float:
+    try:
+        return max(0.0, float(os.getenv("AGENT_CLAUDE_SESSION_TTL_HOURS",
+                                        str(DEFAULT_SESSION_TTL_HOURS))))
+    except (TypeError, ValueError):
+        return float(DEFAULT_SESSION_TTL_HOURS)
+
+
+def _sweep_sessions(root: Path) -> None:
+    """Drop session directories nobody has touched inside the TTL.
+
+    Without this a busy deployment accumulates one directory per conversation forever,
+    including every one-off question. Failure here is never fatal: a full disk is a
+    problem, but so is refusing to answer because a stale directory would not delete.
+    """
+    ttl = _session_ttl_hours()
+    if ttl <= 0:
+        return
+    import time
+
+    cutoff = time.time() - ttl * 3600
+    try:
+        candidates = list(root.glob("claudesess_*"))
+    except OSError:
+        return
+    for path in candidates:
+        try:
+            if path.is_dir() and path.stat().st_mtime < cutoff:
+                shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            continue
+
+
+def _acquire(work: Path) -> bool:
+    """Claim a session directory for this run, or report that another run holds it.
+
+    Two turns of one conversation in one directory would interleave file writes and
+    corrupt the CLI's own session history. A caller that cannot claim it falls back to a
+    throwaway directory rather than failing the turn — losing continuity beats losing the
+    answer.
+    """
+    import time
+
+    lock = work / _LOCK_NAME
+    try:
+        if lock.exists() and (time.time() - lock.stat().st_mtime) > _LOCK_STALE_S:
+            lock.unlink(missing_ok=True)          # a crashed run, not a live one
+        fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        os.close(fd)
+        return True
+    except FileExistsError:
+        return False
+    except OSError:
+        return False
+
+
+def session_dir(thread_id: Optional[str]) -> Dict[str, Any]:
+    """The directory this run works in: the conversation's own, or a throwaway.
+
+    Returns ``{"path", "persistent", "resumed"}``. ``resumed`` means the CLI has session
+    history here already, which is what ``--continue`` needs to mean anything.
+    """
+    root = Path(_work_root())
+    if not thread_id or not persistence_enabled():
+        return {"path": Path(tempfile.mkdtemp(prefix="agentcc_", dir=root)),
+                "persistent": False, "resumed": False}
+    _sweep_sessions(root)
+    from agent_runtime.executor_factory import child_thread_id
+
+    # Same scoping the execute_code sandbox and the QGIS jobs already use, so one
+    # conversation's peer state cannot collide with another's.
+    slug = re.sub(r"[^A-Za-z0-9_.-]", "_", str(child_thread_id(thread_id, "claudepeer")))[:80]
+    work = root / f"claudesess_{slug}"
+    try:
+        work.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return {"path": Path(tempfile.mkdtemp(prefix="agentcc_", dir=root)),
+                "persistent": False, "resumed": False}
+    if not _acquire(work):
+        logger.info("claude peer session %s is busy; using a throwaway directory", slug)
+        return {"path": Path(tempfile.mkdtemp(prefix="agentcc_", dir=root)),
+                "persistent": False, "resumed": False}
+    return {"path": work, "persistent": True, "resumed": (work / ".claude").is_dir()}
+
+
+def _manifest_path(work: Path) -> Path:
+    return work / _MANIFEST_NAME
+
+
+def _fingerprints(work: Path) -> Dict[str, List[float]]:
+    """size and mtime for every file the peer could persist, keyed by relative path."""
+    out: Dict[str, List[float]] = {}
+    try:
+        entries = sorted(work.rglob("*"))
+    except OSError:
+        return out
+    for path in entries:
+        try:
+            if not path.is_file():
+                continue
+            rel = path.relative_to(work)
+            if not rel.parts or rel.parts[0].startswith(".") or rel.parts[0] == "__pycache__":
+                continue
+            stat = path.stat()
+            out[str(rel)] = [float(stat.st_size), float(stat.st_mtime)]
+        except OSError:
+            continue
+    return out
+
+
+def already_persisted(work: Path) -> set:
+    """Files a previous turn already sent to the file store, unchanged since.
+
+    Artifact persistence walks the whole work dir, which was right when the dir lasted one
+    run. Across turns it would re-upload every earlier file on every turn — new file ids,
+    duplicate download links, and the map layers re-emitted each time. Size and mtime are
+    enough to tell "same file" from "the CLI edited it", and a file it edited SHOULD be
+    sent again.
+    """
+    try:
+        stored = json.loads(_manifest_path(work).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - no manifest, a corrupt one: persist everything
+        return set()
+    if not isinstance(stored, dict):
+        return set()
+    current = _fingerprints(work)
+    return {rel for rel, meta in stored.items()
+            if isinstance(meta, list) and current.get(rel) == meta}
+
+
+def record_persisted(work: Path) -> None:
+    """Remember what is on disk now, so the next turn only sends what changed."""
+    try:
+        _manifest_path(work).write_text(json.dumps(_fingerprints(work)), encoding="utf-8")
+    except OSError:  # pragma: no cover - a manifest that cannot be written re-sends, no worse
+        logger.debug("claude peer: could not write the artifact manifest")
 
 
 def selects_claude(value: Optional[str]) -> bool:
@@ -208,7 +378,8 @@ def sandbox_user() -> str:
 
 def build_docker_argv(work: Path, name: str, model: str, prompt: str,
                       base_url: Optional[str] = None,
-                      credential_env: str = _API_KEY_ENV) -> List[str]:
+                      credential_env: str = _API_KEY_ENV,
+                      resume: bool = False) -> List[str]:
     """``docker run`` argv for one Claude Code run.
 
     Hardened like the execute_code sandbox but WITH network — the CLI is useless
@@ -260,6 +431,13 @@ def build_docker_argv(work: Path, name: str, model: str, prompt: str,
     if credential_env == _API_KEY_ENV:
         argv.append("--bare")               # no hooks/LSP/plugins/keychain/CLAUDE.md
     argv += ["--dangerously-skip-permissions"]   # no TTY to approve; see module docstring
+    if resume:
+        # "Continue the most recent conversation in the current directory" — and the
+        # directory is this conversation's own, with CLAUDE_CONFIG_DIR inside it. Verified
+        # end to end: a resumed run answered from what it had written on a previous turn
+        # while a fresh one said it had no record of it. Only passed when history exists,
+        # since --continue with nothing to continue is an error rather than a no-op.
+        argv.append("--continue")
     # Unset by default, and that is the deliberate choice: a peer that can install a
     # package, read the traceback and try again is the reason to run one at all. A
     # deployment that wants a narrower surface names the tools it will allow, e.g.
@@ -340,8 +518,14 @@ def run_claude(
     input_file_ids: Optional[List[str]] = None,
     timeout: Optional[int] = None,
     model: Optional[str] = None,
+    thread_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """One sandboxed ``claude --print`` run; returns a JSON-serializable result dict."""
+    """One sandboxed ``claude --print`` run; returns a JSON-serializable result dict.
+
+    With a ``thread_id`` the conversation keeps its project directory between turns, so the
+    CLI can carry on with the files it wrote and the packages it installed — and resume its
+    own session history. The CONTAINER is still fresh every run.
+    """
     settings = resolve_claude_settings(model)
     model = str(settings["model"])
     if not settings["credential"]:
@@ -355,7 +539,8 @@ def run_claude(
         }
     timeout = int(timeout or _timeout_seconds())
     try:
-        work = Path(tempfile.mkdtemp(prefix="agentcc_", dir=_work_root()))
+        session = session_dir(thread_id)
+        work, persistent, resumed = session["path"], session["persistent"], session["resumed"]
     except OSError as exc:
         return {
             "ok": False, "exit_code": None, "answer": "", "stderr": "", "timed_out": False,
@@ -372,7 +557,8 @@ def run_claude(
             pass
         name = f"agentcc_{uuid.uuid4().hex[:12]}"
         credential_env = str(settings["credential_env"])
-        argv = build_docker_argv(work, name, model, prompt, settings["base_url"], credential_env)
+        argv = build_docker_argv(work, name, model, prompt, settings["base_url"], credential_env,
+                                 resume=resumed)
         env = {**os.environ, credential_env: str(settings["credential"])}
         exit_code: Optional[int] = None
         stdout, stderr, timed_out, error = "", "", False, None
@@ -390,8 +576,11 @@ def run_claude(
 
         parsed = parse_cli_output(stdout)
         envelope = parsed["envelope"] or {}
-        excluded = set(staging["staged"]) | {f"uploaded_{n}" for n in renamed}
+        excluded = (set(staging["staged"]) | {f"uploaded_{n}" for n in renamed}
+                    | already_persisted(work))
         artifacts = _persist_artifacts(work, excluded)
+        if persistent:
+            record_persisted(work)
         # The tool path runs these checks inside add_map_layer. This peer has none of the
         # AGENT's tools, so
         # without this nothing between the CLI and the user ever looks at what it wrote —
@@ -419,6 +608,8 @@ def run_claude(
             "model": model,
             # Which account paid, in the record rather than inferred from a bill.
             "auth": settings["auth"],
+            # Which project this ran in, and whether it picked up where it left off.
+            "session": ("resumed" if resumed else "new") if persistent else "ephemeral",
         }
         if renamed:
             result["renamed_instruction_files"] = renamed
@@ -442,7 +633,11 @@ def run_claude(
             result["input_files_skipped"] = staging["skipped"]
         return result
     finally:
-        shutil.rmtree(work, ignore_errors=True)
+        if persistent:
+            # The project stays; only this run's claim on it is released.
+            (work / _LOCK_NAME).unlink(missing_ok=True)
+        else:
+            shutil.rmtree(work, ignore_errors=True)
 
 
 def run_claude_code_peer(
@@ -475,14 +670,15 @@ def run_claude_code_peer(
     )
     call_args = {"model": resolve_claude_settings(model)["model"], "prompt_chars": len(prompt)}
     emit_trace_event("tool_call", {"name": "claude_run", "args": call_args}, node="code")
-    result = run_claude(prompt, input_file_ids=input_file_ids, model=model)
+    result = run_claude(prompt, input_file_ids=input_file_ids, model=model,
+                        thread_id=(state or {}).get("thread_id"))
     emit_trace_event(
         "tool_result",
         {
             "name": "claude_run",
             "content": {k: result.get(k) for k in
                         ("ok", "exit_code", "timed_out", "error", "artifacts", "backend",
-                         "model", "auth", "num_turns", "total_cost_usd")},
+                         "model", "auth", "session", "num_turns", "total_cost_usd")},
         },
         node="code",
     )

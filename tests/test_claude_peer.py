@@ -17,6 +17,7 @@ def _clean_env(monkeypatch):
         "AGENT_CLAUDE_BASE_URL", "AGENT_CLAUDE_IMAGE", "AGENT_CLAUDE_NETWORK",
         "AGENT_CLAUDE_TIMEOUT", "AGENT_CLAUDE_MEMORY", "AGENT_CLAUDE_CPUS",
         "AGENT_CLAUDE_PIDS", "AGENT_CLAUDE_USER", "AGENT_CLAUDE_ALLOWED_TOOLS",
+        "AGENT_CLAUDE_PERSIST", "AGENT_CLAUDE_SESSION_TTL_HOURS",
         "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL",
         "CLAUDE_CODE_OAUTH_TOKEN", "AGENT_CLAUDE_OAUTH_TOKEN",
         "AGENT_CODE_EXEC_WORK_ROOT",
@@ -623,3 +624,114 @@ def test_a_deployment_can_narrow_the_surface_if_it_wants(tmp_path, monkeypatch):
     argv = ccp.build_docker_argv(tmp_path, "n", "sonnet", "p")
     i = argv.index("--allowedTools")
     assert argv[i + 1:i + 3] == ["Bash", "Read"], "commas or spaces, both are natural to type"
+
+
+# ---------------------------------------------------------------------------
+# Persistent per-thread project directory
+# ---------------------------------------------------------------------------
+
+def test_a_thread_keeps_its_project_between_turns(tmp_path, monkeypatch):
+    """The point of the whole thing: turn 2 finds turn 1's files and the CLI's own session
+    history, so it can carry on rather than start from nothing."""
+    monkeypatch.setenv("AGENT_CODE_EXEC_WORK_ROOT", str(tmp_path))
+
+    first = ccp.session_dir("thread-abc")
+    assert first["persistent"] is True and first["resumed"] is False
+    (first["path"] / "project.py").write_text("print('hi')")
+    (first["path"] / ".claude").mkdir()                 # what the CLI leaves behind
+    (first["path"] / ccp._LOCK_NAME).unlink()           # the run finishes
+
+    second = ccp.session_dir("thread-abc")
+    assert second["path"] == first["path"]
+    assert second["resumed"] is True, "history is here, so --continue means something"
+    assert (second["path"] / "project.py").exists()
+
+    other = ccp.session_dir("thread-xyz")
+    assert other["path"] != first["path"], "one conversation cannot see another's project"
+
+
+def test_no_thread_and_persistence_off_both_give_a_throwaway(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_CODE_EXEC_WORK_ROOT", str(tmp_path))
+    assert ccp.session_dir(None)["persistent"] is False
+
+    monkeypatch.setenv("AGENT_CLAUDE_PERSIST", "0")
+    assert ccp.session_dir("thread-abc")["persistent"] is False
+
+
+def test_a_busy_session_falls_back_rather_than_failing(tmp_path, monkeypatch):
+    """Two turns of one conversation in one directory would interleave writes and corrupt
+    the CLI's session history. Losing continuity beats losing the answer."""
+    monkeypatch.setenv("AGENT_CODE_EXEC_WORK_ROOT", str(tmp_path))
+    held = ccp.session_dir("thread-abc")                # lock still held
+    assert held["persistent"] is True
+
+    concurrent = ccp.session_dir("thread-abc")
+    assert concurrent["persistent"] is False
+    assert concurrent["path"] != held["path"]
+
+
+def test_a_lock_left_by_a_crashed_run_does_not_wedge_the_thread(tmp_path, monkeypatch):
+    """A run that died never released its claim. Waiting forever on a dead process would
+    mean one crash disables that conversation's peer for good."""
+    import os as _os
+    import time
+
+    monkeypatch.setenv("AGENT_CODE_EXEC_WORK_ROOT", str(tmp_path))
+    first = ccp.session_dir("thread-abc")
+    lock = first["path"] / ccp._LOCK_NAME
+    old = time.time() - ccp._LOCK_STALE_S - 60
+    _os.utime(lock, (old, old))
+
+    assert ccp.session_dir("thread-abc")["persistent"] is True, "a stale claim is broken"
+
+
+def test_only_changed_files_are_persisted_again(tmp_path):
+    """Artifact persistence walks the whole dir, which was right when the dir lasted one
+    run. Across turns it would re-upload every earlier file every turn — new file ids,
+    duplicate links, and the map layers re-emitted each time."""
+    (tmp_path / "kept.geojson").write_text("{}")
+    (tmp_path / "edited.txt").write_text("v1")
+    ccp.record_persisted(tmp_path)
+
+    assert ccp.already_persisted(tmp_path) == {"kept.geojson", "edited.txt"}
+
+    import os as _os
+    (tmp_path / "edited.txt").write_text("v2 is longer")
+    _os.utime(tmp_path / "edited.txt", (0, 0))
+    (tmp_path / "new.csv").write_text("a,b")
+
+    skip = ccp.already_persisted(tmp_path)
+    assert "kept.geojson" in skip
+    assert "edited.txt" not in skip, "the CLI changed it, so the user should get the new one"
+    assert "new.csv" not in skip
+
+
+def test_a_missing_or_corrupt_manifest_persists_everything(tmp_path):
+    """Failing open: a re-uploaded artifact is noise, a silently withheld one is a lost
+    result."""
+    (tmp_path / "a.txt").write_text("x")
+    assert ccp.already_persisted(tmp_path) == set()
+    (tmp_path / ccp._MANIFEST_NAME).write_text("not json{")
+    assert ccp.already_persisted(tmp_path) == set()
+
+
+def test_stale_sessions_are_swept(tmp_path, monkeypatch):
+    import os as _os
+    import time
+
+    monkeypatch.setenv("AGENT_CODE_EXEC_WORK_ROOT", str(tmp_path))
+    monkeypatch.setenv("AGENT_CLAUDE_SESSION_TTL_HOURS", "24")
+    old_dir = tmp_path / "claudesess_ancient"
+    old_dir.mkdir()
+    stamp = time.time() - 48 * 3600
+    _os.utime(old_dir, (stamp, stamp))
+    fresh = ccp.session_dir("thread-new")
+
+    assert not old_dir.exists(), "one directory per conversation, forever, fills a disk"
+    assert fresh["path"].exists()
+
+
+def test_continue_is_only_passed_when_there_is_history(tmp_path):
+    """--continue with nothing to continue is an error, not a no-op."""
+    assert "--continue" not in ccp.build_docker_argv(tmp_path, "n", "sonnet", "p")
+    assert "--continue" in ccp.build_docker_argv(tmp_path, "n", "sonnet", "p", resume=True)
