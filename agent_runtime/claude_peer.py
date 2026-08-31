@@ -38,6 +38,26 @@ network — it must reach the Anthropic API. The container is the mitigation, no
 the flag: read-only root, no capabilities, non-root user, throwaway work dir.
 That is the same trade the opencode peer already makes.
 
+**The tool surface is deliberately unrestricted, and that is a decision rather
+than an oversight.** Measured from inside the sandbox: the CLI has Bash, Read,
+Write, Edit, Agent, Skill, Workflow and (deferred) WebFetch/WebSearch, and
+generated code reaches the internet — ``urlopen("https://api.github.com/zen")``
+returned 200. Two consequences worth stating plainly, because both look like
+bugs if you meet them cold:
+
+* Code written by THIS peer can fetch things; the same code under the built-in
+  peer cannot, because ``execute_code`` runs ``--network none``. Swapping the
+  peer swaps the network posture of generated code.
+* Its WebFetch/WebSearch do not pass through the agent's own open-web
+  governance — the two-step search/fetch design, the per-turn caps, or
+  ``AGENT_WEB_ALLOWED_PORTS``, which exists because this deployment's own
+  services sit on public addresses.
+
+A code peer that can install a package, read an error and try again is the point
+of running one, so the surface stays wide and the CONTAINER carries the safety.
+``AGENT_CLAUDE_ALLOWED_TOOLS`` narrows it for a deployment that wants that; it is
+unset by default on purpose.
+
 The image must have Claude Code installed — see ``Dockerfile.claude`` at the
 repo root; override the name via ``AGENT_CLAUDE_IMAGE``. Under
 Docker-out-of-Docker the work dir must live on the host-shared bind mount
@@ -239,11 +259,16 @@ def build_docker_argv(work: Path, name: str, model: str, prompt: str,
     ]
     if credential_env == _API_KEY_ENV:
         argv.append("--bare")               # no hooks/LSP/plugins/keychain/CLAUDE.md
-    argv += [
-        "--dangerously-skip-permissions",   # no TTY to approve tool use; see module docstring
-        "--model", model,
-        prompt,
-    ]
+    argv += ["--dangerously-skip-permissions"]   # no TTY to approve; see module docstring
+    # Unset by default, and that is the deliberate choice: a peer that can install a
+    # package, read the traceback and try again is the reason to run one at all. A
+    # deployment that wants a narrower surface names the tools it will allow, e.g.
+    # "Bash Read Write Edit" — which also drops WebFetch/WebSearch, the two that reach the
+    # open web outside this agent's own caps.
+    allowed = (os.getenv("AGENT_CLAUDE_ALLOWED_TOOLS") or "").strip()
+    if allowed:
+        argv += ["--allowedTools", *allowed.replace(",", " ").split()]
+    argv += ["--model", model, prompt]
     return argv
 
 
@@ -367,14 +392,15 @@ def run_claude(
         envelope = parsed["envelope"] or {}
         excluded = set(staging["staged"]) | {f"uploaded_{n}" for n in renamed}
         artifacts = _persist_artifacts(work, excluded)
-        # The tool path runs these checks inside add_map_layer. This peer has no tools, so
+        # The tool path runs these checks inside add_map_layer. This peer has none of the
+        # AGENT's tools, so
         # without this nothing between the CLI and the user ever looks at what it wrote —
         # and a blank figure is exactly what a peer's own summary will not mention. Runs
         # here because the work dir is deleted in the finally below.
         from agent_runtime.layer_qa import inspect_artifacts
 
         qa = inspect_artifacts(str(work), [a.get("filename") for a in artifacts])
-        # A peer with no tools still wrote geodata. Turn it into layer descriptors here,
+        # No add_map_layer here, but it still wrote geodata. Turn it into descriptors here,
         # while the work dir still exists — the wrapper emits them from the request context.
         from agent_runtime.map_layers import layers_for_artifacts
 
@@ -460,7 +486,7 @@ def run_claude_code_peer(
         },
         node="code",
     )
-    # The peer has no tools, so nothing emitted a map_layer on its behalf. This wrapper
+    # No add_map_layer ran, so nothing emitted a map_layer on its behalf. This wrapper
     # runs in the request's trace context — the same place a tool callback would — so the
     # descriptors go out here, through the same build_map_layers boundary every tool's
     # layer crosses, and get the same validation.

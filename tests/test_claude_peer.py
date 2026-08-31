@@ -16,7 +16,8 @@ def _clean_env(monkeypatch):
         "AGENT_CODE_PEER", "AGENT_CLAUDE_MODEL", "AGENT_CLAUDE_API_KEY",
         "AGENT_CLAUDE_BASE_URL", "AGENT_CLAUDE_IMAGE", "AGENT_CLAUDE_NETWORK",
         "AGENT_CLAUDE_TIMEOUT", "AGENT_CLAUDE_MEMORY", "AGENT_CLAUDE_CPUS",
-        "AGENT_CLAUDE_PIDS", "AGENT_CLAUDE_USER", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL",
+        "AGENT_CLAUDE_PIDS", "AGENT_CLAUDE_USER", "AGENT_CLAUDE_ALLOWED_TOOLS",
+        "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL",
         "CLAUDE_CODE_OAUTH_TOKEN", "AGENT_CLAUDE_OAUTH_TOKEN",
         "AGENT_CODE_EXEC_WORK_ROOT",
     ):
@@ -596,3 +597,29 @@ def test_nothing_is_emitted_when_the_peer_wrote_no_geodata(monkeypatch):
     })
     peer.run_claude_code_peer("compute something")
     assert not [d for e, d in emitted if e == "map_layer"]
+
+
+def test_the_tool_surface_is_unrestricted_by_default(tmp_path, monkeypatch):
+    """Deliberate, not an oversight: a peer that can install a package, read the traceback
+    and try again is the reason to run one. The container carries the safety — read-only
+    root, no capabilities, non-root, throwaway /work — not a tool whitelist."""
+    monkeypatch.delenv("AGENT_CLAUDE_ALLOWED_TOOLS", raising=False)
+    argv = ccp.build_docker_argv(tmp_path, "n", "sonnet", "p")
+    assert "--allowedTools" not in argv
+    assert "--network" not in argv, "no --network none: the CLI must reach its own API"
+
+
+def test_a_deployment_can_narrow_the_surface_if_it_wants(tmp_path, monkeypatch):
+    """The escape hatch exists so the default is a choice rather than the only option.
+    Naming tools drops the rest, including the WebFetch/WebSearch pair that reaches the
+    open web outside this agent's own per-turn caps."""
+    monkeypatch.setenv("AGENT_CLAUDE_ALLOWED_TOOLS", "Bash Read Write Edit")
+    argv = ccp.build_docker_argv(tmp_path, "n", "sonnet", "p")
+    i = argv.index("--allowedTools")
+    assert argv[i + 1:i + 5] == ["Bash", "Read", "Write", "Edit"]
+    assert argv[-1] == "p", "the prompt stays the trailing positional argument"
+
+    monkeypatch.setenv("AGENT_CLAUDE_ALLOWED_TOOLS", "Bash,Read")
+    argv = ccp.build_docker_argv(tmp_path, "n", "sonnet", "p")
+    i = argv.index("--allowedTools")
+    assert argv[i + 1:i + 3] == ["Bash", "Read"], "commas or spaces, both are natural to type"

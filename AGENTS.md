@@ -202,6 +202,20 @@ not an app built on the same token, so a turn 400s until someone adds extra usag
 metered spending, i.e. an API key by another name. The CODE PEER is unaffected: it runs the CLI,
 which is not a third-party app.
 
+**A CLI peer's tool surface is deliberately wide.** Measured from inside the sandbox: it has
+Bash/Read/Write/Edit, sub-agents, and WebFetch/WebSearch, and code it runs reaches the
+internet (`urlopen` returned 200) — because unlike the `execute_code` sandbox it is NOT
+`--network none`. So swapping the peer swaps the network posture of generated code, and its
+web tools do not pass through this agent's own two-step caps or `AGENT_WEB_ALLOWED_PORTS`.
+That is a decision, not an oversight: a peer that can install a package, read the traceback
+and retry is the point of running one, and the CONTAINER carries the safety. Narrow it with
+`AGENT_CLAUDE_ALLOWED_TOOLS` if a deployment wants that; it is unset on purpose.
+
+A CLI peer has none of the AGENT's tools, so no `add_map_layer` — but its geodata still
+reaches the map: `map_layers.layers_for_artifacts` turns any `.geojson` it wrote into a
+descriptor and the peer wrapper emits it, from the request's trace context, through the same
+`build_map_layers` boundary every tool's layer crosses.
+
 Do not assume a CLI's flags. Claude Code 2.1.x has **no** `--max-turns`, and an unknown flag
 makes the CLI exit non-zero — which reads as "the peer failed", not "somebody guessed". Check
 `--help` in the built image and pin the check in a test.
