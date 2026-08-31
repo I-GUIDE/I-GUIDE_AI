@@ -374,6 +374,11 @@ def run_claude(
         from agent_runtime.layer_qa import inspect_artifacts
 
         qa = inspect_artifacts(str(work), [a.get("filename") for a in artifacts])
+        # A peer with no tools still wrote geodata. Turn it into layer descriptors here,
+        # while the work dir still exists — the wrapper emits them from the request context.
+        from agent_runtime.map_layers import layers_for_artifacts
+
+        map_layers = layers_for_artifacts(work, artifacts)
         result: Dict[str, Any] = {
             # The CLI can exit 0 and still report is_error in the envelope, so both count.
             "ok": (error is None and not timed_out and exit_code == 0
@@ -393,6 +398,11 @@ def run_claude(
             result["renamed_instruction_files"] = renamed
         if qa:
             result["output_warnings"] = qa
+        if map_layers:
+            result["map_layers"] = map_layers
+            # The supervisor's delivery check reads this off the execution record; without
+            # it a turn that DID put something on the map still counts as undelivered.
+            result["on_map"] = True
         # What the run cost is part of the record, not a detail: this peer spends
         # on a different account from the one answering the user.
         for key in ("num_turns", "total_cost_usd", "duration_ms", "session_id"):
@@ -419,6 +429,7 @@ def run_claude_code_peer(
     """Code-peer adapter: the same flat shape as ``default_code_fn`` and the
     opencode peer, so synthesis and the trace pipeline stay agnostic to which
     backend produced the result."""
+    from agent_runtime.map_layers import build_map_layers
     from agent_runtime.streaming_trace import emit_trace_event
 
     staged_names: List[str] = []
@@ -449,6 +460,13 @@ def run_claude_code_peer(
         },
         node="code",
     )
+    # The peer has no tools, so nothing emitted a map_layer on its behalf. This wrapper
+    # runs in the request's trace context — the same place a tool callback would — so the
+    # descriptors go out here, through the same build_map_layers boundary every tool's
+    # layer crosses, and get the same validation.
+    for layer in build_map_layers("claude_run", result):
+        emit_trace_event("map_layer", layer, node="code")
+
     answer = result.get("answer") or ""
     warnings = result.get("output_warnings") or []
     if warnings:

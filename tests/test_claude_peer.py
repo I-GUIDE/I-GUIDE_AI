@@ -552,3 +552,47 @@ def test_the_picker_reports_the_default_the_agent_would_actually_use(monkeypatch
     monkeypatch.setenv("ANVILGPT_MODEL", "gpt-oss:120b")
     assert list_available_models(timeout=0.01)["default"] == {
         "provider": "anvilgpt", "model": "gpt-oss:120b"}
+
+
+def test_written_geodata_is_emitted_as_a_map_layer(monkeypatch, tmp_path):
+    """End to end for the gap this closes: the peer has no tools, so nothing emitted a
+    map_layer on its behalf and its geodata arrived as a download link only. The wrapper
+    runs in the request's trace context, which is where a tool callback would have been."""
+    import agent_runtime.claude_peer as peer
+
+    emitted = []
+    monkeypatch.setattr("agent_runtime.streaming_trace.emit_trace_event",
+                        lambda event, data=None, **kw: emitted.append((event, data)))
+    monkeypatch.setattr(peer, "run_claude", lambda prompt, **kw: {
+        "ok": True, "exit_code": 0, "answer": "Wrote the layer.", "stderr": "", "error": None,
+        "artifacts": [{"filename": "sites.geojson", "download_url": "http://x/files/f_9/download"}],
+        "backend": "claude-docker", "model": "sonnet", "auth": "subscription",
+        "on_map": True,
+        "map_layers": [{"url": "http://x/files/f_9/download", "label": "sites",
+                        "render": "points", "count": 12, "source": "analysis"}],
+    })
+
+    out = peer.run_claude_code_peer("map the sites")
+
+    layers = [data for event, data in emitted if event == "map_layer"]
+    assert len(layers) == 1, f"expected one map_layer event, got {[e for e, _ in emitted]}"
+    assert layers[0]["url"] == "http://x/files/f_9/download"
+    assert layers[0]["render"] == "points"
+    assert layers[0]["kind"] == "map_layer", "it went through build_map_layers, not around it"
+    assert out["answer"].startswith("Wrote the layer.")
+
+
+def test_nothing_is_emitted_when_the_peer_wrote_no_geodata(monkeypatch):
+    """A code run that produced a CSV and a plot must not manufacture a map."""
+    import agent_runtime.claude_peer as peer
+
+    emitted = []
+    monkeypatch.setattr("agent_runtime.streaming_trace.emit_trace_event",
+                        lambda event, data=None, **kw: emitted.append((event, data)))
+    monkeypatch.setattr(peer, "run_claude", lambda prompt, **kw: {
+        "ok": True, "exit_code": 0, "answer": "Computed it.", "stderr": "", "error": None,
+        "artifacts": [{"filename": "result.csv", "download_url": "http://x/files/f_1/download"}],
+        "backend": "claude-docker", "model": "sonnet",
+    })
+    peer.run_claude_code_peer("compute something")
+    assert not [d for e, d in emitted if e == "map_layer"]

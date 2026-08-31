@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,59 @@ def _features_from(obj: Any) -> List[Dict[str, Any]]:
     elif isinstance(obj, list):
         for it in obj:
             add(it)
+    return out
+
+
+# Written geodata a peer with no tools can still get onto the map.
+_LAYERABLE_SUFFIXES = (".geojson",)
+
+
+def layers_for_artifacts(directory: Any, artifacts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Map-layer descriptors for the geodata a TOOLLESS peer left behind.
+
+    A sandboxed CLI code peer has no add_map_layer — it writes files and returns prose, so
+    its geodata reached the user as a download link and nothing else. Every other producer
+    in the system delivers a map by RETURNING a descriptor that the trace layer turns into a
+    `map_layer` event, so the honest route is to build that same descriptor from the files
+    the peer actually wrote, and let it cross the same validation as everyone else's.
+
+    The render is chosen by the rule add_map_layer uses for ``render="auto"``, so a layer
+    looks the same however it was produced. A file with no features is skipped rather than
+    shipped: an empty layer draws nothing, and inspect_artifacts already tells the answer
+    about it.
+    """
+    out: List[Dict[str, Any]] = []
+    base = Path(str(directory))
+    try:
+        import pyogrio
+    except Exception:  # pragma: no cover - optional dep
+        return out
+    for record in artifacts or []:
+        name = str((record or {}).get("filename") or "")
+        url = (record or {}).get("download_url")
+        if not name.lower().endswith(_LAYERABLE_SUFFIXES) or not url:
+            continue
+        path = base / name
+        if not path.is_file():
+            continue
+        try:
+            info = pyogrio.read_info(str(path))
+            features = int(info.get("features") or 0)
+            geometry = str(info.get("geometry_type") or "")
+        except Exception:  # noqa: BLE001 - an unreadable file is simply not a layer
+            continue
+        if features <= 0:
+            continue
+        is_point = "point" in geometry.lower()
+        render = ("heatmap" if (is_point and features > 2000)
+                  else ("points" if is_point else "shapes"))
+        out.append({
+            "url": url,
+            "label": Path(name).stem.replace("_", " ").strip() or name,
+            "render": render,
+            "count": features,
+            "source": "analysis",
+        })
     return out
 
 
