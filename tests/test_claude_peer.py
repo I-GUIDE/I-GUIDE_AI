@@ -495,3 +495,15 @@ def test_the_catalogue_offers_claude_even_with_no_key(monkeypatch):
     assert anth["models"], "still shown, so the option is visibly available-if-configured"
     assert all(m.startswith("claude-") for m in anth["models"]), \
         "ids, not the CLI's sonnet/opus aliases — this path is the Messages API"
+
+
+def test_temperature_is_not_sent_to_anthropic(monkeypatch):
+    """Observed live on claude-sonnet-5: HTTP 400 "`temperature` is deprecated for this
+    model". Older ids still accept it, so a hardcoded 0.0 works right up until someone
+    picks a current model — which is the whole point of the picker."""
+    from agent_runtime.executor_factory import build_llm
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat")
+    llm = build_llm(provider="anthropic", model="claude-sonnet-5")
+    assert llm.temperature is None, "sending it fails the turn on the current models"

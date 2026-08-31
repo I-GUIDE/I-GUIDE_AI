@@ -357,9 +357,13 @@ def build_llm(provider: Optional[str] = None, model: Optional[str] = None,
         if effort:
             logger.info("reasoning_effort %r is an OpenAI parameter; not sent to Anthropic",
                         effort)
+        # No temperature. The Claude 5 family REFUSES it — "`temperature` is deprecated for
+        # this model", HTTP 400, which fails the turn rather than being ignored — while
+        # older ids still accept it. Sending nothing works on both, and this provider is
+        # here to be selected freely across the list.
         llm = ChatAnthropic(model=model or os.getenv("ANTHROPIC_MODEL")
                             or _ANTHROPIC_FALLBACK_MODELS[1],
-                            api_key=key or "unused-when-bearer", temperature=0.0,
+                            api_key=key or "unused-when-bearer",
                             max_tokens=8192,
                             default_headers=_OAUTH_BETA_HEADER if not key else None)
         if not key:
