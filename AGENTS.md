@@ -216,6 +216,14 @@ reaches the map: `map_layers.layers_for_artifacts` turns any `.geojson` it wrote
 descriptor and the peer wrapper emits it, from the request's trace context, through the same
 `build_map_layers` boundary every tool's layer crosses.
 
+**A conversation keeps its project directory between turns** (`claudesess_<thread>` under
+`AGENT_CODE_EXEC_WORK_ROOT`), so the CLI resumes with `--continue` and its `pip install
+--user` cache survives; the container is still fresh each run. Two things that forced
+themselves on the design: artifact persistence walks the whole dir, so without a
+size+mtime manifest every earlier file is re-uploaded every turn; and the CLAUDE.md guard
+must be scoped to THIS TURN's uploads, or it renames the CLI's own `.claude` state and
+`--continue` silently finds no history.
+
 Do not assume a CLI's flags. Claude Code 2.1.x has **no** `--max-turns`, and an unknown flag
 makes the CLI exit non-zero — which reads as "the peer failed", not "somebody guessed". Check
 `--help` in the built image and pin the check in a test.
