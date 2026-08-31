@@ -450,20 +450,29 @@ def build_docker_argv(work: Path, name: str, model: str, prompt: str,
     return argv
 
 
-def neutralize_instruction_files(work: Path) -> List[str]:
-    """Rename anything in the work dir the CLI would read as INSTRUCTIONS.
+def neutralize_instruction_files(work: Path, staged: Optional[List[str]] = None) -> List[str]:
+    """Rename anything a user UPLOADED that the CLI would read as INSTRUCTIONS.
 
-    Staged conversation files are user uploads. A file called ``CLAUDE.md`` is
-    not data to a Claude Code session — it is a brief, loaded automatically, for
-    an agent that runs here with tool permissions skipped and network access.
-    ``--bare`` turns that discovery off, but subscription auth cannot use
-    ``--bare``, so the door has to be closed here as well as there.
+    A file called ``CLAUDE.md`` is not data to a Claude Code session — it is a
+    brief, loaded automatically, for an agent that runs here with tool
+    permissions skipped and network access. ``--bare`` turns that discovery off,
+    but subscription auth cannot use ``--bare``, so the door has to be closed
+    here as well as there.
+
+    Scoped to files staged THIS TURN, which matters now that the directory
+    persists. Sweeping the whole directory was right when it was a throwaway and
+    ``.claude`` could only have come from an upload; with persistence it is the
+    CLI's own state from the previous turn, and renaming it took the session
+    history out from under ``--continue`` — observed live: the peer answered "I
+    had to search for the file, this conversation had no memory of it", and its
+    config files were uploaded as artifacts out of ``uploaded_.claude/``.
 
     Renamed rather than deleted: the user uploaded it, so it stays available as
     data and as a downloadable artifact under a name that is not a directive.
     Returns the names that were moved.
     """
     moved: List[str] = []
+    allowed = {str(n) for n in (staged or [])}
     try:
         entries = list(work.iterdir())
     except OSError:
@@ -471,6 +480,8 @@ def neutralize_instruction_files(work: Path) -> List[str]:
     for entry in entries:
         if entry.name.lower() not in _INSTRUCTION_FILENAMES:
             continue
+        if staged is not None and entry.name not in allowed:
+            continue      # peer state, not something this turn's user sent
         target = entry.with_name(f"uploaded_{entry.name}")
         try:
             entry.rename(target)
@@ -550,7 +561,7 @@ def run_claude(
         }
     try:
         staging = _stage_conversation_files(work, input_file_ids)
-        renamed = neutralize_instruction_files(work)
+        renamed = neutralize_instruction_files(work, staging["staged"])
         try:
             os.chmod(work, 0o777)  # non-root container user must write here
         except OSError:
