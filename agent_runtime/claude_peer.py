@@ -73,6 +73,9 @@ DEFAULT_CLAUDE_PIDS = "1024"
 # An alias, not a pinned id: the CLI resolves it to the current model, so the
 # sandbox does not silently pin itself to a retired one.
 DEFAULT_CLAUDE_MODEL = "sonnet"
+# node:22-slim ships a `node` user here, and the work dir is chmod 0777, so this
+# uid can write everything the run needs. See sandbox_user() for why not root.
+DEFAULT_SANDBOX_USER = "1000:1000"
 
 # Credentials travel via these container env vars, passed by NAME so the value
 # never lands in the argv (visible in `docker ps` / `ps`) or on the persisted
@@ -140,6 +143,30 @@ def _timeout_seconds() -> int:
     return max(30, _int_env("AGENT_CLAUDE_TIMEOUT", DEFAULT_CLAUDE_TIMEOUT))
 
 
+def sandbox_user() -> str:
+    """The uid:gid the sandbox runs as — never root.
+
+    ``_host_user()`` reports the AGENT process's uid, and under Docker-out-of-Docker
+    that process runs as root: the compose service needs root to reach the mounted
+    Docker socket. Inheriting it makes the sandbox root, and Claude Code then
+    refuses outright — *"--dangerously-skip-permissions cannot be used with
+    root/sudo privileges for security reasons"* — which surfaces as exit 1 with an
+    empty answer and nothing pointing at the cause.
+
+    So root is replaced with an unprivileged uid. The work dir is chmod 0777
+    before the run, so any uid can write there, and the agent (root) can read back
+    whatever it wrote. Override with ``AGENT_CLAUDE_USER`` if a deployment needs a
+    specific one.
+    """
+    override = (os.getenv("AGENT_CLAUDE_USER") or "").strip()
+    if override:
+        return override
+    user = _host_user()
+    if user and not user.startswith("0:"):
+        return user
+    return DEFAULT_SANDBOX_USER
+
+
 def build_docker_argv(work: Path, name: str, model: str, prompt: str,
                       base_url: Optional[str] = None,
                       credential_env: str = _API_KEY_ENV) -> List[str]:
@@ -184,9 +211,7 @@ def build_docker_argv(work: Path, name: str, model: str, prompt: str,
     network = (os.getenv("AGENT_CLAUDE_NETWORK") or "").strip()
     if network:
         argv += ["--network", network]
-    user = _host_user()
-    if user:
-        argv += ["--user", user]
+    argv += ["--user", sandbox_user()]
     image = os.getenv("AGENT_CLAUDE_IMAGE", DEFAULT_CLAUDE_IMAGE)
     argv += [
         image, "claude",

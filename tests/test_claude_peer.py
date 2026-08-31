@@ -16,7 +16,7 @@ def _clean_env(monkeypatch):
         "AGENT_CODE_PEER", "AGENT_CLAUDE_MODEL", "AGENT_CLAUDE_API_KEY",
         "AGENT_CLAUDE_BASE_URL", "AGENT_CLAUDE_IMAGE", "AGENT_CLAUDE_NETWORK",
         "AGENT_CLAUDE_TIMEOUT", "AGENT_CLAUDE_MEMORY", "AGENT_CLAUDE_CPUS",
-        "AGENT_CLAUDE_PIDS", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL",
+        "AGENT_CLAUDE_PIDS", "AGENT_CLAUDE_USER", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL",
         "CLAUDE_CODE_OAUTH_TOKEN", "AGENT_CLAUDE_OAUTH_TOKEN",
         "AGENT_CODE_EXEC_WORK_ROOT",
     ):
@@ -157,6 +157,24 @@ def test_bare_is_dropped_for_subscription_auth(tmp_path):
     assert "CLAUDE_CODE_OAUTH_TOKEN" in argv
     assert "ANTHROPIC_API_KEY" not in argv, "only the credential in use is passed through"
     assert not any(a.startswith("CLAUDE_CODE_OAUTH_TOKEN=") for a in argv), "name-only"
+
+
+def test_the_sandbox_never_runs_as_root(tmp_path, monkeypatch):
+    """The agent container runs as root — compose needs it for the Docker socket —
+    and _host_user() reports THAT uid. Inheriting it made Claude Code refuse:
+    "--dangerously-skip-permissions cannot be used with root/sudo privileges",
+    which arrives as exit 1 with an empty answer and no hint at the cause."""
+    monkeypatch.setattr(ccp, "_host_user", lambda: "0:0")
+    argv = ccp.build_docker_argv(tmp_path, "n", "sonnet", "p")
+    assert argv[argv.index("--user") + 1] == "1000:1000"
+
+    monkeypatch.setattr(ccp, "_host_user", lambda: "1001:1001")
+    argv = ccp.build_docker_argv(tmp_path, "n", "sonnet", "p")
+    assert argv[argv.index("--user") + 1] == "1001:1001", "a non-root host uid is kept"
+
+    monkeypatch.setenv("AGENT_CLAUDE_USER", "5000:5000")
+    argv = ccp.build_docker_argv(tmp_path, "n", "sonnet", "p")
+    assert argv[argv.index("--user") + 1] == "5000:5000"
 
 
 def test_docker_argv_env_overrides(tmp_path, monkeypatch):
