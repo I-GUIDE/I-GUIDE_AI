@@ -163,6 +163,38 @@ There is **no raster analysis**: no zonal statistics, band math, reclassify or t
 that through `execute_code` (rasterio is available) or a GDAL algorithm via
 `qgis_processing_run`. The map client models vector layers only.
 
+## Named areas without an upload
+
+Every polygon tool starts from a file the user attached, so "the embeddings for Champaign
+County" was unanswerable without one — the user had to bring a boundary and know the GEOID
+inside it. `admin_boundary` (`agent_runtime/admin_boundary_tools.py`) takes a state, county or
+city NAME and returns a WGS84 GeoJSON that is already on the map and already shaped for
+`embed_zones` (`zone_id_field="GEOID"`); `subdivide="tracts"` returns the tracts inside a named
+county, which is the many-zone input that tool is for.
+
+It reads the Census **TIGERweb** REST API, not Earth Engine, for three reasons: the agent
+container has no `ee` and no Earth Engine credential (that lives only in the rs-embed service,
+under a personal Google account); TIGERweb needs no credential; and it has the one layer Earth
+Engine lacks — incorporated places. `TIGER/*/Places` is not in the EE catalogue at any vintage,
+and GAUL/geoBoundaries stop at district, so a *city* boundary is simply unavailable there
+(geoBoundaries has no ADM2 named "Nairobi" at all — Kenya's ADM2 are sub-counties).
+
+Two behaviours are load-bearing. It matches `BASENAME`, not `NAME`: the latter carries the
+suffix ("Champaign County", "Champaign city"), so matching it loses every county a user names
+without saying "County". And a name matching several places is REFUSED with the candidates
+listed — 16 incorporated places are named Springfield and the first is in none of the states
+anyone means, so picking one silently is the failure that matters.
+
+Registering it forced a related change: the zonal tools were gated on `input_file_ids`, on the
+premise that a polygon layer could only arrive by upload. That premise is gone, and leaving the
+gate would have hidden the tool that consumes what `admin_boundary` produces — the model would
+fetch a county and have nothing to embed it with.
+
+Measured, and worth knowing before pairing them: Champaign County's 48 tracts planned **1140**
+tiles, so `embed_zones`' default `max_tiles=24` covers a few per cent and most zones come back
+with no pixels. It reports that in `truncated`, but only after the sweep is spent, so
+`admin_boundary` says it up front in `coverage_hint`.
+
 ## Code execution
 
 `execute_code` runs per-run Docker: `--network none`, read-only root filesystem, dropped
@@ -171,6 +203,70 @@ pip. Consequences: code cannot fetch anything at runtime — an API call belongs
 the agent process, not in generated code — and abnormal exits are translated
 (`_diagnose_abnormal_exit`: 137 is the OOM kill, 139 a segfault) because the raw signal
 surfaced as an empty stderr.
+
+**A baked image saves nothing on its own.** `pip install --target` sets
+`ignore_installed=True` — pip does not consult the image's site-packages — so a package baked
+into `AGENT_CODE_EXEC_IMAGE` is reinstalled on every run regardless. `sandbox/Dockerfile`
+promised that saving for a long time without delivering it. What delivers it is
+`preinstalled()`: the executor runs the image once per process (`--network none`,
+`--read-only`, same posture as a real run), asks `find_spec` which of `_IMPORT_TO_PIP` it can
+import, and drops those from the install list. It is PROBED, never declared, because a
+declared list drifts: an image that stopped shipping a package would suppress an install the
+code needs and die on `ModuleNotFoundError` with nothing naming the cause. Every probe failure
+returns the empty set, i.e. exactly the old behaviour. Only unconstrained specs are dropped —
+`geopandas==0.14` must never be satisfied by whatever the image happens to carry.
+
+**A conversation's installed packages persist, and are mounted rather than copied.** One run's
+`pip install` is importable by the next (`workspace_deps_dir`). The cache is *bind-mounted* at
+`/work/.deps`, not carried through `_copy_tree`, because a site-packages tree is tens of
+thousands of files and copying it in and out of every run would cost more than the install it
+replaces — which is also why `_copy_tree` still skips `.deps` unchanged. It mounts **read-only
+for the run** and writable only during the install phase: the cache outlives the run, so code
+that could write to it could leave a shadowing `numpy.py` for the next turn to import. Two
+consequences that bit during the change: pip leaves an existing copy in a `--target` directory
+alone and only warns, so the install phase needs `--upgrade` or a cached package silently pins
+whatever arrived first; and a directory's mtime only moves when an entry is added or removed,
+so a workspace must be `utime`d on use or the TTL sweep deletes a live conversation.
+
+**Installs are pinned to the image's own versions, and that is not optional.** `--target` sets
+`ignore_installed=True`, so pip re-resolves the FULL transitive closure of anything requested
+and writes its own numpy and pandas into the cache — which precedes site-packages on
+`PYTHONPATH`. Measured: with the image on numpy 2.4.6, `pip install --target … numpy==2.3.0`
+put 2.3.0 in the cache and the NEXT run imported 2.3.0, for the rest of the conversation, while
+the model was told `installed: []`. That is an ABI hazard, because the image's rasterio and
+geopandas were compiled against the version it shipped. So the probe reports `{name: version}`,
+not just names, and every install carries a constraints file built from it
+(`_constraints_text`, `AGENT_CODE_EXEC_PIN_IMAGE=0` to disable): a genuine conflict now fails
+with pip naming it, which beats a segfault three tools later.
+
+**A cache entry is only trusted if its install finished.** `cached_dep_names` requires a
+`RECORD` inside the `.dist-info`, and a failed or timed-out install evicts the cache
+(`_evict_torn_cache`). pip moves the package tree and its metadata into `--target` as separate
+steps, across a bind-mount boundary so it is a copy rather than a rename; a kill on the install
+timeout leaves metadata with no package beside it, and trusting the directory name alone would
+suppress the reinstall for the life of the conversation. Both evictions rename the directory
+aside before deleting it, because another run of the same conversation may have it mounted into
+a live container — the analysis peer and the code peer share the `::codeexec` session.
+
+**A fix should be a patch, not a re-emitted program.** `write_workspace_file` /
+`read_workspace_file` / `edit_workspace_file` act on the conversation's working directory
+host-side, and `execute_code(entrypoint="main.py")` runs a file already in it — so changing
+line 40 of a 200-line script is one exact-match replacement instead of the whole script again
+through a full LLM round trip. `edit_workspace_file` refuses a snippet that does not appear
+exactly once, because replacing one of three identical lines produces code that runs and is
+wrong. These are registered only when there IS a durable workspace (`graph_runtime.py` wires
+`execute_code` without a session), and the agent's general file tools cannot substitute: they
+are rooted at the repo, the file store and `UPLOAD_FOLDER`, and turn a bare filename into a
+managed store output, so they would appear to edit the workspace while never touching it.
+
+Three guards on that surface were each a live escape before they were closed. `entrypoint` is
+resolved through the same boundary as a written path and its failure is REPORTED, not
+swallowed — validating only the copy read for dependency inference still ran `../outside.py`.
+Reserved directories are matched case-INSENSITIVELY, because `Path.resolve()` does not
+canonicalise case and `.DEPS/numpy.py` therefore walked straight past an exact-match check into
+the dependency cache. And a workspace key is a slug PLUS a digest, since the slug maps every
+unsafe character to `_` and truncates, so client-supplied thread ids `sess:42` and `sess_42`
+shared one directory — and now would have shared a package cache.
 
 **The code PEER is swappable, and that is a different thing.** `execute_code` is a tool the
 LangChain peer calls; `AGENT_CODE_PEER` replaces the peer itself with an agentic CLI that

@@ -258,7 +258,7 @@ def _stage_conversation_files(work: Path, input_file_ids: Optional[List[str]]) -
     from agent_runtime.langchain_exec_tools import _build_staging
 
     staging, staged_info, errors, skipped = _build_staging(refs)
-    staged, stage_errors = _stage_inputs(work, staging)
+    staged, stage_errors, _shadowed = _stage_inputs(work, staging)
     return {
         "staged": staged,
         "staged_info": staged_info,

@@ -2152,7 +2152,9 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
             if existing:
                 parts.append(
                     "Already in this conversation's working directory (open them directly in "
-                    "execute_code; no need to rebuild):\n"
+                    "execute_code; no need to rebuild). A .py here is a program you can re-run "
+                    "with execute_code(entrypoint=...) and change with edit_workspace_file — "
+                    "read it first, and do not re-send a whole script to alter part of it:\n"
                     + "\n".join(f"- {f['name']} ({f['size_bytes']} bytes)" for f in existing))
         except Exception:
             pass
