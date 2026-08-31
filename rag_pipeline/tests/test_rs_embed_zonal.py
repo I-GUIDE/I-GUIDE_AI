@@ -697,3 +697,146 @@ def test_a_single_zone_is_labelled_for_what_it_is_not_as_a_cluster_of_one(tmp_pa
     # It is drawn over the pixel image of the same polygon. Filled, it covers the picture it
     # is framing — observed as a solid violet slab where the embedding had been.
     assert layer["outline"] is True
+
+
+# --- provenance ------------------------------------------------------------
+# The service sends its embedder's meta verbatim, with a comment saying it "carries the
+# provenance a caller must not invent". These pin that it survives the last hop too.
+
+_TERRAMIND_META = {
+    "model": "terramind", "type": "on_the_fly", "backend": "gee",
+    "source": "COPERNICUS/S2_SR_HARMONIZED",
+    "sensor": {"collection": "COPERNICUS/S2_SR_HARMONIZED",
+               "bands": ["B1", "B2", "B3"],
+               "bands_terramind": ["COASTAL_AEROSOL", "BLUE", "GREEN"],
+               "scale_m": 10, "cloudy_pct": 30, "composite": "median", "fill_value": 0.0},
+    "temporal": {"mode": "range", "start": "2019-06-01", "end": "2019-08-31"},
+    "image_size": 224, "model_key": "terramind_v1_small", "modality": "S2L2A",
+    "normalization": "zscore", "device": "cuda", "pretrained": True, "batch_infer": True,
+    "input_override": True, "param_mean": -0.000222, "param_std": 0.0522,
+    "param_absmax": 0.2624, "tokens_shape": [196, 384],
+    "batch_tokens_shape": [64, 196, 384], "layer_index": -1, "tokens_include_cls": False,
+    "grid_type": "vit_patch_tokens", "grid_hw": [26, 26], "grid_shape": [26, 26],
+    "cls_removed": False, "grid_orientation_policy": "north_up",
+    "grid_native_y_axis_direction": "unknown",
+    "grid_native_orientation_reason": "no orientation metadata",
+    "grid_orientation_applied": False, "y_axis_direction": "unknown",
+}
+
+
+def test_provenance_keeps_what_changes_a_numbers_meaning():
+    from agent_runtime.rs_embed_tools import _provenance
+
+    prov = _provenance(_TERRAMIND_META)
+    # Which imagery, at what resolution, composited how, over which dates — the questions a
+    # user actually asks after seeing an embedding.
+    assert prov["collection"] == "COPERNICUS/S2_SR_HARMONIZED"
+    assert prov["scale_m"] == 10 and prov["composite"] == "median" and prov["cloudy_pct"] == 30
+    assert prov["date_range"] == "2019-06-01..2019-08-31" and prov["temporal_mode"] == "range"
+    assert prov["bands"] == ["B1", "B2", "B3"]
+    # Which model, exactly — "terramind" alone does not identify the run.
+    assert prov["model_key"] == "terramind_v1_small" and prov["modality"] == "S2L2A"
+    assert prov["normalization"] == "zscore" and prov["layer_index"] == -1
+    assert prov["image_size"] == 224 and prov["grid_hw"] == [26, 26]
+
+
+def test_provenance_drops_the_embedders_own_diagnostics():
+    """These answer nothing a user asks and would crowd the context; the band aliases are the
+    same list twice under model-side names."""
+    from agent_runtime.rs_embed_tools import _provenance
+
+    prov = _provenance(_TERRAMIND_META)
+    for noise in ("param_mean", "param_std", "param_absmax", "device", "batch_infer",
+                  "batch_tokens_shape", "tokens_shape", "input_override", "cls_removed",
+                  "bands_terramind", "grid_shape", "grid_native_y_axis_direction"):
+        assert noise not in prov, f"{noise} is debugging, not provenance"
+
+
+def test_provenance_raises_the_orientation_caveat_the_numbers_cannot_show():
+    from agent_runtime.rs_embed_tools import _provenance
+
+    assert "north-up is assumed, not verified" in _provenance(_TERRAMIND_META)["orientation_caveat"]
+    # …and stays quiet when the grid WAS oriented, so the note means something when it appears.
+    oriented = dict(_TERRAMIND_META, grid_orientation_applied=True, y_axis_direction="north_up")
+    assert "orientation_caveat" not in _provenance(oriented)
+
+
+def test_no_meta_yields_no_provenance_rather_than_a_shell_of_nulls():
+    """'The run had no provenance' and 'this deployment does not send it' are different
+    facts, and a dict of nulls would make the second look like the first."""
+    from agent_runtime.rs_embed_tools import _provenance
+
+    assert _provenance(None) == {} and _provenance({}) == {} and _provenance("nope") == {}
+    assert _provenance({"model": "gse", "device": "cuda"}) == {"model": "gse"}
+
+
+def test_embed_zones_passes_provenance_through(tmp_path, monkeypatch):
+    """It already had the full meta in hand and was whitelisting ~13 keys out of it."""
+    import agent_runtime.rs_embed_tools as T
+
+    reply = _service_reply()
+    reply["meta"] = dict(reply["meta"], **_TERRAMIND_META)
+    monkeypatch.setattr(T, "_svc", lambda *a, **k: reply)
+    out = T.run_zonal_worker({"polygons_path": str(_two_squares(tmp_path)),
+                              "zone_id_field": "geoid"})
+    prov = out["provenance"]
+    assert prov["model_key"] == "terramind_v1_small"
+    assert prov["collection"] == "COPERNICUS/S2_SR_HARMONIZED"
+    assert prov["date_range"] == "2019-06-01..2019-08-31"
+    # The long-standing top-level fields stay put — existing callers read them.
+    assert out["scale_m"] == 10 and out["dims"] == 4
+
+
+def _embed_region(monkeypatch, embed_reply):
+    import agent_runtime.rs_embed_tools as T
+
+    def _svc(path, payload=None, **kw):
+        if path == "/api/models":
+            return {"models": [{"id": "terramind", "type": "onthefly"}]}
+        return embed_reply
+
+    monkeypatch.setattr(T, "_svc", _svc)
+    monkeypatch.setattr(T, "_save_png", lambda *a, **k: None)
+    tool = {t.name: t for t in T.make_rs_embed_tools()}["embed_region"]
+    return json.loads(tool.func(bbox=[-88.3, 40.0, -88.2, 40.1], models=["terramind"]))
+
+
+def test_embed_region_reports_provenance_when_the_service_sends_it(monkeypatch):
+    out = _embed_region(monkeypatch, {"results": [
+        {"model": "terramind", "ok": True, "type": "onthefly", "dim": 384,
+         "grid_hw": [26, 26], "norm": 1.0, "meta": _TERRAMIND_META}]})
+    prov = out["models"][0]["provenance"]
+    assert prov["scale_m"] == 10 and prov["model_key"] == "terramind_v1_small"
+
+
+def test_embed_region_stays_silent_on_a_service_that_sends_no_meta(monkeypatch):
+    """/api/embed does not attach meta yet; the key must be absent, not empty."""
+    out = _embed_region(monkeypatch, {"results": [
+        {"model": "terramind", "ok": True, "type": "onthefly", "dim": 384,
+         "grid_hw": [26, 26], "norm": 1.0}]})
+    assert "provenance" not in out["models"][0]
+
+
+def test_bands_are_read_from_wherever_the_model_puts_them():
+    """The on-the-fly path nests them under `sensor`; the precomputed path puts them at the
+    top level. Reading only one place dropped them for real gse runs."""
+    from agent_runtime.rs_embed_tools import _provenance
+
+    assert _provenance(_TERRAMIND_META)["bands"] == ["B1", "B2", "B3"]      # from sensor
+    assert _provenance({"model": "x", "bands": ["B4", "B3"]})["bands"] == ["B4", "B3"]  # top level
+
+
+def test_a_products_dimension_list_is_counted_not_listed():
+    """gse names its 64 embedding DIMENSIONS in `bands` (A00…A63). Listing those is noise;
+    the count still answers "how wide is this vector"."""
+    from agent_runtime.rs_embed_tools import _provenance
+
+    prov = _provenance({"model": "gse", "bands": [f"A{i:02d}" for i in range(64)]})
+    assert prov["bands_count"] == 64 and "bands" not in prov
+
+
+def test_nodata_fraction_survives():
+    """A mostly-empty footprint otherwise reads exactly like a full one."""
+    from agent_runtime.rs_embed_tools import _provenance
+
+    assert _provenance({"model": "gse", "nodata_fraction": 0.0164})["nodata_fraction"] == 0.0164

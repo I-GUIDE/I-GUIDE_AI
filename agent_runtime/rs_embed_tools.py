@@ -309,6 +309,12 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
             rec = _save_png(str(r.get("image") or ""), stem)
             entry = {"model": model, "type": r.get("type"), "dim": r.get("dim"),
                      "grid": r.get("grid_hw"), "vector_norm": round(float(r.get("norm") or 0), 3)}
+            # Omitted entirely on a service that does not send `meta`, rather than reported as
+            # empty: "the run had no provenance" and "this deployment does not send it" are
+            # different facts, and only one of them should look like a gap.
+            prov = _provenance(r.get("meta"))
+            if prov:
+                entry["provenance"] = prov
             if rec:
                 entry.update({"image_file_id": rec["file_id"], "download_url": rec.get("download_url")})
                 layers.append(_raster_layer(rec, box, f"{model} embedding (PCA-RGB)"))
@@ -511,6 +517,84 @@ _CLUSTER_COLORS = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Provenance
+# ---------------------------------------------------------------------------
+# The service sends its embedder's meta verbatim, with a comment saying it "carries the
+# provenance a caller must not invent". Passing on only the numbers and dropping how they
+# were produced re-creates exactly the problem that comment guards against: a follow-up like
+# "what resolution was that?" still gets a confident answer, reconstructed from the defaults
+# rather than read from the run. That is right until the day a default changes.
+#
+# Curated, not dumped. The keys below are the ones that change what a number MEANS; the
+# embedder's own diagnostics (param_mean/std/absmax, device, batch_infer, batch_tokens_shape)
+# and the model-side band aliases are debugging aids that would crowd the context and answer
+# nothing a user asks.
+_PROV_TOP = (
+    "model", "model_key", "modality", "type", "backend", "source",
+    "normalization", "pretrained", "layer_index", "image_size",
+    "scale_m", "pixel_ground_m", "dims", "year",
+    # How much of the footprint had no data — it changes how much a vector is worth, and a
+    # mostly-empty zone otherwise reads exactly like a full one.
+    "nodata_fraction",
+    "grid_type", "grid_hw", "tokens_include_cls",
+    "grid_orientation_policy", "grid_orientation_applied", "y_axis_direction",
+)
+# Flattened up from meta["sensor"], which is where the on-the-fly path puts them. `bands` is
+# kept (a user does ask which bands); `bands_terramind` is the same list under model-side
+# names and is dropped.
+_PROV_SENSOR = ("collection", "scale_m", "cloudy_pct", "composite", "fill_value")
+# Sentinel-2 has 13; past that a "band" list is a dimension list, not a sensor description.
+_MAX_BAND_NAMES = 16
+
+
+def _provenance(meta: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """What the run actually used, flattened for reading, or {} when the service sent none.
+
+    Flat on purpose: the model quotes these back to the user, and a nested sensor/temporal
+    shape gets summarised into vagueness on the way. Absent keys are omitted rather than
+    reported as null, so "not sent" never reads as "the run had no value for it".
+    """
+    if not isinstance(meta, dict) or not meta:
+        return {}
+    out: Dict[str, Any] = {}
+    sensor = meta.get("sensor") if isinstance(meta.get("sensor"), dict) else {}
+    for key in _PROV_SENSOR:
+        if sensor.get(key) is not None:
+            out[key] = sensor[key]
+    for key in _PROV_TOP:                       # top level wins over the sensor block
+        if meta.get(key) is not None:
+            out[key] = meta[key]
+
+    # `bands` lives in the sensor block for the on-the-fly path and at the top level for the
+    # precomputed one, so both are consulted. A precomputed product names its 64 embedding
+    # DIMENSIONS here (A00…A63), not spectral bands — listing those is noise, so past a
+    # spectral-length list only the count is kept.
+    bands = meta.get("bands") if meta.get("bands") is not None else sensor.get("bands")
+    if bands is not None:
+        bands = list(bands)
+        if len(bands) <= _MAX_BAND_NAMES:
+            out["bands"] = bands
+        else:
+            out["bands_count"] = len(bands)
+
+    temporal = meta.get("temporal") if isinstance(meta.get("temporal"), dict) else {}
+    start, end = temporal.get("start"), temporal.get("end")
+    if start or end:
+        out["date_range"] = f"{start or '?'}..{end or '?'}"
+        if temporal.get("mode"):
+            out["temporal_mode"] = temporal["mode"]
+
+    # A caveat the numbers cannot show. If the grid was never oriented and the source's y-axis
+    # direction is unknown, row order relative to north is unverified — which matters the
+    # moment anyone reads the grid as a picture or joins it to coordinates.
+    if out.get("grid_orientation_applied") is False and out.get("y_axis_direction") == "unknown":
+        out["orientation_caveat"] = (
+            "grid rows were not reoriented and the source reported no y-axis direction, so "
+            "north-up is assumed, not verified")
+    return out
+
+
 def _dimension_keys(rows: List[Dict[str, Any]]) -> List[str]:
     """The eNNN columns, in dimension order.
 
@@ -685,6 +769,10 @@ def run_zonal_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         "tiles_capped": bool(meta.get("tiles_capped")),
         "tile_errors": list(meta.get("tile_errors") or []),
         "pixel_size_warnings": list(meta.get("pixel_size_warnings") or []),
+        # What the run actually used — imagery source, bands, compositing, dates, model
+        # variant, grid orientation. Answering "at what resolution, from which collection?"
+        # from here beats reconstructing it from the defaults.
+        "provenance": _provenance(meta),
         "zones": zones,
         # The PCA-RGB picture of the pixels inside the shapes, rendered by the service
         # alongside the sweep and cut to the same polygons with the same rasterisation, so

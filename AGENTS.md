@@ -134,6 +134,23 @@ friends) are re-measured — a 10 km buffer in 3857 at 40°N covers ~7.7 km on t
 `_as_metric` in `agent_runtime/analysis_overlay_tools.py`. Never compute a ground distance in
 degrees.
 
+**Provenance travels with the number.** rs-embed's own service says it best, in the comment
+above the line that forwards its embedder metadata verbatim: it "carries the provenance a
+caller must not invent". A tool that passes on the vectors and drops how they were produced
+does not stop the model answering *"what resolution was that?"* — it makes it answer from the
+defaults, which is right up until a default moves. So `_provenance` in
+`agent_runtime/rs_embed_tools.py` carries the keys that change what a number MEANS (imagery
+source and collection, `scale_m`, compositing and cloud threshold, date range, model variant
+and normalisation, grid shape and orientation, `nodata_fraction`) and drops the embedder's own
+diagnostics (`param_*`, `device`, `batch_*`, `tokens_shape`), which crowd the context and
+answer nothing a user asks. Two shapes caught only by running it against a live embedding:
+`bands` is nested under `sensor` on the on-the-fly path but top-level on the precomputed one,
+and a precomputed product lists its 64 embedding DIMENSIONS there rather than spectral bands —
+so past a spectral-length list only the count is kept. Absent keys are OMITTED, never reported
+as null: "the deployment does not send this" and "the run had no value for it" are different
+facts. `/api/embed` does not attach `meta` yet (only `/api/zones` does), so `embed_region`
+reports provenance only where the service supplies it.
+
 **Errors name the alternatives.** A dead end costs a whole turn, so a failure returns the
 next action: a wrong choropleth column returns the numeric columns; an unknown KB block
 returns the nearest real ones; an image passed to `add_map_layer` returns the attached
