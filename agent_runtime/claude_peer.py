@@ -10,9 +10,12 @@ downloadable artifacts, exactly like ``execute_code`` output.
 Two differences from the opencode backend, both forced by what the CLI talks to:
 
 * **Auth is Anthropic's, not the deployment's OpenAI-compatible endpoint.** There
-  is no provider config file to generate: Claude Code reads ``ANTHROPIC_API_KEY``
-  (and honours ``ANTHROPIC_BASE_URL`` for a gateway). The key travels to the
-  container by NAME only, so it never appears in the argv or in the work dir
+  is no provider config file to generate. Either credential works and they bill
+  differently: ``CLAUDE_CODE_OAUTH_TOKEN`` from ``claude setup-token``
+  authenticates as a **Claude subscription** (requests count against that
+  person's plan), while ``ANTHROPIC_API_KEY`` is metered API billing.
+  ``ANTHROPIC_BASE_URL`` is honoured for a gateway. Whichever is used travels to
+  the container by NAME only, so it never appears in the argv or in the work dir
   that gets persisted as artifacts.
 * **The model is Anthropic's**, named by alias (``sonnet``/``opus``) or full id,
   independent of ``VLLM_*``/``OPENAI_*``. A deployment can therefore run its
@@ -23,8 +26,10 @@ the image installs rather than assumed. ``--max-turns`` does NOT exist in 2.1.x
 and an unknown flag makes the CLI exit non-zero, so the agentic loop is bounded
 by the run timeout and the container, not by a turn count. ``--bare`` skips
 hooks, LSP, plugin sync, auto-memory, keychain reads and CLAUDE.md discovery,
-and pins auth to ``ANTHROPIC_API_KEY`` — all of which a throwaway container
-wants, and one of which (keychain) it cannot have.
+all of which a throwaway container wants — but it also pins auth to
+``ANTHROPIC_API_KEY`` and never reads OAuth, so it is used ONLY on the API-key
+path. On the subscription path the CLAUDE.md half of that protection is
+restored by :func:`neutralize_instruction_files`.
 
 ``--dangerously-skip-permissions`` is required: there is no TTY to approve tool
 use, so without it every run stalls on the first permission prompt. Its own help
@@ -69,11 +74,20 @@ DEFAULT_CLAUDE_PIDS = "1024"
 # sandbox does not silently pin itself to a retired one.
 DEFAULT_CLAUDE_MODEL = "sonnet"
 
-# The key travels via this container env var, passed by NAME so its value never
-# lands in the argv (visible in `docker ps` / `ps`) or on the persisted work dir.
+# Credentials travel via these container env vars, passed by NAME so the value
+# never lands in the argv (visible in `docker ps` / `ps`) or on the persisted
+# work dir. Two kinds, and the CLI treats them very differently — see _auth_of.
 _API_KEY_ENV = "ANTHROPIC_API_KEY"
+_OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 
 _ACCEPTED_FLAG_VALUES = {"claude", "claude-code", "claude_code"}
+
+# Files a Claude Code session picks up from the working directory as INSTRUCTIONS
+# rather than as data. Staged conversation files are user uploads, so one named
+# CLAUDE.md would be read as a brief by an agent running with tool permissions
+# skipped and network access. --bare disables that discovery; subscription auth
+# cannot use --bare, so the staging guard below closes the same door either way.
+_INSTRUCTION_FILENAMES = {"claude.md", "claude.local.md", ".claude"}
 
 
 def is_claude_peer_enabled() -> bool:
@@ -82,17 +96,37 @@ def is_claude_peer_enabled() -> bool:
 
 
 def resolve_claude_settings() -> Dict[str, Optional[str]]:
-    """Model / API key / base URL for the Claude Code peer.
+    """Model / credential / base URL for the Claude Code peer.
+
+    Two credentials are accepted, and they are not interchangeable:
+
+    * ``CLAUDE_CODE_OAUTH_TOKEN`` — a long-lived token from ``claude
+      setup-token``, which authenticates as a **Claude subscription**. Requests
+      count against that person's plan limits, not a metered API balance.
+    * ``ANTHROPIC_API_KEY`` — a metered API key.
+
+    The subscription token wins when both are set: you have to run
+    ``setup-token`` on purpose, so its presence is the more deliberate signal,
+    and silently billing an API key while a token sits unused is the kind of
+    surprise that shows up on an invoice.
 
     Deliberately independent of the ``VLLM_*``/``OPENAI_*`` chain that answers
     the user: this peer talks to Anthropic, so borrowing the deployment's
     OpenAI key would send a key to a host that cannot use it and fail with an
     authentication error naming the wrong provider.
     """
+    token = (os.getenv("AGENT_CLAUDE_OAUTH_TOKEN") or os.getenv(_OAUTH_TOKEN_ENV) or "").strip()
     key = (os.getenv("AGENT_CLAUDE_API_KEY") or os.getenv(_API_KEY_ENV) or "").strip()
     base = (os.getenv("AGENT_CLAUDE_BASE_URL") or os.getenv("ANTHROPIC_BASE_URL") or "").strip()
     model = (os.getenv("AGENT_CLAUDE_MODEL") or DEFAULT_CLAUDE_MODEL).strip()
-    return {"model": model or DEFAULT_CLAUDE_MODEL, "api_key": key or None, "base_url": base or None}
+    credential, auth = (token, "subscription") if token else ((key, "api_key") if key else (None, None))
+    return {
+        "model": model or DEFAULT_CLAUDE_MODEL,
+        "auth": auth,
+        "credential_env": _OAUTH_TOKEN_ENV if auth == "subscription" else _API_KEY_ENV,
+        "credential": credential or None,
+        "base_url": base or None,
+    }
 
 
 def _int_env(name: str, default: int) -> int:
@@ -107,12 +141,20 @@ def _timeout_seconds() -> int:
 
 
 def build_docker_argv(work: Path, name: str, model: str, prompt: str,
-                      base_url: Optional[str] = None) -> List[str]:
+                      base_url: Optional[str] = None,
+                      credential_env: str = _API_KEY_ENV) -> List[str]:
     """``docker run`` argv for one Claude Code run.
 
     Hardened like the execute_code sandbox but WITH network — the CLI is useless
     without the Anthropic API. ``HOME=/work`` so all CLI state lands in the
     throwaway work dir (dot-dirs are excluded from artifact persistence).
+
+    ``--bare`` is used ONLY with an API key. Its own help says that under it
+    "Anthropic auth is strictly ANTHROPIC_API_KEY or apiKeyHelper via --settings
+    (OAuth and keychain are never read)" — so passing it alongside a
+    subscription token would ignore the credential and fail as if none had been
+    supplied. That is a silent misconfiguration, not an error message, which is
+    why the flag is conditional rather than always-on.
     """
     argv = [
         "docker", "run", "--rm", "--init", "--name", name,
@@ -133,8 +175,8 @@ def build_docker_argv(work: Path, name: str, model: str, prompt: str,
         "--env", "DISABLE_ERROR_REPORTING=1",
         "--env", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
         # Name-only form: docker copies the value from the client process env
-        # (set by run_claude), so the key never appears in the argv.
-        "--env", _API_KEY_ENV,
+        # (set by run_claude), so the credential never appears in the argv.
+        "--env", credential_env,
         "-v", f"{work}:/work:rw",
     ]
     if base_url:
@@ -150,12 +192,45 @@ def build_docker_argv(work: Path, name: str, model: str, prompt: str,
         image, "claude",
         "--print",                          # non-interactive: answer and exit
         "--output-format", "json",          # an envelope with result + cost, not bare text
-        "--bare",                           # no hooks/LSP/plugins/keychain/CLAUDE.md
+    ]
+    if credential_env == _API_KEY_ENV:
+        argv.append("--bare")               # no hooks/LSP/plugins/keychain/CLAUDE.md
+    argv += [
         "--dangerously-skip-permissions",   # no TTY to approve tool use; see module docstring
         "--model", model,
         prompt,
     ]
     return argv
+
+
+def neutralize_instruction_files(work: Path) -> List[str]:
+    """Rename anything in the work dir the CLI would read as INSTRUCTIONS.
+
+    Staged conversation files are user uploads. A file called ``CLAUDE.md`` is
+    not data to a Claude Code session — it is a brief, loaded automatically, for
+    an agent that runs here with tool permissions skipped and network access.
+    ``--bare`` turns that discovery off, but subscription auth cannot use
+    ``--bare``, so the door has to be closed here as well as there.
+
+    Renamed rather than deleted: the user uploaded it, so it stays available as
+    data and as a downloadable artifact under a name that is not a directive.
+    Returns the names that were moved.
+    """
+    moved: List[str] = []
+    try:
+        entries = list(work.iterdir())
+    except OSError:
+        return moved
+    for entry in entries:
+        if entry.name.lower() not in _INSTRUCTION_FILENAMES:
+            continue
+        target = entry.with_name(f"uploaded_{entry.name}")
+        try:
+            entry.rename(target)
+            moved.append(entry.name)
+        except OSError:
+            continue
+    return moved
 
 
 def parse_cli_output(stdout: str) -> Dict[str, Any]:
@@ -199,12 +274,13 @@ def run_claude(
     """One sandboxed ``claude --print`` run; returns a JSON-serializable result dict."""
     settings = resolve_claude_settings()
     model = str(settings["model"])
-    if not settings["api_key"]:
+    if not settings["credential"]:
         return {
             "ok": False, "exit_code": None, "answer": "", "stderr": "", "timed_out": False,
-            "error": (f"{_API_KEY_ENV} (or AGENT_CLAUDE_API_KEY) is required for the Claude Code "
-                      "peer. Set it in the deployment env; it is not shared with the "
-                      "OpenAI-compatible endpoint that answers the user."),
+            "error": (f"The Claude Code peer needs a credential: either {_OAUTH_TOKEN_ENV} "
+                      f"(from `claude setup-token`, authenticating as a Claude subscription) "
+                      f"or {_API_KEY_ENV} (metered API billing). Neither is set, and neither "
+                      "is shared with the OpenAI-compatible endpoint that answers the user."),
             "artifacts": [], "backend": "claude-docker", "model": model,
         }
     timeout = int(timeout or _timeout_seconds())
@@ -219,13 +295,15 @@ def run_claude(
         }
     try:
         staging = _stage_conversation_files(work, input_file_ids)
+        renamed = neutralize_instruction_files(work)
         try:
             os.chmod(work, 0o777)  # non-root container user must write here
         except OSError:
             pass
         name = f"agentcc_{uuid.uuid4().hex[:12]}"
-        argv = build_docker_argv(work, name, model, prompt, settings["base_url"])
-        env = {**os.environ, _API_KEY_ENV: str(settings["api_key"])}
+        credential_env = str(settings["credential_env"])
+        argv = build_docker_argv(work, name, model, prompt, settings["base_url"], credential_env)
+        env = {**os.environ, credential_env: str(settings["credential"])}
         exit_code: Optional[int] = None
         stdout, stderr, timed_out, error = "", "", False, None
         try:
@@ -242,7 +320,8 @@ def run_claude(
 
         parsed = parse_cli_output(stdout)
         envelope = parsed["envelope"] or {}
-        artifacts = _persist_artifacts(work, set(staging["staged"]))
+        excluded = set(staging["staged"]) | {f"uploaded_{n}" for n in renamed}
+        artifacts = _persist_artifacts(work, excluded)
         result: Dict[str, Any] = {
             # The CLI can exit 0 and still report is_error in the envelope, so both count.
             "ok": (error is None and not timed_out and exit_code == 0
@@ -255,7 +334,11 @@ def run_claude(
             "artifacts": artifacts,
             "backend": "claude-docker",
             "model": model,
+            # Which account paid, in the record rather than inferred from a bill.
+            "auth": settings["auth"],
         }
+        if renamed:
+            result["renamed_instruction_files"] = renamed
         # What the run cost is part of the record, not a detail: this peer spends
         # on a different account from the one answering the user.
         for key in ("num_turns", "total_cost_usd", "duration_ms", "session_id"):
@@ -307,7 +390,7 @@ def run_claude_code_peer(
             "name": "claude_run",
             "content": {k: result.get(k) for k in
                         ("ok", "exit_code", "timed_out", "error", "artifacts", "backend",
-                         "model", "num_turns", "total_cost_usd")},
+                         "model", "auth", "num_turns", "total_cost_usd")},
         },
         node="code",
     )
@@ -330,6 +413,7 @@ __all__ = [
     "is_claude_peer_enabled",
     "resolve_claude_settings",
     "build_docker_argv",
+    "neutralize_instruction_files",
     "parse_cli_output",
     "run_claude",
     "run_claude_code_peer",

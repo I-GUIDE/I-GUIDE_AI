@@ -183,6 +183,14 @@ Anthropic, `ANTHROPIC_API_KEY`). Each needs its sandbox image built first —
 network**, because a CLI with no LLM endpoint does nothing; the hardening is the rest of the
 flag set, not the network.
 
+The Claude peer takes **either** credential, and they bill different accounts:
+`CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) authenticates as a Claude *subscription*
+and counts against that person's plan; `ANTHROPIC_API_KEY` is metered API billing. The token
+wins when both are set. This is not a free swap: `--bare` never reads OAuth, so it is passed
+only on the API-key path, and the CLAUDE.md auto-discovery it would have suppressed is closed
+instead by renaming any staged upload named `CLAUDE.md` — an uploaded file must not become a
+brief for an agent running with permissions skipped.
+
 Do not assume a CLI's flags. Claude Code 2.1.x has **no** `--max-turns`, and an unknown flag
 makes the CLI exit non-zero — which reads as "the peer failed", not "somebody guessed". Check
 `--help` in the built image and pin the check in a test.
