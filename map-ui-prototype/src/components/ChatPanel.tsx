@@ -173,7 +173,8 @@ export function ChatPanel(p: Props) {
                 {(p.models?.providers || []).map((g: ModelCatalogue['providers'][number]) => (
                   <optgroup key={g.provider} disabled={!g.configured}
                     label={g.label
-                      + (g.configured ? '' : ` — needs ${g.needs || 'configuration'}`)
+                      + (g.configured ? (g.caveat ? ` — ${g.caveat}` : '')
+                                      : ` — needs ${g.needs || 'configuration'}`)
                       + (g.stale ? ' — list unavailable' : '')}>
                     {g.models.map((m: string) => (
                       <option key={m} value={m} disabled={!g.configured}>{m}</option>

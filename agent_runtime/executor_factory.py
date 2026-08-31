@@ -436,54 +436,6 @@ _ANTHROPIC_FALLBACK_MODELS = (
 # The default when a request names the provider but no model.
 _ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-5"
 
-# Authenticating and being able to SERVE are different questions for this provider, and only
-# the second one matters to a picker. A Claude subscription token authenticates /v1/messages
-# and then fails inference with 400 "Third-party apps now draw from extra usage, not plan
-# limits" — the plan covers Claude Code, not an app built on the same token. Listing the
-# models (which /v1/models happily returns) would advertise an option that cannot answer.
-#
-# So the check is one real one-token completion, cached: a page-load endpoint must not pay for
-# it every time, and the answer changes only when someone edits billing or the .env.
-_ANTHROPIC_PROBE_TTL_S = 600.0
-_anthropic_probe: Dict[str, Any] = {"at": 0.0, "ok": None, "reason": None}
-
-
-def _anthropic_can_serve(*, timeout: float = 10.0) -> Dict[str, Any]:
-    """Whether the configured Anthropic credential can actually complete a request."""
-    import time
-
-    now = time.monotonic()
-    if _anthropic_probe["ok"] is not None and now - _anthropic_probe["at"] < _ANTHROPIC_PROBE_TTL_S:
-        return {"ok": _anthropic_probe["ok"], "reason": _anthropic_probe["reason"]}
-
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    token = os.getenv("CLAUDE_CODE_OAUTH_TOKEN")
-    if not api_key and not token:
-        return {"ok": False, "reason": "no credential"}
-    headers = {"anthropic-version": "2023-06-01", "content-type": "application/json"}
-    if api_key:
-        headers["x-api-key"] = api_key
-    else:
-        headers["Authorization"] = f"Bearer {token}"
-        headers.update(_OAUTH_BETA_HEADER)
-    ok, reason = False, None
-    try:
-        import requests
-
-        resp = requests.post(
-            "https://api.anthropic.com/v1/messages", headers=headers, timeout=timeout,
-            json={"model": _ANTHROPIC_FALLBACK_MODELS[-1], "max_tokens": 1,
-                  "messages": [{"role": "user", "content": "."}]})
-        if resp.status_code < 400:
-            ok = True
-        else:
-            body = resp.json() if resp.content else {}
-            reason = str((body.get("error") or {}).get("message") or resp.status_code)[:200]
-    except Exception as exc:  # noqa: BLE001 - a probe must never break the picker
-        reason = f"probe failed: {type(exc).__name__}"
-    _anthropic_probe.update({"at": now, "ok": ok, "reason": reason})
-    return {"ok": ok, "reason": reason}
-
 
 def list_available_models(*, timeout: float = 6.0) -> Dict[str, Any]:
     """Models offerable in a picker, per provider, with the default marked.
@@ -541,25 +493,33 @@ def list_available_models(*, timeout: float = 6.0) -> Dict[str, Any]:
 
     # Anthropic, queried live for the same reason AnvilGPT is: a hardcoded id that has been
     # retired 404s at request time instead of being absent from the picker.
-    has_credential = bool(os.getenv("ANTHROPIC_API_KEY") or os.getenv("CLAUDE_CODE_OAUTH_TOKEN"))
-    # `configured` here means "a request would work", not "a credential exists" — see
-    # _anthropic_can_serve for why those differ for this provider specifically.
-    serve = _anthropic_can_serve(timeout=timeout) if has_credential else {"ok": False,
-                                                                          "reason": None}
+    # `configured` is credential presence, deliberately, and NOT a liveness probe. A probe was
+    # tried and removed: on a subscription credential the limits are PER MODEL — measured the
+    # same minute, claude-haiku-4-5 answered with tool calls while claude-sonnet-5 and
+    # claude-opus-5 both returned 429 — so any verdict cached for a page load is wrong for
+    # some model within minutes, in both directions. Credential presence does not flap; the
+    # per-request error carries the API's own sentence, which is the only current truth.
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    token = os.getenv("CLAUDE_CODE_OAUTH_TOKEN")
     anthropic: Dict[str, Any] = {
         "provider": "anthropic", "label": "Anthropic (Claude)",
-        "configured": bool(serve["ok"]), "models": [],
+        "configured": bool(api_key or token), "models": [],
     }
+    if token and not api_key:
+        # Set expectations rather than gate: this route works (verified, with tool calls) but
+        # is rate-limited per model, and third-party use draws from extra usage rather than
+        # the plan's included quota.
+        anthropic["caveat"] = ("subscription token: rate-limited per model, and third-party "
+                               "use draws from extra usage rather than plan limits")
     if anthropic["configured"]:
         try:
             import requests
 
-            api_key = os.getenv("ANTHROPIC_API_KEY")
             headers = {"anthropic-version": "2023-06-01"}
             if api_key:
                 headers["x-api-key"] = api_key
             else:
-                headers["Authorization"] = f"Bearer {os.getenv('CLAUDE_CODE_OAUTH_TOKEN')}"
+                headers["Authorization"] = f"Bearer {token}"
                 headers.update(_OAUTH_BETA_HEADER)
             resp = requests.get("https://api.anthropic.com/v1/models",
                                 headers=headers, timeout=timeout)
@@ -575,8 +535,7 @@ def list_available_models(*, timeout: float = 6.0) -> Dict[str, Any]:
         # "this deployment cannot speak Claude"; "configured" would advertise an option that
         # fails on the first turn. Neither is what is true.
         anthropic["models"] = list(_ANTHROPIC_FALLBACK_MODELS)
-        anthropic["needs"] = (serve["reason"] if has_credential and serve.get("reason")
-                              else "ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN")
+        anthropic["needs"] = "ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN"
     out["providers"].append(anthropic)
     return out
 

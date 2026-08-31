@@ -29,6 +29,8 @@ export interface ModelCatalogue {
                models: string[]; stale?: boolean;
                /** Env var this provider is waiting on, when not configured. */
                needs?: string;
+               /** Configured, but with strings attached — shown beside the group label. */
+               caveat?: string;
                /** Shown with the group, e.g. to separate answering models from peer models. */
                note?: string;
                /** Subset of `models` that accept reasoning_effort. */
