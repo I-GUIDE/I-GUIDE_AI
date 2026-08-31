@@ -412,3 +412,63 @@ def test_the_offered_models_are_aliases_not_pinned_ids():
         assert "-" not in alias and not alias.startswith("claude"), \
             f"{alias!r} looks like a pinned id, not an alias"
     assert "sonnet" in ccp.SELECTABLE_MODELS and "opus" in ccp.SELECTABLE_MODELS
+
+
+def test_a_blank_output_reaches_the_answer_not_just_a_field(monkeypatch, tmp_path):
+    """The peer writes its own summary without looking at its files, and synthesis reads
+    that text. A warning parked in a result field it never reads changes nothing."""
+    monkeypatch.setattr(ccp, "run_claude", lambda prompt, **kw: {
+        "ok": True, "exit_code": 0, "answer": "Made the map you asked for.",
+        "stderr": "", "error": None, "artifacts": [{"filename": "empty.geojson"}],
+        "backend": "claude-docker", "model": "sonnet", "auth": "subscription",
+        "output_warnings": [{"file": "empty.geojson",
+                             "problems": ["the layer has no features, so nothing will be drawn"]}],
+    })
+    out = ccp.run_claude_code_peer("make a map")
+    assert "Made the map you asked for." in out["answer"]
+    assert "no features" in out["answer"], "the finding has to be in the text synthesis reads"
+    assert "say so rather than presenting them as results" in out["answer"]
+
+
+# ---------------------------------------------------------------------------
+# Claude as an ANSWERING provider — a different credential from the peer's
+# ---------------------------------------------------------------------------
+
+def test_the_answering_provider_will_not_accept_the_peer_token(monkeypatch):
+    """CLAUDE_CODE_OAUTH_TOKEN authenticates the CLI against a subscription. It cannot
+    call the Messages API, so build_llm must refuse rather than send it and fail with an
+    auth error naming the wrong thing."""
+    from agent_runtime.executor_factory import build_llm
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-not-an-api-key")
+    with pytest.raises(ValueError) as exc:
+        build_llm(provider="anthropic", model="claude-sonnet-5")
+    assert "ANTHROPIC_API_KEY" in str(exc.value)
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in str(exc.value), "name the credential that will NOT work"
+
+
+def test_a_claude_model_id_infers_its_provider(monkeypatch):
+    """The picker sends the id; a bare `claude-*` must not be inferred as OpenAI, which
+    would fail against the wrong endpoint with a confusing 404."""
+    from agent_runtime.executor_factory import build_llm
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(ValueError) as exc:
+        build_llm(model="claude-opus-5")
+    assert "anthropic" in str(exc.value).lower()
+
+
+def test_the_catalogue_offers_claude_even_with_no_key(monkeypatch):
+    """Offered-but-disabled, not absent: absent reads as "this deployment cannot speak
+    Claude", which is a different problem from "nobody has put a key in yet"."""
+    from agent_runtime.executor_factory import list_available_models
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    cat = list_available_models(timeout=0.01)
+    anth = next(p for p in cat["providers"] if p["provider"] == "anthropic")
+    assert anth["configured"] is False
+    assert anth["needs"] == "ANTHROPIC_API_KEY"
+    assert anth["models"], "still shown, so the option is visibly available-if-configured"
+    assert all(m.startswith("claude-") for m in anth["models"]), \
+        "ids, not the CLI's sonnet/opus aliases — this path is the Messages API"

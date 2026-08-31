@@ -27,6 +27,10 @@ export interface ModelCatalogue {
   reasoning_efforts?: string[];
   providers: { provider: string; label: string; configured: boolean;
                models: string[]; stale?: boolean;
+               /** Env var this provider is waiting on, when not configured. */
+               needs?: string;
+               /** Shown with the group, e.g. to separate answering models from peer models. */
+               note?: string;
                /** Subset of `models` that accept reasoning_effort. */
                reasoning_models?: string[];
                /** Legal reasoning_effort values PER model, with function tools attached.

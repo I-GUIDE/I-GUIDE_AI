@@ -367,6 +367,13 @@ def run_claude(
         envelope = parsed["envelope"] or {}
         excluded = set(staging["staged"]) | {f"uploaded_{n}" for n in renamed}
         artifacts = _persist_artifacts(work, excluded)
+        # The tool path runs these checks inside add_map_layer. This peer has no tools, so
+        # without this nothing between the CLI and the user ever looks at what it wrote —
+        # and a blank figure is exactly what a peer's own summary will not mention. Runs
+        # here because the work dir is deleted in the finally below.
+        from agent_runtime.layer_qa import inspect_artifacts
+
+        qa = inspect_artifacts(str(work), [a.get("filename") for a in artifacts])
         result: Dict[str, Any] = {
             # The CLI can exit 0 and still report is_error in the envelope, so both count.
             "ok": (error is None and not timed_out and exit_code == 0
@@ -384,6 +391,8 @@ def run_claude(
         }
         if renamed:
             result["renamed_instruction_files"] = renamed
+        if qa:
+            result["output_warnings"] = qa
         # What the run cost is part of the record, not a detail: this peer spends
         # on a different account from the one answering the user.
         for key in ("num_turns", "total_cost_usd", "duration_ms", "session_id"):
@@ -441,6 +450,15 @@ def run_claude_code_peer(
         node="code",
     )
     answer = result.get("answer") or ""
+    warnings = result.get("output_warnings") or []
+    if warnings:
+        # Appended to the ANSWER, not left in a field: the peer wrote the summary without
+        # looking at its own output, and synthesis reads this text.
+        lines = [f"- {w['file']}: {'; '.join(w['problems'])}" for w in warnings]
+        answer = "\n\n".join(x for x in (answer, "Checks on the files this run produced "
+                                                   "found problems — say so rather than "
+                                                   "presenting them as results:\n"
+                                                   + "\n".join(lines)) if x)
     if not result.get("ok"):
         failure = result.get("error") or f"claude exited with code {result.get('exit_code')}"
         detail = str(result.get("stderr") or "")[-2000:]

@@ -321,7 +321,8 @@ def build_llm(provider: Optional[str] = None, model: Optional[str] = None,
     if not prov:
         # A bare model name: infer the provider from the shape rather than guessing wrong.
         # Open WebUI ids look like "qwen3.6:27b"; OpenAI's never contain a colon.
-        prov = "anvilgpt" if ":" in str(model) else DEFAULT_PROVIDER
+        prov = ("anthropic" if str(model).startswith("claude-")
+                else "anvilgpt" if ":" in str(model) else DEFAULT_PROVIDER)
 
     from langchain_openai import ChatOpenAI
 
@@ -337,6 +338,27 @@ def build_llm(provider: Optional[str] = None, model: Optional[str] = None,
         # and returns an EMPTY content rather than a short answer.
         return ChatOpenAI(model=model or os.getenv("ANVILGPT_MODEL") or "qwen3.6:27b",
                           api_key=key, base_url=base_url, temperature=0.0)
+    if prov == "anthropic":
+        key = os.getenv("ANTHROPIC_API_KEY")
+        if not key:
+            raise ValueError(
+                "provider='anthropic' needs ANTHROPIC_API_KEY. Note this is NOT the same "
+                "credential as CLAUDE_CODE_OAUTH_TOKEN: that one authenticates the Claude "
+                "Code CLI against a subscription and cannot call the Messages API.")
+        try:
+            from langchain_anthropic import ChatAnthropic
+        except ImportError as exc:  # pragma: no cover - depends on the install
+            raise ValueError(
+                "provider='anthropic' needs the langchain-anthropic package "
+                "(pip install langchain-anthropic)") from exc
+        # No max_tokens ceiling for the same reason AnvilGPT gets none — except Anthropic
+        # REQUIRES the field, so it is set high rather than left off.
+        if effort:
+            logger.info("reasoning_effort %r is an OpenAI parameter; not sent to Anthropic",
+                        effort)
+        return ChatAnthropic(model=model or os.getenv("ANTHROPIC_MODEL")
+                             or _ANTHROPIC_FALLBACK_MODELS[1],
+                             api_key=key, temperature=0.0, max_tokens=8192)
     if prov in ("openai", "default"):
         key = os.getenv("OPENAI_KEY") or os.getenv("OPENAI_API_KEY")
         if not key:
@@ -359,7 +381,19 @@ def build_llm(provider: Optional[str] = None, model: Optional[str] = None,
             logger.info("reasoning_effort %r not usable with tools on %s; sent %r",
                         effort, kwargs["model"], sending)
         return ChatOpenAI(**kwargs)
-    raise ValueError(f"unknown provider {provider!r}; expected 'openai' or 'anvilgpt'")
+    raise ValueError(
+        f"unknown provider {provider!r}; expected 'openai', 'anthropic' or 'anvilgpt'")
+
+
+# Fallback ids when Anthropic's own /v1/models cannot be reached (no key, or the call
+# failed). Real ids, not the CLI's `sonnet`/`opus` aliases: the Messages API takes ids,
+# and the aliases only exist inside Claude Code.
+_ANTHROPIC_FALLBACK_MODELS = (
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-fable-5",
+    "claude-haiku-4-5-20251001",
+)
 
 
 def list_available_models(*, timeout: float = 6.0) -> Dict[str, Any]:
@@ -415,6 +449,38 @@ def list_available_models(*, timeout: float = 6.0) -> Dict[str, Any]:
             anvil["models"] = list(_ANVIL_FALLBACK_MODELS)
             anvil["stale"] = True
     out["providers"].append(anvil)
+
+    # Anthropic, queried live for the same reason AnvilGPT is: a hardcoded id that has been
+    # retired 404s at request time instead of being absent from the picker.
+    anthropic: Dict[str, Any] = {
+        "provider": "anthropic", "label": "Anthropic (Claude)",
+        "configured": bool(os.getenv("ANTHROPIC_API_KEY")), "models": [],
+        # The peer's CLI takes `sonnet`/`opus` aliases; this path is the Messages API and
+        # takes ids. Saying so here keeps the two pickers from looking interchangeable.
+        "note": "answering models — the code peer selects its own model separately",
+    }
+    if anthropic["configured"]:
+        try:
+            import requests
+
+            resp = requests.get(
+                "https://api.anthropic.com/v1/models",
+                headers={"x-api-key": os.getenv("ANTHROPIC_API_KEY"),
+                         "anthropic-version": "2023-06-01"},
+                timeout=timeout)
+            resp.raise_for_status()
+            ids = [m.get("id") for m in (resp.json().get("data") or []) if m.get("id")]
+            anthropic["models"] = ids or list(_ANTHROPIC_FALLBACK_MODELS)
+        except Exception as exc:
+            logger.info("Anthropic model list unavailable (%s); offering known ids", exc)
+            anthropic["models"] = list(_ANTHROPIC_FALLBACK_MODELS)
+            anthropic["stale"] = True
+    else:
+        # Offered but not configured: the picker shows it disabled, so "we could speak
+        # Claude here" is visible without pretending the key exists.
+        anthropic["models"] = list(_ANTHROPIC_FALLBACK_MODELS)
+        anthropic["needs"] = "ANTHROPIC_API_KEY"
+    out["providers"].append(anthropic)
     return out
 
 

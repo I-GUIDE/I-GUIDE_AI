@@ -166,11 +166,18 @@ export function ChatPanel(p: Props) {
                 <option value="">
                   Agent default{p.models ? ` (${p.models.default.model})` : ''}
                 </option>
-                {(p.models?.providers || [])
-                  .filter((g: ModelCatalogue['providers'][number]) => g.configured)
-                  .map((g: ModelCatalogue['providers'][number]) => (
-                  <optgroup key={g.provider} label={g.label + (g.stale ? ' — list unavailable' : '')}>
-                    {g.models.map((m: string) => <option key={m} value={m}>{m}</option>)}
+                {/* An unconfigured provider is shown DISABLED rather than dropped. Absent
+                    reads as "this deployment cannot speak Claude", which is a different
+                    thing from "nobody has put a key in yet" — and only one of those is
+                    fixable from the .env. */}
+                {(p.models?.providers || []).map((g: ModelCatalogue['providers'][number]) => (
+                  <optgroup key={g.provider} disabled={!g.configured}
+                    label={g.label
+                      + (g.configured ? '' : ` — needs ${g.needs || 'configuration'}`)
+                      + (g.stale ? ' — list unavailable' : '')}>
+                    {g.models.map((m: string) => (
+                      <option key={m} value={m} disabled={!g.configured}>{m}</option>
+                    ))}
                   </optgroup>
                 ))}
               </select>

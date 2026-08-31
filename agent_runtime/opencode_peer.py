@@ -316,6 +316,11 @@ def run_opencode(
 
         answer = _clip(_strip_ansi(stdout).strip())
         artifacts = _persist_artifacts(work, {_CONFIG_FILENAME, *staging["staged"]})
+        # No tools means no add_map_layer means nothing checked what this wrote. See
+        # layer_qa.inspect_artifacts.
+        from agent_runtime.layer_qa import inspect_artifacts
+
+        qa = inspect_artifacts(str(work), [a.get("filename") for a in artifacts])
         result: Dict[str, Any] = {
             "ok": error is None and not timed_out and exit_code == 0,
             "exit_code": exit_code,
@@ -327,6 +332,8 @@ def run_opencode(
             "backend": "opencode-docker",
             "model": model_ref(model),
         }
+        if qa:
+            result["output_warnings"] = qa
         if staging["staged_info"]:
             result["input_files"] = staging["staged_info"]
         if staging["errors"]:
@@ -414,6 +421,13 @@ def run_opencode_code_peer(
         node="code",
     )
     answer = result.get("answer") or ""
+    warnings = result.get("output_warnings") or []
+    if warnings:
+        lines = [f"- {w['file']}: {'; '.join(w['problems'])}" for w in warnings]
+        answer = "\n\n".join(x for x in (answer, "Checks on the files this run produced "
+                                                   "found problems — say so rather than "
+                                                   "presenting them as results:\n"
+                                                   + "\n".join(lines)) if x)
     if not result.get("ok"):
         failure = result.get("error") or f"opencode exited with code {result.get('exit_code')}"
         detail = str(result.get("stderr") or "")[-2000:]
