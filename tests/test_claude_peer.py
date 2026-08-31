@@ -480,6 +480,16 @@ def test_a_claude_model_id_infers_its_provider(monkeypatch):
     assert "anthropic" in str(exc.value).lower()
 
 
+@pytest.fixture(autouse=True)
+def _clear_anthropic_probe():
+    """The serve-check is cached per process; tests must not inherit each other's verdict."""
+    from agent_runtime import executor_factory as ef
+
+    ef._anthropic_probe.update({"at": 0.0, "ok": None, "reason": None})
+    yield
+    ef._anthropic_probe.update({"at": 0.0, "ok": None, "reason": None})
+
+
 def test_the_catalogue_offers_claude_even_with_no_key(monkeypatch):
     """Offered-but-disabled, not absent: absent reads as "this deployment cannot speak
     Claude", which is a different problem from "nobody has put a key in yet"."""
@@ -495,6 +505,59 @@ def test_the_catalogue_offers_claude_even_with_no_key(monkeypatch):
     assert anth["models"], "still shown, so the option is visibly available-if-configured"
     assert all(m.startswith("claude-") for m in anth["models"]), \
         "ids, not the CLI's sonnet/opus aliases — this path is the Messages API"
+
+
+def test_a_credential_that_cannot_serve_is_not_reported_as_configured(monkeypatch):
+    """A subscription token authenticates /v1/messages and then fails inference with
+    "Third-party apps now draw from extra usage, not plan limits". Reporting it as
+    configured advertises an option that dies on the first turn; the picker has to carry
+    the API's own reason instead."""
+    from agent_runtime import executor_factory as ef
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat")
+    monkeypatch.setattr(ef, "_anthropic_can_serve", lambda **kw: {
+        "ok": False, "reason": "Third-party apps now draw from extra usage, not plan limits."})
+
+    anth = next(p for p in ef.list_available_models(timeout=0.01)["providers"]
+                if p["provider"] == "anthropic")
+    assert anth["configured"] is False
+    assert "extra usage" in anth["needs"], "say what the API said, not a guess"
+    assert anth["models"], "still listed, so it un-greys the moment billing is sorted"
+
+
+def test_a_working_credential_is_reported_as_configured(monkeypatch):
+    from agent_runtime import executor_factory as ef
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-real")
+    monkeypatch.setattr(ef, "_anthropic_can_serve", lambda **kw: {"ok": True, "reason": None})
+    anth = next(p for p in ef.list_available_models(timeout=0.01)["providers"]
+                if p["provider"] == "anthropic")
+    assert anth["configured"] is True and "needs" not in anth
+
+
+def test_the_serve_probe_is_cached(monkeypatch):
+    """One real completion per TTL, not one per page load — /agent/models is hit on every
+    open of the Connection panel."""
+    from agent_runtime import executor_factory as ef
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-real")
+    calls = []
+
+    class _Resp:
+        status_code = 200
+        content = b"{}"
+
+        def json(self):
+            return {}
+
+    monkeypatch.setattr(ef, "_anthropic_probe", {"at": 0.0, "ok": None, "reason": None})
+    import requests
+    monkeypatch.setattr(requests, "post", lambda *a, **k: calls.append(1) or _Resp())
+
+    assert ef._anthropic_can_serve()["ok"] is True
+    assert ef._anthropic_can_serve()["ok"] is True
+    assert len(calls) == 1, "the second call must come from the cache"
 
 
 def test_temperature_is_not_sent_to_anthropic(monkeypatch):
