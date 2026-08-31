@@ -218,7 +218,7 @@ export function ChatPanel(p: Props) {
                     <option key={peer.id} value={peer.id} disabled={!peer.available}
                             title={peer.label}>
                       {peer.id}{peer.model ? ` (${peer.model})` : ''}
-                      {peer.available ? '' : ' — not configured'}
+                      {peer.available ? '' : ` — ${peer.reason || 'unavailable'}`}
                     </option>
                   ))}
                 </select>

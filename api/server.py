@@ -516,14 +516,26 @@ def agent_dashboard():
 def _list_code_peers():
     """The code-peer backends a request may select, and which one is the default.
 
-    `available` is not the same as `selectable`: each CLI peer needs its sandbox
-    image built and a credential present, and a peer offered without those fails
-    at run time with a container error rather than being absent from the picker.
+    A CLI peer needs BOTH a credential and its sandbox image. Reporting only the
+    credential offered opencode as available on a host where its image had never
+    been built, which fails at run time with a docker error — the picker has to
+    tell "not configured" apart from "not built".
     """
     import os as _os
+    import subprocess as _sp
 
-    from agent_runtime.claude_peer import resolve_claude_settings, selects_claude
-    from agent_runtime.opencode_peer import CODE_PEER_ENV, resolve_llm_settings, selects_opencode
+    from agent_runtime.claude_peer import (DEFAULT_CLAUDE_IMAGE, resolve_claude_settings,
+                                           selects_claude)
+    from agent_runtime.opencode_peer import (CODE_PEER_ENV, DEFAULT_OPENCODE_IMAGE,
+                                             resolve_llm_settings, selects_opencode)
+
+    def _image_present(env_var, default_name):
+        name = _os.getenv(env_var, default_name)
+        try:
+            return _sp.run(["docker", "image", "inspect", name],
+                           capture_output=True, timeout=5).returncode == 0
+        except Exception:  # noqa: BLE001 - no docker, no answer, never a page error
+            return False
 
     env_value = _os.getenv(CODE_PEER_ENV) or ""
     default = ("opencode" if selects_opencode(env_value)
@@ -533,16 +545,22 @@ def _list_code_peers():
         opencode_ready = bool(resolve_llm_settings().get("api_key"))
     except Exception:  # noqa: BLE001
         opencode_ready = False
+    claude_image = _image_present("AGENT_CLAUDE_IMAGE", DEFAULT_CLAUDE_IMAGE)
+    opencode_image = _image_present("AGENT_OPENCODE_IMAGE", DEFAULT_OPENCODE_IMAGE)
     return {
         "default": default,
         "peers": [
             {"id": "langchain", "label": "Built-in peer (generates code, runs execute_code)",
              "available": True},
             {"id": "claude", "label": "Claude Code CLI (sandboxed, iterates on its own)",
-             "available": bool(claude["credential"]),
+             "available": bool(claude["credential"]) and claude_image,
+             "reason": None if (claude["credential"] and claude_image)
+                       else ("no credential" if not claude["credential"] else "image not built"),
              "model": claude["model"], "auth": claude["auth"]},
             {"id": "opencode", "label": "opencode CLI (sandboxed, iterates on its own)",
-             "available": opencode_ready},
+             "available": opencode_ready and opencode_image,
+             "reason": None if (opencode_ready and opencode_image)
+                       else ("no credential" if not opencode_ready else "image not built")},
         ],
     }
 

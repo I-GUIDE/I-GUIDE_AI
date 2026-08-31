@@ -36,6 +36,8 @@ export interface ModelCatalogue {
   code_peers?: {
     default: string;
     peers: { id: string; label: string; available: boolean;
+             /** Why not, when unavailable: 'no credential' | 'image not built'. */
+             reason?: string | null;
              model?: string; auth?: string | null }[];
   };
 }
