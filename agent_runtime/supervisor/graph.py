@@ -2010,12 +2010,19 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
     lacks the context to do so (model-driven — no nested search tool)."""
 
     def fn(query: str, evidence: List[Any], state: "SupervisorState") -> Any:
-        # AGENT_CODE_PEER=opencode swaps the whole peer for a sandboxed opencode
-        # run (it iterates internally — no request_capability / no nested tools).
+        # AGENT_CODE_PEER swaps the whole peer for a sandboxed agentic CLI, which
+        # iterates internally — no request_capability, no nested tools. Two are
+        # wired: `opencode` (OpenAI-compatible endpoint) and `claude` (Anthropic).
         from agent_runtime.opencode_peer import is_opencode_peer_enabled, run_opencode_code_peer
 
         if is_opencode_peer_enabled():
             return run_opencode_code_peer(
+                query, evidence=evidence, state=state, input_file_ids=input_file_ids,
+            )
+        from agent_runtime.claude_peer import is_claude_peer_enabled, run_claude_code_peer
+
+        if is_claude_peer_enabled():
+            return run_claude_code_peer(
                 query, evidence=evidence, state=state, input_file_ids=input_file_ids,
             )
         from agent_runtime.executor_factory import (

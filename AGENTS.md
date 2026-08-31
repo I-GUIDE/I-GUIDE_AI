@@ -172,6 +172,21 @@ the agent process, not in generated code — and abnormal exits are translated
 (`_diagnose_abnormal_exit`: 137 is the OOM kill, 139 a segfault) because the raw signal
 surfaced as an empty stderr.
 
+**The code PEER is swappable, and that is a different thing.** `execute_code` is a tool the
+LangChain peer calls; `AGENT_CODE_PEER` replaces the peer itself with an agentic CLI that
+iterates inside its own container — write, run, read the error, retry — and returns the same
+flat `answer`/`tool_calls`/`tool_results` shape, so synthesis and the trace pipeline cannot
+tell which ran. Two are wired: `opencode` (`agent_runtime/opencode_peer.py`, pointed at the
+deployment's OpenAI-compatible endpoint) and `claude` (`agent_runtime/claude_peer.py`,
+Anthropic, `ANTHROPIC_API_KEY`). Each needs its sandbox image built first —
+`Dockerfile.opencode` / `Dockerfile.claude`. Unlike `execute_code` these containers **keep
+network**, because a CLI with no LLM endpoint does nothing; the hardening is the rest of the
+flag set, not the network.
+
+Do not assume a CLI's flags. Claude Code 2.1.x has **no** `--max-turns`, and an unknown flag
+makes the CLI exit non-zero — which reads as "the peer failed", not "somebody guessed". Check
+`--help` in the built image and pin the check in a test.
+
 ## Verifying UI and delivery changes
 
 For anything the browser renders, load the running prototype and drive the real gesture before
