@@ -31,8 +31,16 @@ def test_the_flag_is_off_by_default(peered):
 def test_the_supervisor_stops_offering_search_when_merged(unified):
     """There is no separate retrieval peer to route to — routing there would duplicate what
     the one agent already does, and split the context again."""
-    state = {"evidence": [], "step": 0, "search_attempts": 0}
-    assert g._available_actions(state) == ["analyze", "code", "done"]
+    # `search` is gone from the menu in every state — that is the whole point. (Which of the
+    # remaining actions is offered still varies: analyze is withheld as an unproductive
+    # back-to-back repeat, and done is withheld before anything has run.)
+    for state in (
+        {"evidence": [], "step": 0, "search_attempts": 0, "actions": []},
+        {"evidence": [], "step": 1, "search_attempts": 0,
+         "actions": ["analyze"], "analysis_results": {"summary": "x"}},
+        {"evidence": [{"title": "d"}], "step": 2, "search_attempts": 1, "actions": ["analyze"]},
+    ):
+        assert "search" not in g._available_actions(state), state
 
 
 def test_search_is_still_offered_when_peered(peered):
@@ -107,3 +115,24 @@ def test_the_merged_node_keeps_the_search_counters_alive():
     src = inspect.getsource(g)
     for key in ("search_attempts", "searched_queries", "search_empty_streak"):
         assert f'update["{key}"]' in src, key
+
+
+def test_done_is_not_legal_before_anything_has_run(unified):
+    """MEASURED REGRESSION: with search removed from the menu, "Find flood risk datasets on
+    I-GUIDE" went straight to done at step 0 and answered "I couldn't find any supporting
+    material" without ever retrieving. In the peered shape `search` was the obvious opening
+    move and carried that cue implicitly; merging deleted the cue along with the peer."""
+    fresh = {"unified_peer": True, "evidence": [], "step": 0, "actions": []}
+    assert "done" not in g._available_actions(fresh)
+    assert "analyze" in g._available_actions(fresh)
+
+
+def test_done_becomes_legal_once_a_pass_has_happened(unified):
+    after = {"unified_peer": True, "evidence": [], "step": 1,
+             "actions": ["analyze"], "analysis_results": {"summary": "x"}}
+    assert "done" in g._available_actions(after)
+
+
+def test_the_guard_does_not_touch_the_peered_shape(peered):
+    fresh = {"unified_peer": False, "evidence": [], "step": 0, "actions": []}
+    assert g._available_actions(fresh) == ["search", "analyze", "code", "done"]

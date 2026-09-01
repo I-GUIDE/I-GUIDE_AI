@@ -679,6 +679,14 @@ def _available_actions(state: SupervisorState) -> List[str]:
     for cap in ("analyze", "code"):
         if not _is_unproductive_repeat(cap, state):
             actions.append(cap)
+    # With the peers merged, `done` must not be legal before ANYTHING has run. Removing
+    # `search` from the menu also removed the decider's cue that retrieval was needed:
+    # measured, "Find flood risk datasets on I-GUIDE" went straight to done at step 0 and
+    # answered "I couldn't find any supporting material" without ever retrieving. In the
+    # peered shape `search` was the obvious opening move and carried that signal implicitly.
+    if unified_peer_enabled(state) and not (state.get("actions") or []) \
+            and not (state.get("evidence") or []) and state.get("analysis_results") is None:
+        return actions or ["analyze"]
     actions.append("done")
     return actions
 
@@ -2925,6 +2933,17 @@ def build_supervisor_graph(
             # Don't keep hitting the search agent once the KB has nothing left to give.
             elif nxt == "search" and _search_exhausted(state):
                 nxt, why = "done", "search exhausted"
+        # A VETO, not a hint: _available_actions only shapes the menu the decider is shown,
+        # and it answered `done` at step 0 anyway. Measured on the merged shape — "Find flood
+        # risk datasets on I-GUIDE" finished without retrieving and replied "I couldn't find
+        # any supporting material". Deleting the search peer also deleted the decider's cue
+        # that retrieval was the opening move, so the floor has to be enforced here.
+        if (nxt == "done" and unified_peer_enabled(state)
+                and not (state.get("actions") or [])
+                and not (state.get("evidence") or [])
+                and state.get("analysis_results") is None
+                and state.get("code_result") is None):
+            nxt, why = "analyze", "nothing has run yet"
         emit_trace_event(
             "node_completed",
             {"stage": "supervisor", "route": nxt, "message": f"supervisor → {nxt} ({why})"},
