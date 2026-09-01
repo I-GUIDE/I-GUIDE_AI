@@ -191,9 +191,23 @@ def _anvilgpt_settings() -> Optional[Dict[str, Any]]:
 #
 # The model then re-derives its plan from the user request alone and reaches the same
 # conclusion, so it re-issues the same call. Observed live: `admin_boundary` called five times
-# with near-identical arguments in one turn, then `execute_code` cycling through guesses at a
-# filename it had already been given. Non-reasoning models (gpt-4o) don't show this because
-# their plan sits in `content`, which does round-trip.
+# in one turn — the first two with IDENTICAL arguments — then `execute_code` cycling through
+# guesses at a filename it had already been given.
+#
+# This applies ONLY to OpenAI-*compatible shims* that put the chain of thought on the wire.
+# OpenAI proper never does: measured against api.openai.com with tools bound, the assistant
+# message keys are exactly ['annotations','audio','content','function_call','refusal','role',
+# 'tool_calls'] for gpt-4o, gpt-5.6-luna, gpt-5.2 and o4-mini alike — `reasoning_content` is
+# ABSENT, not null, even when the model demonstrably reasoned (gpt-5.2 at effort=high burned
+# 128-214 reasoning tokens and returned none of the text; only
+# usage.completion_tokens_details.reasoning_tokens records it). So on the OpenAI path this
+# subclass is a permanent no-op — `_reasoning_text` finds nothing and returns early — and
+# nothing at our layer could preserve what the API does not send. Only `/v1/responses`, which
+# we do not use, carries reasoning items across steps.
+#
+# Do NOT explain gpt-4o's immunity as "its plan lives in content": measured, gpt-4o also
+# returns content=None on a tool-calling step. It is immune because it has no chain of thought
+# to lose, not because it round-trips one.
 #
 # So keep it: stash the reasoning on the message, and when the provider left `content` empty on
 # a TOOL-CALLING step, promote the reasoning into `content` so it survives serialization the
@@ -271,7 +285,17 @@ def build_default_llm() -> Any:
     )
     base_url = normalize_openai_base_url(os.getenv("VLLM_PROXY") or os.getenv("OPENAI_BASE_URL"))
 
-    kwargs = {"model": model, "temperature": 0.0, "api_key": api_key}
+    # Same two guards the per-request builder applies. They live here as well because this
+    # path is reachable by env alone: OPENAI_CHAT_MODEL=gpt-5.6-luna would otherwise build a
+    # client with no reasoning_effort, and every tool-bound call would 400 ("Function tools
+    # with reasoning_effort are not supported ... set reasoning_effort to 'none'"). Not
+    # reachable as currently deployed, so this is a guardrail rather than a live outage.
+    kwargs: Dict[str, Any] = {"model": model, "api_key": api_key}
+    if supports_temperature(model):
+        kwargs["temperature"] = 0.0
+    forced = resolve_effort(model, None)
+    if forced:
+        kwargs["reasoning_effort"] = forced
     if base_url:
         kwargs["base_url"] = base_url
     return ChatOpenAI(**kwargs)
@@ -348,6 +372,23 @@ def required_effort(model: Optional[str]) -> Optional[str]:
 def supports_reasoning_effort(model: Optional[str]) -> bool:
     """Whether `model` takes a reasoning_effort argument at all (tools attached)."""
     return bool(effort_options(model))
+
+
+# Some ids reject an explicit temperature outright, and since we send `temperature=0.0` on
+# every OpenAI build that made them 100% unusable from the picker — every tool-bound call
+# answered HTTP 400 "Unsupported value: 'temperature' does not support 0.0 with this model.
+# Only the default (1) value is supported." Measured by sweeping every OpenAI id the picker
+# offers, with tools bound and the effort this table forces: gpt-5.5 and o4-mini-2025-04-16
+# fail, all nine others accept 0.0, and both failures succeed with the parameter simply
+# omitted. So omit it for those two rather than dropping them from the picker — they work
+# fine, we were just sending an argument they refuse. Determinism is worth keeping everywhere
+# it IS accepted, which is why this is a deny-list and not a blanket removal.
+_NO_TEMPERATURE = frozenset({"gpt-5.5", "o4-mini-2025-04-16"})
+
+
+def supports_temperature(model: Optional[str]) -> bool:
+    """Whether an explicit ``temperature`` may be sent for *model* alongside tools."""
+    return (model or "").strip() not in _NO_TEMPERATURE
 
 
 def resolve_effort(model: Optional[str], effort: Optional[str]) -> Optional[str]:
@@ -437,11 +478,11 @@ def build_llm(provider: Optional[str] = None, model: Optional[str] = None,
         key = os.getenv("OPENAI_KEY") or os.getenv("OPENAI_API_KEY")
         if not key:
             raise ValueError("provider='openai' needs OPENAI_KEY.")
-        kwargs: Dict[str, Any] = {
-            "model": model or os.getenv("OPENAI_CHAT_MODEL") or os.getenv("OPENAI_MODEL")
-            or DEFAULT_OPENAI_MODEL,
-            "api_key": key, "temperature": 0.0,
-        }
+        resolved = (model or os.getenv("OPENAI_CHAT_MODEL") or os.getenv("OPENAI_MODEL")
+                    or DEFAULT_OPENAI_MODEL)
+        kwargs: Dict[str, Any] = {"model": resolved, "api_key": key}
+        if supports_temperature(resolved):
+            kwargs["temperature"] = 0.0
         base_url = normalize_openai_base_url(os.getenv("OPENAI_BASE_URL"))
         if base_url:
             kwargs["base_url"] = base_url

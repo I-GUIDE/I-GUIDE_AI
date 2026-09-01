@@ -101,10 +101,29 @@ reasoning field onto the message — it is absent from `additional_kwargs` AND f
 it was made. The model re-derives its plan from the user request alone, reaches the same
 conclusion, and issues the same call again.
 
-Measured: one turn spent five `admin_boundary` calls with near-identical arguments across two
-peers, then cycled `execute_code` through guesses at a filename it had already been given.
-gpt-4o does not show this because its plan lives in `content`, which round-trips normally; the
-`gpt-5.x` line is served by a different provider entirely.
+Measured: one turn spent five `admin_boundary` calls across two peers — the first two with
+IDENTICAL arguments — then cycled `execute_code` through guesses at a filename it had already
+been given.
+
+**This is a defect of OpenAI-compatible SHIMS, not of reasoning models generally.** OpenAI
+proper never puts the chain of thought on the wire: measured against `api.openai.com` with
+tools bound, the assistant message keys are exactly `['annotations', 'audio', 'content',
+'function_call', 'refusal', 'role', 'tool_calls']` for `gpt-4o`, `gpt-5.6-luna`, `gpt-5.2` and
+`o4-mini` alike — `reasoning_content` is *absent*, not null, even when the model demonstrably
+reasoned (`gpt-5.2` at effort=high burned 128–214 reasoning tokens and returned none of the
+text; only `usage.completion_tokens_details.reasoning_tokens` records it). So the subclass is a
+permanent, harmless no-op on the OpenAI path, and no client-side fix exists there — only
+`/v1/responses`, which we do not use, carries reasoning items across steps.
+
+Two corrections to earlier wording that was wrong. gpt-4o is **not** immune because "its plan
+lives in `content`" — measured, gpt-4o also returns `content: None` on a tool-calling step. It
+is immune because it has no chain of thought to lose. And `gpt-5.x` is **OpenAI**, not a
+different provider; `gpt-5.6-luna` in particular is immune for a third reason again — with
+function tools OpenAI hard-rejects any `reasoning_effort` but `'none'` (HTTP 400, *"To use
+function tools, use /v1/responses or set reasoning_effort to 'none'"*), `resolve_effort` forces
+`'none'`, and at `'none'` luna reports `reasoning_tokens: 0`. **As this agent calls it, luna is
+a non-reasoning tool-caller.** Unshackled (no tools) it reasons normally — 181 tokens at
+`'high'` — so that is a real capability we trade away for tool use on this endpoint.
 
 `_reasoning_preserving_chat_openai()` (`agent_runtime/executor_factory.py`) subclasses
 `ChatOpenAI` and, in `_create_chat_result`, stashes the reasoning on the message and promotes
