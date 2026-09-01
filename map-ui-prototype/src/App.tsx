@@ -275,11 +275,24 @@ export default function App() {
   // auto-loaded too: three stacked layers of 128,855 points buried the heatmap under
   // a solid mass of circles.
   const mapLayerDelivered = useRef(false);
+  // …and the files those layers were drawn FROM, for the whole conversation rather than one
+  // turn. mapLayerDelivered resets each turn, so a later turn that places no layer of its own
+  // (e.g. "what parameters were used?", answered from memory) ran the artifact fallback over a
+  // downloads list that still carried EARLIER turns' files — re-adding the boundary the
+  // map_layer event had already drawn, as a second filled layer over the top of it.
+  const layerSourceFiles = useRef<Set<string>>(new Set());
   // A map mounted into a zero-sized container (collapsed pane, hidden tab) never finishes
   // initialising — MapLibre does not fire `load`, so there is no instance to resize later and
   // the canvas stays blank. Mount only once the container actually has room.
   const mapBoxRef = useRef<HTMLDivElement | null>(null);
   const [mapBoxReady, setMapBoxReady] = useState(false);
+  // Compare files by their file_id, not the URL string: the map_layer descriptor and the
+  // download record for the same file differ in absolute-vs-relative form.
+  const fileKey = (u?: string | null) => {
+    if (!u) return '';
+    const m = /\/agent\/files\/([^/]+)\/download/.exec(u);
+    return m ? m[1] : u;
+  };
   const loadVectorArtifacts = useCallback(async (files: FileRecord[]) => {
     if (!spatial) return;
     for (const f of files) {
@@ -287,6 +300,9 @@ export default function App() {
       if (!/\.(geo)?json$/i.test(name)) continue;
       const key = f.file_id || f.download_url;
       if (!key || loadedArtifacts.current.has(key)) continue;
+      // Already on the map because a map_layer event drew it — possibly several turns ago.
+      if (layerSourceFiles.current.has(f.file_id || '') ||
+          layerSourceFiles.current.has(fileKey(f.download_url))) continue;
       loadedArtifacts.current.add(key);
       try {
         const res = await fetch(resolveUrl(f.download_url));
@@ -382,6 +398,7 @@ export default function App() {
         onFile: (files) => patch({ artifacts: files }),
         onMapLayer: async (layer) => {
           mapLayerDelivered.current = true;
+          if (layer.url) layerSourceFiles.current.add(fileKey(layer.url));
           // A raster (embedding PCA image, segmentation mask) is an IMAGE draped over its
           // footprint. It must be handled before the GeoJSON path below, which would try to
           // parse the PNG as JSON, fail, and silently deliver nothing.
