@@ -506,6 +506,15 @@ Do not assume a CLI's flags. Claude Code 2.1.x has **no** `--max-turns`, and an 
 makes the CLI exit non-zero — which reads as "the peer failed", not "somebody guessed". Check
 `--help` in the built image and pin the check in a test.
 
+## The published capability atlas
+
+`docs/spatial-toolkit.html` is the tool inventory as a reader-facing page, enumerated from the
+running container and published as an artifact that is updated **in place at the same URL**.
+It goes stale silently — it sat for eleven days missing `admin_boundary`, `embed_zones` and
+`fit_zone_model`, and still told readers the embedding tools "need a region — draw one", which
+`admin_boundary` had made false. Re-enumerate and update it whenever the tool surface, the
+delivery contract or the stated limits change. `docs/README.md` says how.
+
 ## Verifying UI and delivery changes
 
 For anything the browser renders, load the running prototype and drive the real gesture before
