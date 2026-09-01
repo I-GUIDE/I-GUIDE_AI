@@ -162,6 +162,25 @@ is for, so a conversation doesn't accumulate `output_1.geojson`. Large outputs a
 with their size (`AGENT_LARGE_ARTIFACT_MB`, default 25) because an invisible 89 MB intermediate
 was being written every turn.
 
+**And the answer is checked against the artifact, deterministically.** Provenance in the tool
+result only helps if the answer uses it. Live, "show me the clay embedding of urbana at
+2025/03/01-2025/05/01" ran `embed_region` with no `model`, embedded with the default (gse), and
+then reported *"Here's the Clay v1.5 embedding … extracted from the global LGND Clay Embeddings
+– Sentinel-2 collection … 2.56 km MajorTOM grid cell"* — provenance lifted from a web-search
+hit for the word "clay" — while the legend beside it read `gse embedding (PCA-RGB)`. The same
+answer told the user to add the layer from a URL, when it was already rendered. The LLM
+grounding audit flagged none of it: the cited pages were real, they just were not where the
+raster came from.
+
+Two checks in `supervisor/graph.py`, both deterministic because the LLM audit is what missed
+this. Upstream, the analyse peer retries once when the query names a model
+(`_models_named_in`) that is not the one that ran (`_models_used`) — fixing the cause, since a
+caveat on the wrong raster is not what was asked for. Downstream,
+`_correct_artifact_claims` appends a marked correction when the answer names a model that did
+not run, or tells the user to add a layer that was already delivered (`_DENIES_MAP_RE`). Model
+ids are probed from the service, not hardcoded, so an unreachable service disables the model
+check rather than making it wrong — the map-denial check needs no catalog and keeps working.
+
 ## The tool surface
 
 36 tools in six families, plus `execute_code` and four file tools. Enumerate them from the
@@ -179,6 +198,36 @@ of them. `rs_embed_tools` calls an external service at `RS_EMBED_URL` (default
 There is **no raster analysis**: no zonal statistics, band math, reclassify or terrain. Route
 that through `execute_code` (rasterio is available) or a GDAL algorithm via
 `qgis_processing_run`. The map client models vector layers only.
+
+## The conversation remembers what it DID
+
+`session_memory` stored `{userQuery, answer}` — prose. Everything a tool produced was discarded
+at the end of the turn, and the supervisor's decision payload (`_distill`) is built from
+per-turn state, so on turn 2 it reports `has_evidence=False` / `has_analysis=False` /
+`artifacts_produced=[]` however much turn 1 did. Routing to `search` was the correct read of
+what it was shown. Measured: "do you use the original resolution of clay or do you downsample
+it" became forty-nine keyword searches (drifting into SoilGrids *soil* clay) and died at
+66,275 tokens against a 65,536 window — while `scale_m` sat in the previous turn's tool result.
+
+`_ledger_rows` records one row per tool INVOCATION — `{tool, curated args, curated facts,
+file_id, map_layer}` — into `session_memory._ACTIONS` (process-local, bounded, same lifetime as
+the turn store). Two consumers, and both were needed:
+
+* `_distill(..., for_decision=True)` adds `prior_turns_in_this_conversation` so the supervisor
+  can pick `done`. Decision-only — the client payload is a per-turn record and stays clean.
+* Synthesis gets `_prior_actions_note()` as a system message. This is the one that fixed the
+  answer. With the ledger in the routing payload alone the decider still chose `search` twice;
+  the answer only became right when the ANSWERING model could see the facts.
+
+Three things cost a deploy cycle each and are worth not rediscovering. `tool_results` entries
+are `{name, tool_call_id, content}` with content a JSON **string** — reading `output`/`result`
+yields empty payloads while every hand-written unit test passes, which is why these tests build
+artifacts through `extract_search_artifacts` instead. `graph.py` had **no module logger**, so
+the first diagnostic raised `NameError` inside the recorder. And the field names are the
+service's, not the user's: given `scale_m=10` the model still answered *"the available evidence
+does not specify the ground-resolution"* — `_FACT_PHRASES` spells it out as "10 m per pixel",
+and that is what turned it into *"generated at a 10-meter ground resolution"* with zero
+searches.
 
 ## Named areas without an upload
 
@@ -284,6 +333,17 @@ canonicalise case and `.DEPS/numpy.py` therefore walked straight past an exact-m
 the dependency cache. And a workspace key is a slug PLUS a digest, since the slug maps every
 unsafe character to `_` and truncates, so client-supplied thread ids `sess:42` and `sess_42`
 shared one directory — and now would have shared a package cache.
+
+**A polygon and a date range are no longer exclusive.** `embed_region` takes `start`/`end` and
+embeds a RECTANGLE; `embed_zones` embeds the polygon but took only `year`. So "the clay
+embedding of Urbana for 2025-03-01..2025-05-01" forced a silent trade — the agent kept the
+dates and quietly returned a rectangle around the city centroid instead of the city. The zonal
+service request (`ZonesReq`) now accepts `start`/`end` and prefers them over `year`
+(`TemporalSpec.range` was already there, one line below the `year` branch), and `embed_zones`
+passes them through. Both or neither: half a range would become a whole-year composite, which
+is the same quiet substitution in a new place. NOTE that the service file
+(`examples/webapp/server.py`) is UNTRACKED — rs-embed gitignores `examples/**` — so that half
+of the change lives only on the deployment and in `~/webapp-backups/`.
 
 **The code PEER is swappable, and that is a different thing.** `execute_code` is a tool the
 LangChain peer calls; `AGENT_CODE_PEER` replaces the peer itself with an agentic CLI that

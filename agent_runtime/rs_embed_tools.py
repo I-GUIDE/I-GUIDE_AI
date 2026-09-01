@@ -270,7 +270,15 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                      models: Optional[List[str]] = None, start: str = "2022-06",
                      end: str = "2022-09", buffer_m: float = _DEFAULT_BUFFER_M,
                      name: Optional[str] = None) -> str:
-        """Embed a region with remote-sensing foundation models and PUT THE RESULT ON THE MAP.
+        """Embed a RECTANGLE with remote-sensing foundation models and PUT THE RESULT ON THE MAP.
+
+        NAMED US AREA? Do not use this. "the embedding of Urbana" / "of Champaign County"
+        wants the administrative boundary, and this tool embeds a box around a point — it
+        takes in everything outside the city limits along with it. Call
+        admin_boundary(area=..., state=..., level='city'|'county') and then
+        embed_zones(file_id=..., zone_id_field='GEOID', model=..., start=..., end=...), which
+        embeds the pixels INSIDE the polygon and accepts the same date range. Use embed_region
+        for a bbox, a point with a buffer, or an uploaded file's extent.
 
         Each model returns a learned description of what the place looks like from space over
         the given months. The embedding grid is projected to 3 colours (PCA) and draped over
@@ -595,6 +603,18 @@ def _provenance(meta: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return out
 
 
+def _zonal_service_body(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """The optional temporal fields for a zonal request.
+
+    A date RANGE when the caller gave one; the service falls back to `year` otherwise. Both
+    are required together — half a range would silently become a whole-year composite, which
+    is exactly the kind of quiet substitution that made "March to May" come back as 2025.
+    """
+    if payload.get("start") and payload.get("end"):
+        return {"start": str(payload["start"]), "end": str(payload["end"])}
+    return {}
+
+
 def _dimension_keys(rows: List[Dict[str, Any]]) -> List[str]:
     """The eNNN columns, in dimension order.
 
@@ -717,6 +737,7 @@ def run_zonal_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         # rather than degrade it when the extent is too large for one request.
         "image": bool(payload.get("image", True)),
     }
+    body.update(_zonal_service_body(payload))
     if payload.get("max_tiles"):
         body["max_tiles"] = int(payload["max_tiles"])
     res = _svc("/api/zones", body, timeout=_ZONAL_TIMEOUT_S)
@@ -799,8 +820,14 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                     year: int = 2022, clusters: int = 5, tile_px: int = 200,
                     max_tiles: int = 24, name: Optional[str] = None,
                     zone_ids: Optional[List[str]] = None,
-                    sibling_file_ids: Optional[List[str]] = None) -> str:
+                    sibling_file_ids: Optional[List[str]] = None,
+                    start: Optional[str] = None, end: Optional[str] = None) -> str:
         """Embed one or many POLYGONS — the pixels INSIDE each shape — and map the result.
+
+        This is also the tool for "the embedding of <a named place>": pair it with
+        admin_boundary, which turns "Urbana" or "Champaign County" into the polygon file this
+        takes. embed_region would embed a rectangle around the centroid instead, which is not
+        the city.
 
         This is the tool for "the embedding of this area" whenever the area is a shape rather
         than a rectangle, whether the layer holds one feature or eight hundred. embed_region
@@ -816,6 +843,10 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
         zone (census tract, county, field, watershed, drawn box) gets one vector describing
         what it looks like from space. Works with any polygon layer: GeoJSON, shapefile,
         GeoPackage.
+
+        `start`/`end` (e.g. "2025-03-01", "2025-05-01") embed a DATE RANGE instead of the
+        whole of `year` — pass both or neither. Use them whenever the user names a period:
+        without them a request for March-May silently becomes a full-year composite.
 
         Returns a CSV of per-zone vectors ready for machine learning (use fit_zone_model),
         and puts TWO things on the map: a PCA-RGB picture of the pixels themselves, cut to the
@@ -849,6 +880,7 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
         res = run_zonal_worker({"polygons_path": str(read_path), "zone_id_field": zone_id_field,
                                 "model": model, "year": int(year), "tile_px": int(tile_px),
                                 "max_tiles": int(max_tiles),
+                                "start": start, "end": end,
                                 "zone_ids": [str(z) for z in zone_ids] if zone_ids else None,
                                 "clusters": max(2, min(int(clusters), len(_CLUSTER_COLORS))),
                                 "image": True})

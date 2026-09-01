@@ -840,3 +840,18 @@ def test_nodata_fraction_survives():
     from agent_runtime.rs_embed_tools import _provenance
 
     assert _provenance({"model": "gse", "nodata_fraction": 0.0164})["nodata_fraction"] == 0.0164
+
+
+def test_a_date_range_reaches_the_zonal_service():
+    """Before this, the polygon path took only `year`, so "the clay embedding of Urbana for
+    2025-03-01..2025-05-01" forced a choice: the city boundary (whole-year composite) or the
+    dates (a rectangle via embed_region). The agent picked the dates and dropped the boundary
+    without saying it had traded one for the other."""
+    from agent_runtime.rs_embed_tools import _zonal_service_body
+
+    body = _zonal_service_body({"start": "2025-03-01", "end": "2025-05-01"})
+    assert body["start"] == "2025-03-01" and body["end"] == "2025-05-01"
+    # Half a range would silently become a whole-year composite, so it takes both or neither.
+    assert "start" not in _zonal_service_body({"start": "2025-03-01"})
+    assert "end" not in _zonal_service_body({"end": "2025-05-01"})
+    assert "start" not in _zonal_service_body({})

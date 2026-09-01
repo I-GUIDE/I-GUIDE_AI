@@ -554,6 +554,11 @@ def make_langchain_granular_tools(
                 "search return records and links rather than geometry. So it is the one that "
                 "answers 'where are the X', 'what X are in / near / intersect this area or upload', "
                 "and requests to see features on a map. "
+                "EXCEPTION — the boundary of a named US state, county or city: use "
+                "`admin_boundary` instead. OSM returns the boundary as fragmentary ways (a "
+                "'show me Champaign County' query here returned five LineStrings, not the "
+                "county), while admin_boundary returns the one authoritative Census polygon "
+                "with its GEOID, which is also what embed_zones needs. "
                 "Args: `feature` — a plain word ('hospital', 'river') or a raw OSM filter "
                 "('amenity=school', 'waterway=river'); and a location — `place` (e.g. 'Chicago, "
                 "Illinois', geocoded automatically) OR `bbox` as 'minLon,minLat,maxLon,maxLat'. "
@@ -637,6 +642,16 @@ def make_langchain_granular_tools(
         ]
 
     tools = [*retrieval_tools, *make_langchain_qgis_tools(session_id=session_id)]
+    # Sits beside overpass_search on purpose. "Show me Champaign County on the map" routes to
+    # the SEARCH peer, so registering the boundary tool only on the analyse/code peers left
+    # OSM as the only thing here that could answer it — and OSM answers it with fragmentary
+    # boundary ways rather than the county.
+    try:
+        from agent_runtime.admin_boundary_tools import make_admin_boundary_tools
+
+        tools.extend(make_admin_boundary_tools())
+    except Exception:  # noqa: BLE001 - never let an optional tool break the tool list
+        pass
     if include_file_tools:
         tools.extend(make_langchain_file_tools())
     return tools

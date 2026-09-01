@@ -23,6 +23,7 @@ live validation). Default ON; per-request override ``use_supervisor``; env opt-o
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from typing import Any, Callable, Dict, List, Optional, TypedDict
@@ -262,7 +263,247 @@ def _refine_query(llm: Optional[Any], query: str, docs: List[Any], tried: List[s
     return _fallback_refinement(query, tried)
 
 
-def _distill(state: SupervisorState) -> Dict[str, Any]:
+_LEDGER_LOG = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# What this conversation has already done
+# ---------------------------------------------------------------------------
+# The decision payload below is built from per-turn state, so on turn 2 it reports
+# has_evidence=False / has_analysis=False / artifacts_produced=[] no matter what turn 1
+# produced — and routing to `search` is then the only sensible read of it. That is how "do you
+# use the original resolution of clay or do you downsample it" became forty-nine keyword
+# searches and a blown context window, when `pixel_ground_m` was already sitting in the
+# previous turn's tool result.
+#
+# Curated, not dumped. These are the argument and result fields that say WHAT was done and
+# would answer a follow-up about it; everything else is noise in a routing decision.
+_LEDGER_ARGS = (
+    "model", "area", "state", "level", "subdivide", "place", "feature", "query",
+    "lon", "lat", "bbox", "start", "end", "year", "file_id", "zone_id_field", "zone_ids",
+)
+_LEDGER_FACTS = (
+    "model", "dims", "dim", "scale_m", "pixel_ground_m", "scale_m_mercator", "year",
+    "geoid", "feature_count", "count", "zone_id_field", "level", "tiles_fetched",
+    # An on-the-fly model reports its geometry differently and has NO scale_m at all:
+    # clay's 36-key meta carries image_size / input_size_hw / patch_size / grid_hw_tokens
+    # instead. Without these, "original resolution or downsampled?" is unanswerable for
+    # every model except the precomputed ones — which is exactly how it read.
+    "image_size", "input_size_hw", "patch_size", "grid_hw_tokens", "source", "sensor",
+)
+_LEDGER_VALUE_CHARS = 80
+_LEDGER_ROWS_SHOWN = 25
+
+
+def _ledger_value(value: Any) -> Any:
+    """A value small enough to sit in a routing payload."""
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    text = str(value)
+    return text if len(text) <= _LEDGER_VALUE_CHARS else text[:_LEDGER_VALUE_CHARS] + "…"
+
+
+def _pick(source: Any, keys) -> Dict[str, Any]:
+    if not isinstance(source, dict):
+        return {}
+    out = {}
+    for k in keys:
+        if k in source and source[k] not in (None, "", [], {}):
+            out[k] = _ledger_value(source[k])
+    return out
+
+
+def _ledger_rows(*contexts: Any) -> List[Dict[str, Any]]:
+    """One row per tool INVOCATION: what ran, on what, and what came back.
+
+    A call and its result arrive as separate records; they are merged here so the ledger
+    reads as "embed_region(model=clay, …) -> pixel_ground_m=10" rather than as two half-rows
+    the decider has to correlate itself.
+    """
+    calls: Dict[str, List[Dict[str, Any]]] = {}
+    results: Dict[str, List[Dict[str, Any]]] = {}
+    order: List[str] = []
+
+    def note(obj: Any) -> None:
+        if not isinstance(obj, dict):
+            return
+        name = str(obj.get("name") or obj.get("tool_name") or "").strip()
+        if not name:
+            return
+        # `content` is the shape extract_search_artifacts actually produces
+        # ({name, tool_call_id, content}), and it is a JSON *string*. Reading only
+        # output/result silently yielded empty payloads against real artifacts while every
+        # unit test passed, because the tests were written to the assumed shape.
+        payload = obj.get("content")
+        if payload is None:
+            payload = obj.get("output")
+        if payload is None:
+            payload = obj.get("result")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except ValueError:
+                payload = None
+        args = _pick(obj.get("args") or obj.get("arguments"), _LEDGER_ARGS)
+
+        part: Dict[str, Any] = {}
+        if args:
+            part["args"] = args
+        if isinstance(payload, dict):
+            facts = _pick(payload, _LEDGER_FACTS)
+            # rs-embed nests the fields that say what a number MEANS under `provenance` — and
+            # embed_region nests that AGAIN, one entry per model under `models`. Reading only
+            # the top level found nothing: the tool result's own keys are compute /
+            # embedding_package / map_layer / models, so every fact that answers "what
+            # resolution was that" sits two levels down.
+            for entry in (payload.get("models") or []):
+                if isinstance(entry, dict):
+                    facts = {**facts, **_pick(entry, _LEDGER_FACTS)}
+                    if isinstance(entry.get("provenance"), dict):
+                        facts = {**_pick(entry["provenance"], _LEDGER_FACTS), **facts}
+            prov = payload.get("provenance")
+            if isinstance(prov, dict):
+                facts = {**_pick(prov, _LEDGER_FACTS), **facts}
+            if facts:
+                part["facts"] = facts
+            if payload.get("file_id"):
+                part["file_id"] = _ledger_value(payload["file_id"])
+            ml = payload.get("map_layer")
+            if isinstance(ml, dict) and ml.get("label"):
+                part["map_layer"] = _ledger_value(ml["label"])
+        if not part:
+            return
+        if name not in order:
+            order.append(name)
+        bucket = results if ("facts" in part or "file_id" in part or "map_layer" in part) else calls
+        bucket.setdefault(name, []).append(part)
+
+    def walk(obj: Any) -> None:
+        if isinstance(obj, dict):
+            note(obj)
+            for v in obj.values():
+                walk(v)
+        elif isinstance(obj, (list, tuple)):
+            for v in obj:
+                walk(v)
+
+    for ctx in contexts:
+        walk(ctx)
+
+    rows: List[Dict[str, Any]] = []
+    seen = set()
+    for name in order:
+        cs, rs = calls.get(name, []), results.get(name, [])
+        for i in range(max(len(cs), len(rs))):
+            row: Dict[str, Any] = {"tool": name}
+            if i < len(cs):
+                row.update(cs[i])
+            if i < len(rs):
+                row.update(rs[i])
+            key = json.dumps(row, sort_keys=True, default=str)
+            if key not in seen:
+                seen.add(key)
+                rows.append(row)
+    return rows
+
+
+# The key names are the service's, not the user's. Given `scale_m=10` the model answered
+# "the available evidence does not specify the ground-resolution" — it did not connect the
+# two. Spelling the field out in the words a user would use is what closes that gap.
+_FACT_PHRASES = {
+    "image_size": "model input chip: {v} px on a side — the imagery is RESAMPLED to this, so "
+                  "it is not the sensor's native resolution",
+    "input_size_hw": "model input size (h, w) in px: {v} — imagery is resampled to this",
+    "patch_size": "ViT patch size: {v} px, so each output token covers {v}x{v} input pixels",
+    "grid_hw_tokens": "output token grid (h, w): {v}",
+    "source": "imagery source: {v}",
+    "sensor": "sensor: {v}",
+    "scale_m": "ground resolution / pixel size: {v} m per pixel (this IS the resolution it was computed at)",
+    "pixel_ground_m": "ground resolution / pixel size: {v} m per pixel",
+    "scale_m_mercator": "web-mercator pixel size: {v} m",
+    "dims": "embedding dimensions: {v}",
+    "dim": "embedding dimensions: {v}",
+    "model": "model: {v}",
+    "year": "imagery year: {v}",
+    "geoid": "GEOID: {v}",
+    "feature_count": "features: {v}",
+}
+
+
+def _fact_phrase(key: str, value: Any) -> str:
+    template = _FACT_PHRASES.get(key)
+    return template.format(v=value) if template else f"{key}={value}"
+
+
+def _prior_actions_note(rows: List[Dict[str, Any]]) -> Optional[str]:
+    """The ledger as a line-per-action note for the ANSWERING model.
+
+    Injected into synthesis as well as into routing, because the two failures are separate.
+    Routing waste is expensive; an answer that says "the available evidence does not specify
+    the ground resolution" when scale_m=10 is sitting in the previous turn's tool result is
+    simply wrong, and it stays wrong however the supervisor routed.
+    """
+    if not rows:
+        return None
+    lines = []
+    for r in rows[-_LEDGER_ROWS_SHOWN:]:
+        bits = [str(r.get("tool"))]
+        if r.get("args"):
+            bits.append("(" + ", ".join(f"{k}={v}" for k, v in r["args"].items()) + ")")
+        if r.get("facts"):
+            bits.append("-> " + ", ".join(_fact_phrase(k, v) for k, v in r["facts"].items()))
+        if r.get("map_layer"):
+            bits.append(f"[on the map as {r['map_layer']!r}]")
+        lines.append("- " + " ".join(bits))
+    return ("Earlier in THIS conversation you already ran these tools. These are facts about "
+            "work already done — if the user is asking about it, answer from here rather than "
+            "saying the information is unavailable, and do not re-derive it:\n" + "\n".join(lines))
+
+
+def _prior_actions(state: SupervisorState) -> List[Dict[str, Any]]:
+    """The ledger for this thread, EXCLUDING anything recorded for the current turn."""
+    thread_id = state.get("thread_id")
+    if not thread_id:
+        return []
+    try:
+        from agent_runtime.session_memory import get_session_actions
+
+        return get_session_actions(str(thread_id))
+    except Exception:  # noqa: BLE001 - a missing ledger must never break routing
+        return []
+
+
+def _record_actions(state: SupervisorState, *contexts: Any) -> None:
+    """Append this turn's rows to the thread's ledger."""
+    thread_id = state.get("thread_id")
+    if not thread_id:
+        return
+    rows = _ledger_rows(*contexts)
+    if not rows:
+        # A ledger that silently records nothing is indistinguishable from one that is
+        # working, which is exactly how this shipped inert the first time.
+        _LEDGER_LOG.info("turn ledger: nothing extracted from %s",
+                    [sorted(c)[:10] if isinstance(c, dict) else type(c).__name__
+                     for c in contexts])
+        return
+    _LEDGER_LOG.info("turn ledger: recorded %d row(s) for thread %s: %s",
+                len(rows), thread_id, sorted({str(r.get("tool")) for r in rows}))
+    try:
+        from agent_runtime.session_memory import append_session_actions
+
+        append_session_actions(str(thread_id), rows)
+        emit_trace_event(
+            "turn_ledger_recorded",
+            {"stage": "synthesize", "rows": len(rows),
+             "tools": sorted({str(r.get("tool")) for r in rows}),
+             "message": f"recorded {len(rows)} action(s) for follow-up turns"},
+            node="synthesize",
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _distill(state: SupervisorState, *, for_decision: bool = False) -> Dict[str, Any]:
     """Compact progress view for the supervisor.
 
     Deliberately excludes the heavy documents, but DOES include enough about them — titles,
@@ -313,6 +554,16 @@ def _distill(state: SupervisorState) -> Dict[str, Any]:
         "search_exhausted": _search_exhausted(state),
         # What the decider may actually choose this step (see _available_actions).
         "available_actions": _available_actions(state),
+        # Decision-only: this is the one consumer that needs to know the conversation did
+        # not start just now. Kept out of the client payload, which is a per-turn record.
+        **({"prior_turns_in_this_conversation": _prior_actions(state)[-_LEDGER_ROWS_SHOWN:],
+            "prior_turns_note": (
+                "What THIS conversation already did, oldest first. If the user's question is "
+                "about work already listed here, choose 'done' — the answer is in hand and "
+                "re-running search or analyze would only rediscover it. Treat these as a "
+                "record of past turns, NOT as inputs to reuse blindly: check the args match "
+                "what the user is asking about now.")}
+           if for_decision and _prior_actions(state) else {}),
     }
 
 
@@ -470,6 +721,44 @@ def _apply_grounding_caveat(answer: str, audit: Optional[Dict[str, Any]]) -> str
         note += f" (severity: {severity})"
     note += f". {summary}" if summary else "."
     return f"{answer}\n\n---\n\n{note}" if (answer or "").strip() else note
+
+
+def _correct_artifact_claims(answer: str, *contexts: Any) -> str:
+    """Deterministic corrections for an answer that misdescribes what was delivered.
+
+    Both cases were produced by one live query. Neither was caught by the LLM grounding
+    audit — it read the answer as well-supported, because the web results it cited were real;
+    they just were not where the delivered raster came from.
+    """
+    text = str(answer or "")
+    if not text.strip():
+        return answer
+    notes = []
+
+    used = set()
+    for ctx in contexts:
+        used |= _models_used(ctx)
+    if used:
+        claimed = _models_named_in(text) - used
+        if claimed:
+            ran = ", ".join(sorted(used))
+            notes.append(
+                f"This embedding was produced by the **{ran}** model, not "
+                f"{' / '.join(sorted(claimed))}. Any description above of where the vectors "
+                "come from (an external collection, grid or dimensionality) describes that "
+                f"other model, not the layer you were given — which was computed here by {ran}."
+            )
+
+    if _DENIES_MAP_RE.search(text) and any(_map_layer_was_delivered(c) for c in contexts):
+        notes.append(
+            "The layer is already on your interactive map — it was added automatically. "
+            "There is no need to add it from a URL; the download link is only if you want a "
+            "copy of the file."
+        )
+
+    if not notes:
+        return answer
+    return text + "\n\n---\n\n" + "\n\n".join(f"⚠️ Correction: {n}" for n in notes)
 
 
 _ARTIFACT_CLAIM_MARKERS = (
@@ -1689,7 +1978,7 @@ def _run_qgis_map_workflow(query: str, *, input_file_ids: Optional[List[str]],
 # structurally (like the unrun-code check) rather than demanded in the prompt.
 _MAP_LAYER_TOOLS = ("add_map_layer", "overpass_search", "spatial_search",
                     "embed_region", "segment_region", "embed_zones",
-                    "fit_zone_model")
+                    "fit_zone_model", "admin_boundary")
 _WANTS_MAP_RE = re.compile(
     r"\b(?:on|in|onto|to)\s+(?:the\s+|a\s+|my\s+)?(?:interactive\s+)?map\b"
     r"|\binteractive\s+map\b|\bmap\s+view\b|\bheat\s?map\b|\bchoropleth\b"
@@ -1708,6 +1997,89 @@ _MAP_NOT_DELIVERED_OBSERVATION = (
     "add_map_layer(file_id=<the geodata file you produced>, render='heatmap'|'choropleth'|"
     "'points'|'shapes', column=<numeric column, for choropleth>, name=<short purpose name>), "
     "then say what is on it. Keep the PNG too if it is worth having."
+)
+
+
+# --- the answer must describe the artifact that was actually produced -----------
+# Observed, live: "show me the clay embedding of urbana at 2025/03/01-2025/05/01" ran
+# embed_region with NO `model`, so the default (gse) was embedded — and the answer then said
+# "Here's the Clay v1.5 embedding … extracted from the global LGND Clay Embeddings – Sentinel-2
+# collection … 2.56 km MajorTOM grid cell", provenance lifted wholesale from a web-search hit
+# for the word "clay". The map legend beside it read "gse embedding (PCA-RGB)". The LLM
+# grounding audit did not flag any of it, which is why these two checks are deterministic.
+_EMBED_MODELS_CACHE: Optional[frozenset] = None
+
+
+def _known_embedding_models() -> frozenset:
+    """Model ids the embedding service offers, fetched once per process.
+
+    Probed rather than hardcoded, for the same reason as everything else here: a list in the
+    source silently stops matching the deployment. An unreachable service returns nothing,
+    which disables the checks below rather than making them wrong.
+    """
+    global _EMBED_MODELS_CACHE
+    if _EMBED_MODELS_CACHE is not None:
+        return _EMBED_MODELS_CACHE
+    ids: set = set()
+    try:
+        import requests
+
+        from agent_runtime.rs_embed_tools import RS_EMBED_URL
+
+        resp = requests.get(f"{RS_EMBED_URL}/api/models", timeout=10)
+        if resp.status_code < 400:
+            payload = resp.json()
+            rows = payload.get("models") if isinstance(payload, dict) else payload
+            for row in rows or []:
+                name = row.get("id") if isinstance(row, dict) else row
+                if isinstance(name, str) and name.strip():
+                    ids.add(name.strip().lower())
+    except Exception:  # noqa: BLE001 - a failed probe must not break a turn
+        return frozenset()
+    if ids:
+        _EMBED_MODELS_CACHE = frozenset(ids)
+    return frozenset(ids)
+
+
+def _models_named_in(text: str) -> set:
+    """Known model ids mentioned as whole words in *text*."""
+    known = _known_embedding_models()
+    if not known:
+        return set()
+    words = set(re.findall(r"[a-z][a-z0-9]*", str(text or "").lower()))
+    return {m for m in known if m in words}
+
+
+def _models_used(execution_context: Any) -> set:
+    """Known model ids that a tool actually RAN with, read out of the artifacts."""
+    known = _known_embedding_models()
+    if not known:
+        return set()
+    try:
+        blob = json.dumps(execution_context, default=str)
+    except Exception:  # noqa: BLE001
+        blob = str(execution_context)
+    blob = blob.replace('\\"', '"')
+    found = {m.lower() for m in re.findall(r'"model"\s*:\s*"([A-Za-z0-9_.-]+)"', blob)}
+    return found & known
+
+
+_MODEL_MISMATCH_OBSERVATION = (
+    "The user named a specific embedding model ({wanted}) and the run used {used} instead — "
+    "the embedding tools default their `model` argument, so leaving it out silently embeds "
+    "with something else. Call the embedding tool again with model='{wanted}', and describe "
+    "the model that actually ran."
+)
+
+# An answer that tells the user to add a layer they can already see. The map is delivered as
+# an SSE event and rendered before the answer is read, so "paste this URL into the map" is not
+# a harmless extra instruction — it tells the user the delivery failed when it did not.
+_DENIES_MAP_RE = re.compile(
+    r"\badd\s+(?:the\s+)?(?:layer|it|this|the\s+file)\b[^.\n]{0,40}\b(?:to|into)\b[^.\n]{0,30}\bmap\b"
+    r"|\badd\s+layer\s*(?:→|->|:)\s*from\s+url"
+    r"|\bpaste\s+the\s+(?:download\s+)?link\b"
+    r"|\b(?:load|import|upload|drag)\s+(?:it|this|the\s+\w+)\s+(?:in)?to\b[^.\n]{0,30}\bmap\b",
+    re.I,
 )
 
 
@@ -1832,6 +2204,16 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
         # When files are attached to the conversation, let the analysis peer inspect
         # them directly (read_text_file / inspect_file_for_analysis) instead of only
         # being able to touch them via execute_code.
+        # Named US areas -> a boundary file, with NO upload. This MUST sit outside the
+        # `if input_file_ids:` gate below. It was accidentally INSIDE it, so the analyse peer
+        # had no admin_boundary whenever nothing was attached, and "show me the boundary of
+        # Urbana city limits" fell through to geocode_places + embed_region — a rectangle — on
+        # every model tried. Not needing an upload is the entire point of the tool.
+        try:
+            from agent_runtime.admin_boundary_tools import make_admin_boundary_tools
+            tools.extend(make_admin_boundary_tools())
+        except Exception:
+            pass
         if input_file_ids:
             from agent_runtime.langchain_file_tools import make_langchain_file_tools
 
@@ -1878,14 +2260,15 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
             tools.extend(make_rs_embed_tools(default_input_file_ids=input_file_ids))
         except Exception:
             pass
-        # Per-zone embeddings + the model fitted on them. Needs an uploaded polygon layer,
-        # so it is gated on attached files unlike the region tools above.
-        if input_file_ids:
-            try:
-                from agent_runtime.rs_embed_tools import make_rs_embed_zonal_tools
-                tools.extend(make_rs_embed_zonal_tools(default_input_file_ids=input_file_ids))
-            except Exception:
-                pass
+        # Per-zone embeddings + the model fitted on them. These used to be gated on attached
+        # files, because a polygon layer could only arrive by upload. admin_boundary can now
+        # produce one from a place name mid-turn, so gating them here would hide the tool that
+        # consumes it: the model would fetch Champaign County and have nothing to embed it with.
+        try:
+            from agent_runtime.rs_embed_tools import make_rs_embed_zonal_tools
+            tools.extend(make_rs_embed_zonal_tools(default_input_file_ids=input_file_ids))
+        except Exception:
+            pass
         from agent_runtime.code_execution import is_code_exec_enabled
 
         if code_exec if code_exec is not None else is_code_exec_enabled():
@@ -1901,6 +2284,14 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
         q = query
         if evidence:
             q = f"{query}\n\nContext evidence:\n{_format_documents(evidence)}"
+        # The ledger has to reach the peer that CALLS TOOLS, not only the router and the
+        # synthesizer. Measured: with the boundary already fetched and its file_id sitting in
+        # the ledger, "now embed those zones" still went geocode_places -> embed_region (a
+        # rectangle) on both gpt-4o and gpt-5.6-luna — because this peer had no idea the
+        # polygon existed. It cannot call embed_zones(file_id=...) for a file it never heard of.
+        _ledger_note = _prior_actions_note(_prior_actions(state))
+        if _ledger_note:
+            q = f"{q}\n\n{_ledger_note}"
         # Cross-turn continuity comes from this peer's own checkpointed child
         # thread (and the supervisor's chat_history drives routing/synthesis), so
         # we do NOT re-feed chat_history here — that would replay prior turns twice
@@ -1968,6 +2359,30 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
             result["summary"] = extract_final_answer(resp_retry) or result["summary"]
             result["tool_calls"] = [*result["tool_calls"], *(retry_artifacts.get("tool_calls") or [])]
             result["tool_results"] = [*result["tool_results"], *(retry_artifacts.get("tool_results") or [])]
+        # The user named a model and a different one ran. Fixing it here rather than only
+        # correcting the wording later is the point: the user asked for that model's
+        # embedding, and a caveat on the wrong raster is not what they asked for.
+        wanted = _models_named_in(query) - _models_used(result)
+        if len(wanted) == 1 and _models_used(result) and not caps:
+            used = ", ".join(sorted(_models_used(result)))
+            asked = next(iter(wanted))
+            emit_trace_event(
+                "embedding_model_mismatch",
+                {"stage": "analyze", "requested": asked, "used": used,
+                 "message": f"asked for {asked}, ran {used}; retrying once"},
+                node="analyze",
+            )
+            resp_retry = invoke_agent_with_payload_fallback(
+                executor,
+                query=_MODEL_MISMATCH_OBSERVATION.format(wanted=asked, used=used),
+                chat_history=None,
+                config=agent_config(child_thread_id(thread_id, "analysis")),
+            )
+            retry_artifacts = extract_search_artifacts(resp_retry)
+            result["summary"] = extract_final_answer(resp_retry) or result["summary"]
+            result["tool_calls"] = [*result["tool_calls"], *(retry_artifacts.get("tool_calls") or [])]
+            result["tool_results"] = [*result["tool_results"], *(retry_artifacts.get("tool_results") or [])]
+            on_map = on_map or _map_layer_was_delivered(retry_artifacts)
         # Carried downstream so synthesis can describe the map honestly either way.
         result["on_map"] = bool(on_map)
         if caps:
@@ -2076,6 +2491,13 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         # When files are attached, give the code peer the vector/shapefile tools too, so it
         # can inspect an uploaded TIGER shapefile's schema/CRS before writing code (and
         # plot/convert/reproject without round-tripping through the sandbox).
+        # admin_boundary sits OUTSIDE that gate: it exists to produce a boundary when the user
+        # attached nothing, so gating it on an attachment would defeat it.
+        try:
+            from agent_runtime.admin_boundary_tools import make_admin_boundary_tools
+            tools.extend(make_admin_boundary_tools())
+        except Exception:
+            pass
         if input_file_ids:
             try:
                 from agent_runtime.langchain_geo_tools import make_langchain_geo_tools
@@ -2116,14 +2538,15 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
             tools.extend(make_rs_embed_tools(default_input_file_ids=input_file_ids))
         except Exception:
             pass
-        # Per-zone embeddings + the model fitted on them. Needs an uploaded polygon layer,
-        # so it is gated on attached files unlike the region tools above.
-        if input_file_ids:
-            try:
-                from agent_runtime.rs_embed_tools import make_rs_embed_zonal_tools
-                tools.extend(make_rs_embed_zonal_tools(default_input_file_ids=input_file_ids))
-            except Exception:
-                pass
+        # Per-zone embeddings + the model fitted on them. These used to be gated on attached
+        # files, because a polygon layer could only arrive by upload. admin_boundary can now
+        # produce one from a place name mid-turn, so gating them here would hide the tool that
+        # consumes it: the model would fetch Champaign County and have nothing to embed it with.
+        try:
+            from agent_runtime.rs_embed_tools import make_rs_embed_zonal_tools
+            tools.extend(make_rs_embed_zonal_tools(default_input_file_ids=input_file_ids))
+        except Exception:
+            pass
         from agent_runtime.code_execution import is_code_exec_enabled
 
         if code_exec if code_exec is not None else is_code_exec_enabled():
@@ -2361,7 +2784,13 @@ def build_supervisor_graph(
             nxt = cap if cap in _CAPABILITIES else "done"
             remaining, why = needs[1:], f"request by {req.get('by')}"
         else:
-            nxt = decide(state, _distill(state))
+            _decision_payload = _distill(state, for_decision=True)
+            nxt = decide(state, _decision_payload)
+            _LEDGER_LOG.info(
+                "supervisor step=%s prior_actions=%d -> %s",
+                state.get("step"),
+                len(_decision_payload.get("prior_turns_in_this_conversation") or []),
+                nxt)
             if nxt not in ALLOWED_ACTIONS:
                 nxt = "done"
             remaining, why = needs, "decision"
@@ -2534,7 +2963,13 @@ def build_supervisor_graph(
             # follow-up that refers back to earlier turns — which are answerable from
             # chat_history alone; the synthesizer (SYNTHESIS_PROMPT) still states insufficiency
             # rather than guessing if it lacks the facts for a substantive question.
-            answer = do_synthesize(q, evidence, ar, cr, state.get("chat_history"))
+            # The answering model needs the ledger too, not just the router: the router only
+            # decides whether to search, while THIS is what decides whether the answer is right.
+            _history = list(state.get("chat_history") or [])
+            _note = _prior_actions_note(_prior_actions(state))
+            if _note:
+                _history = [{"role": "system", "content": _note}, *_history]
+            answer = do_synthesize(q, evidence, ar, cr, _history)
             # Audit only when there's actual retrieval/execution grounding to check against.
             # A purely conversational answer (composed from chat_history with no evidence or
             # artifacts) has nothing for the grounding auditor to compare to and would be
@@ -2598,6 +3033,10 @@ def build_supervisor_graph(
             {"stage": "synthesize", "message": audit.get("summary") or "Answer composed"},
             node="synthesize",
         )
+        final = _correct_artifact_claims(final, ar, cr)
+        # Record what this turn DID before the state is discarded — the next turn's routing
+        # decision is the only thing standing between a follow-up and a redundant search.
+        _record_actions(state, ar, cr)
         merged = {**state, "answer": final, "audit": audit}
         return {"answer": final, "final_answer": final, "audit": audit, "distilled": {**_distill(merged), "answer": final}}
 
