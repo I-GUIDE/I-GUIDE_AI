@@ -201,3 +201,42 @@ def test_facts_are_found_in_embed_regions_real_nesting():
     assert row["facts"]["image_size"] == 256 and row["facts"]["patch_size"] == 8
     note = g._prior_actions_note([row])
     assert "RESAMPLED" in note
+
+
+# --- context robustness ------------------------------------------------------
+
+def test_the_rendered_ledger_is_capped_in_characters_not_just_rows():
+    """It exists because a turn overflowed the context window; it must not be able to cause
+    that itself. 25 rows of long arguments would otherwise reach several thousand tokens."""
+    fat = [{"tool": f"t{i}", "args": {"query": "z" * 78, "place": "y" * 78},
+            "facts": {"source": "s" * 78}} for i in range(40)]
+    kept = g._budgeted(fat)
+    assert len(json.dumps(kept)) <= g._LEDGER_MAX_CHARS + 400   # one row may straddle the line
+    assert len(kept) < len(fat)
+    assert kept[-1]["tool"] == "t39"          # the NEWEST rows survive; oldest drop first
+
+
+def test_a_small_ledger_is_untouched_by_the_budget():
+    rows = [{"tool": "admin_boundary", "facts": {"geoid": "17019"}}]
+    assert g._budgeted(rows) == rows
+
+
+def test_one_huge_row_still_renders():
+    """Never return nothing: a single oversized row is better than silence."""
+    assert len(g._budgeted([{"tool": "x", "args": {"q": "z" * 5000}}])) == 1
+
+
+def test_every_peer_and_the_router_see_the_ledger():
+    """The search peer starts on a fresh thread each turn, so it was the one structurally
+    incapable of knowing the answer was already in hand — it searched SoilGrids for soil clay
+    while scale_m sat in the previous turn's result. Pin all five exposure points."""
+    import inspect
+
+    from agent_runtime.supervisor import graph
+
+    for fn in (graph.default_search_fn, graph.default_analyze_fn, graph.default_code_fn):
+        assert "_prior_actions_note(_prior_actions(state))" in inspect.getsource(fn), fn.__name__
+    # the router gets the structured rows, synthesis gets the rendered note
+    src = inspect.getsource(graph)
+    assert "_budgeted(_prior_actions(state))" in src
+    assert src.count("_prior_actions_note(_prior_actions(state))") >= 4

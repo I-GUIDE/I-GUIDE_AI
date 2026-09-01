@@ -293,6 +293,24 @@ _LEDGER_FACTS = (
 )
 _LEDGER_VALUE_CHARS = 80
 _LEDGER_ROWS_SHOWN = 25
+# A hard ceiling on the rendered ledger, independent of the row count. 25 rows of long args
+# could reach several thousand tokens, and this thing exists BECAUSE a turn overflowed the
+# context window — it must not be able to cause that itself. Oldest rows drop first.
+_LEDGER_MAX_CHARS = 4000
+
+
+def _budgeted(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The newest rows that fit the char budget, oldest dropped first."""
+    kept: List[Dict[str, Any]] = []
+    total = 0
+    for row in reversed(rows[-_LEDGER_ROWS_SHOWN:]):
+        size = len(json.dumps(row, default=str))
+        if kept and total + size > _LEDGER_MAX_CHARS:
+            break
+        kept.append(row)
+        total += size
+    kept.reverse()
+    return kept
 
 
 def _ledger_value(value: Any) -> Any:
@@ -446,7 +464,7 @@ def _prior_actions_note(rows: List[Dict[str, Any]]) -> Optional[str]:
     if not rows:
         return None
     lines = []
-    for r in rows[-_LEDGER_ROWS_SHOWN:]:
+    for r in _budgeted(rows):
         bits = [str(r.get("tool"))]
         if r.get("args"):
             bits.append("(" + ", ".join(f"{k}={v}" for k, v in r["args"].items()) + ")")
@@ -556,7 +574,7 @@ def _distill(state: SupervisorState, *, for_decision: bool = False) -> Dict[str,
         "available_actions": _available_actions(state),
         # Decision-only: this is the one consumer that needs to know the conversation did
         # not start just now. Kept out of the client payload, which is a per-turn record.
-        **({"prior_turns_in_this_conversation": _prior_actions(state)[-_LEDGER_ROWS_SHOWN:],
+        **({"prior_turns_in_this_conversation": _budgeted(_prior_actions(state)),
             "prior_turns_note": (
                 "What THIS conversation already did, oldest first. If the user's question is "
                 "about work already listed here, choose 'done' — the answer is in hand and "
@@ -1842,8 +1860,16 @@ def default_search_fn(*, llm: Optional[Any] = None, tool_strategy: str = "granul
             mcp_modules=mcp_modules, enabled_search_methods=enabled_search_methods,
             skill_roots=skill_roots,
         )
+        # The search peer starts on a fresh thread every turn ("started with 2 message(s)"),
+        # so without this it is the one peer structurally incapable of knowing the answer is
+        # already in hand. That is how "what resolution was that" became a KB sweep for
+        # SoilGrids soil clay while scale_m sat in the previous turn's tool result.
+        _retrieval_q = _as_retrieval_request(query)
+        _search_note = _prior_actions_note(_prior_actions(state))
+        if _search_note:
+            _retrieval_q = f"{_retrieval_q}\n\n{_search_note}"
         resp = invoke_agent_with_payload_fallback(
-            executor, query=_as_retrieval_request(query), chat_history=None,
+            executor, query=_retrieval_q, chat_history=None,
             config=agent_config(child_thread_id(state.get("thread_id"), "sup_search")),
         )
         harvested = extract_documents_from_search_evidence(build_search_evidence_payload(query, resp, None))
@@ -2581,6 +2607,12 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
                     + "\n".join(f"- {f['name']} ({f['size_bytes']} bytes)" for f in existing))
         except Exception:
             pass
+        # The workspace listing above says what FILES exist; the ledger says what was DONE
+        # and with what — the county already fetched, the model and dates already used. The
+        # code peer re-derives both without it.
+        _code_note = _prior_actions_note(_prior_actions(state))
+        if _code_note:
+            parts.append(_code_note)
         # See analyze peer: continuity is owned by this peer's checkpointed thread,
         # so chat_history is not re-fed here (avoids double-replay on re-runs).
         resp = invoke_agent_with_payload_fallback(
