@@ -454,18 +454,17 @@ def _fact_phrase(key: str, value: Any) -> str:
     return template.format(v=value) if template else f"{key}={value}"
 
 
-def _prior_actions_note(rows: List[Dict[str, Any]]) -> Optional[str]:
-    """The ledger as a line-per-action note for the ANSWERING model.
+def _ledger_lines(rows: List[Dict[str, Any]]) -> List[str]:
+    """One human-readable line per ledger row, budget-trimmed.
 
-    Injected into synthesis as well as into routing, because the two failures are separate.
-    Routing waste is expensive; an answer that says "the available evidence does not specify
-    the ground resolution" when scale_m=10 is sitting in the previous turn's tool result is
-    simply wrong, and it stays wrong however the supervisor routed.
+    Shared by the two consumers that must agree: the note handed to the ANSWERING model, and
+    the execution record handed to the grounding AUDITOR. When only the answerer got these
+    lines, a follow-up correctly answered from an earlier turn's tool result was audited
+    against evidence that never mentioned it and flagged as high-severity hallucination —
+    the feature's two halves contradicting each other in front of the user.
     """
-    if not rows:
-        return None
-    lines = []
-    for r in _budgeted(rows):
+    lines: List[str] = []
+    for r in _budgeted(rows or []):
         bits = [str(r.get("tool"))]
         if r.get("args"):
             bits.append("(" + ", ".join(f"{k}={v}" for k, v in r["args"].items()) + ")")
@@ -474,6 +473,20 @@ def _prior_actions_note(rows: List[Dict[str, Any]]) -> Optional[str]:
         if r.get("map_layer"):
             bits.append(f"[on the map as {r['map_layer']!r}]")
         lines.append("- " + " ".join(bits))
+    return lines
+
+
+def _prior_actions_note(rows: List[Dict[str, Any]]) -> Optional[str]:
+    """The ledger as a line-per-action note for the ANSWERING model.
+
+    Injected into synthesis as well as into routing, because the two failures are separate.
+    Routing waste is expensive; an answer that says "the available evidence does not specify
+    the ground resolution" when scale_m=10 is sitting in the previous turn's tool result is
+    simply wrong, and it stays wrong however the supervisor routed.
+    """
+    lines = _ledger_lines(rows)
+    if not lines:
+        return None
     return ("Earlier in THIS conversation you already ran these tools. These are facts about "
             "work already done — if the user is asking about it, answer from here rather than "
             "saying the information is unavailable, and do not re-derive it:\n" + "\n".join(lines))
@@ -835,11 +848,17 @@ _MAP_CLAIM_MARKERS = (
 # "hallucinated claims about buffering and map display" caveat over nine real artifacts.
 # Match the payload itself rather than enumerating tool names, so new layer-emitting tools
 # are covered the day they are added.
-_MAP_DELIVERY_RE = re.compile(r'"map_layer"\s*:\s*\{|"on_map"\s*:\s*true', re.I)
+_MAP_DELIVERY_RE = re.compile(
+    r'"map_layer"\s*:\s*\{|"on_map"\s*:\s*true|\[on the map as ', re.I)
 
 
 def _map_layer_was_delivered(execution_context: Optional[Dict[str, Any]]) -> bool:
-    """Whether this turn actually put a layer on the user's map."""
+    """Whether a layer reached the user's map — this turn, or on an earlier ledger turn.
+
+    Earlier turns count because the map is persistent: a layer added in turn 2 is still on
+    screen in turn 4, so "the tracts are shown on the map" is true then and must not be
+    audited as an unsupported claim.
+    """
     def walk(obj: Any) -> bool:
         if isinstance(obj, dict):
             if obj.get("on_map") is True or isinstance(obj.get("map_layer"), dict):
@@ -3120,10 +3139,17 @@ def build_supervisor_graph(
             # The answering model needs the ledger too, not just the router: the router only
             # decides whether to search, while THIS is what decides whether the answer is right.
             _history = list(state.get("chat_history") or [])
-            _note = _prior_actions_note(_prior_actions(state))
+            _rows = _prior_actions(state)
+            _note = _prior_actions_note(_rows)
             if _note:
                 _history = [{"role": "system", "content": _note}, *_history]
             answer = do_synthesize(q, evidence, ar, cr, _history)
+            # The auditor must be given the SAME earlier-turn tool records the answerer was
+            # told to answer from. Without them a correct cross-turn answer ("the gse run used
+            # 64 dims at 7.645 m/px", read off turn 2's ledger) is audited against this turn's
+            # execution only and flagged as unsupported.
+            exec_ctx = {"analysis_results": ar, "code_result": cr, "artifacts": artifacts,
+                        "prior_actions": _ledger_lines(_rows)}
             # Audit only when there's actual retrieval/execution grounding to check against.
             # A purely conversational answer (composed from chat_history with no evidence or
             # artifacts) has nothing for the grounding auditor to compare to and would be
@@ -3131,15 +3157,12 @@ def build_supervisor_graph(
             # Artifacts + tool outputs are first-class grounding: pass the execution record so
             # a genuinely-produced map/file/count is not flagged as hallucination.
             audit = audit_answer_grounding(
-                q, answer, evidence, llm=llm,
-                execution_context={"analysis_results": ar, "code_result": cr, "artifacts": artifacts},
+                q, answer, evidence, llm=llm, execution_context=exec_ctx,
             ) if (do_audit and (answer or "").strip() and has_grounding) else {}
             # Deterministic reconciliation: produced artifacts + the execution record are
             # ground truth, so the LLM auditor can't false-flag a genuinely-generated
             # map/file or a number/method it actually computed.
-            audit = _reconcile_audit_with_artifacts(
-                audit, artifacts,
-                execution_context={"analysis_results": ar, "code_result": cr, "artifacts": artifacts})
+            audit = _reconcile_audit_with_artifacts(audit, artifacts, execution_context=exec_ctx)
             # Act on the verdict: a flagged audit appends a user-visible caveat to the answer.
             final = _apply_grounding_caveat(answer, audit)
             # Embed produced image artifacts (maps/plots) inline so they render in markdown.

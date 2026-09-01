@@ -227,3 +227,45 @@ def test_admin_boundary_is_registered_outside_the_attached_files_gate():
                    if "tools.extend(make_admin_boundary_tools())" in l)
         if gate is not None:
             assert reg < gate, f"{fn.__name__}: registered after the input_file_ids gate"
+
+
+# --- people say "Champaign County", TIGER stores "Champaign" -------------------------------
+#
+# BASENAME is the bare name, so a literal match on the full English name found nothing AND the
+# LIKE fallback (which also searches BASENAME) found nothing, so the caller got a dead end with
+# no candidates to try. Watched live: gpt-oss:120b spent three tool calls guessing
+# "Champaign County"/Illinois -> "Champaign County"/IL -> "Champaign"/IL before it landed.
+
+def test_the_level_suffix_is_stripped_so_the_full_english_name_matches():
+    from agent_runtime.admin_boundary_tools import _name_variants
+
+    assert _name_variants("Champaign County", "county") == ["Champaign County", "Champaign"]
+    assert _name_variants("Orleans Parish", "county") == ["Orleans Parish", "Orleans"]
+    assert _name_variants("St. Louis city", "city") == ["St. Louis city", "St. Louis"]
+
+
+def test_the_name_as_given_is_always_tried_first():
+    """A place genuinely named with the suffix must not be broken by the trim."""
+    from agent_runtime.admin_boundary_tools import _name_variants
+
+    assert _name_variants("Champaign", "county") == ["Champaign"]
+    # 'Township of Washington' does not END with a level suffix, so nothing is trimmed
+    assert _name_variants("Township of Washington", "city") == ["Township of Washington"]
+
+
+def test_a_suffix_inside_the_name_is_not_trimmed():
+    from agent_runtime.admin_boundary_tools import _name_variants
+
+    assert _name_variants("County Line", "county") == ["County Line"]
+
+
+def test_both_variants_reach_the_query():
+    """Pin that the variants are actually used in the WHERE clause, not just computed."""
+    import inspect
+
+    from agent_runtime import admin_boundary_tools as abt
+
+    src = inspect.getsource(abt.make_admin_boundary_tools)
+    assert "_name_variants(area_text, lvl)" in src
+    # both the exact match and the LIKE fallback must iterate the variants
+    assert src.count("for v in variants") >= 2

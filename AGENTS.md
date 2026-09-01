@@ -92,6 +92,28 @@ blank as "no answer", so a truncated reasoning model looks like a failed peer ra
 cut-off one. Measured on qwen3.6:27b: `max_tokens=20` produced no content at all; unset
 completes normally.
 
+**A reasoning model over an OpenAI-compatible shim loses its own thinking unless we keep
+it.** `gpt-oss:120b` on AnvilGPT answers a tool-calling step with `content: None`,
+`reasoning_content: "<the plan>"` and the tool call. `langchain_openai` 1.6 parses neither
+reasoning field onto the message — it is absent from `additional_kwargs` AND from
+`response_metadata` — so the assistant turn replayed on the next step is
+`{role: assistant, content: None, tool_calls: [...]}`: a bare tool call with no record of why
+it was made. The model re-derives its plan from the user request alone, reaches the same
+conclusion, and issues the same call again.
+
+Measured: one turn spent five `admin_boundary` calls with near-identical arguments across two
+peers, then cycled `execute_code` through guesses at a filename it had already been given.
+gpt-4o does not show this because its plan lives in `content`, which round-trips normally; the
+`gpt-5.x` line is served by a different provider entirely.
+
+`_reasoning_preserving_chat_openai()` (`agent_runtime/executor_factory.py`) subclasses
+`ChatOpenAI` and, in `_create_chat_result`, stashes the reasoning on the message and promotes
+it into `content` when the provider left content empty **on a tool-calling step**. Gated on
+`tool_calls` deliberately: an intermediate step is the only place this is safe, because
+promoting deliberation onto a FINAL message would leak it into the user's answer. Both
+construction paths use the subclass — including the per-request one, which is where the model
+picker actually selects gpt-oss.
+
 Which model actually answered is not visible in the transport log — it shows only the host,
 and a dropped `reasoning_effort` looks identical to an applied one. So each per-request build
 logs `per-request LLM: provider=… model=… reasoning_effort=…`, and
@@ -265,6 +287,18 @@ the turn store). Two consumers, and both were needed:
   answer. With the ledger in the routing payload alone the decider still chose `search` twice;
   the answer only became right when the ANSWERING model could see the facts.
 
+**The auditor needs the ledger too.** For a while only the answerer got it, and the grounding
+audit still compared the answer against this turn's evidence and execution record. A follow-up
+that correctly read the previous turn's gse parameters off the ledger ("64 dimensions, 7.645 m
+per pixel") was therefore audited against material that never mentioned them and the answer
+shipped with *"parts of this answer may not be fully supported by the retrieved evidence
+(severity: high)"* stapled to it — the feature accusing itself of hallucinating, in front of
+the user. `_ledger_lines()` is now shared: the same rendered rows go into the synthesis note
+AND into `execution_context["prior_actions"]`, which both the LLM auditor
+(`_format_execution_context`) and the deterministic reconciliation read. The map is persistent
+too, so a layer added in an earlier turn still counts as delivered when a later answer refers
+to it.
+
 Three things cost a deploy cycle each and are worth not rediscovering. `tool_results` entries
 are `{name, tool_call_id, content}` with content a JSON **string** — reading `output`/`result`
 yields empty payloads while every hand-written unit test passes, which is why these tests build
@@ -293,7 +327,13 @@ and GAUL/geoBoundaries stop at district, so a *city* boundary is simply unavaila
 
 Two behaviours are load-bearing. It matches `BASENAME`, not `NAME`: the latter carries the
 suffix ("Champaign County", "Champaign city"), so matching it loses every county a user names
-without saying "County". And a name matching several places is REFUSED with the candidates
+without saying "County". The mirror of that also has to work, and originally did not: matching
+BASENAME literally meant `area="Champaign County"` found nothing, and the LIKE fallback
+searches BASENAME too, so the caller got a dead end with no candidates. `_name_variants()`
+therefore tries the name as given AND the name with that level's own suffix removed (County,
+Parish, Borough, city, town, …), in both the exact match and the fallback. Watched live:
+gpt-oss:120b spent three tool calls guessing `"Champaign County"/Illinois` →
+`"Champaign County"/IL` → `"Champaign"/IL` before it landed. And a name matching several places is REFUSED with the candidates
 listed — 16 incorporated places are named Springfield and the first is in none of the states
 anyone means, so picking one silently is the failure that matters.
 

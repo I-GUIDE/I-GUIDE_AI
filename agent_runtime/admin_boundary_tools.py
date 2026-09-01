@@ -47,6 +47,33 @@ _LEVELS: Dict[str, Tuple[str, str]] = {
 _TRACTS_LAYER = "Tracts_Blocks/MapServer/0"
 _BG_LAYER = "Tracts_Blocks/MapServer/1"
 
+# TIGER's BASENAME is the bare name — "Champaign", never "Champaign County" — but people (and
+# models writing tool arguments) say the full English name. Matching the literal string then
+# fails, the LIKE fallback fails too (it also searches BASENAME), and the caller gets a dead
+# end with no candidates. Watched live: gpt-oss:120b burned three tool calls guessing
+# "Champaign County"/Illinois -> "Champaign County"/IL -> "Champaign"/IL before it landed.
+# Strip the suffix that belongs to the level being asked for, and keep the original as a
+# fallback so a place genuinely named e.g. "Township of Washington" still resolves.
+_LEVEL_SUFFIXES: Dict[str, Tuple[str, ...]] = {
+    "county": ("county", "parish", "borough", "census area", "municipality",
+               "city and borough", "municipio"),
+    "city": ("city", "town", "village", "borough", "municipality"),
+    "cdp": ("cdp", "census designated place"),
+}
+
+
+def _name_variants(area_text: str, lvl: str) -> List[str]:
+    """The name as given, plus the same name with this level's suffix removed."""
+    variants = [area_text]
+    low = area_text.lower()
+    for suffix in _LEVEL_SUFFIXES.get(lvl, ()):
+        if low.endswith(" " + suffix):
+            trimmed = area_text[: -(len(suffix) + 1)].strip()
+            if trimmed and trimmed not in variants:
+                variants.append(trimmed)
+    return variants
+
+
 _states_cache: Optional[List[Dict[str, str]]] = None
 
 
@@ -206,10 +233,11 @@ def make_admin_boundary_tools() -> List[Any]:
         # BASENAME is the bare name; NAME carries the suffix ("Champaign" vs "Champaign
         # County", "Champaign city"), so matching NAME loses every county the user names
         # without saying "County".
-        clauses = [f"UPPER(BASENAME)={_sql_str(area_text.upper())}"]
+        variants = _name_variants(area_text, lvl)
+        name_match = " OR ".join(f"UPPER(BASENAME)={_sql_str(v.upper())}" for v in variants)
+        clauses = [f"({name_match})"]
         if lvl == "state":
-            clauses = [f"(UPPER(BASENAME)={_sql_str(area_text.upper())} OR "
-                       f"UPPER(STUSAB)={_sql_str(area_text.upper())})"]
+            clauses = [f"({name_match} OR UPPER(STUSAB)={_sql_str(area_text.upper())})"]
         elif state_fips:
             clauses.append(f"STATE={_sql_str(state_fips)}")
         found = _query(_LEVELS[lvl][0], " AND ".join(clauses),
@@ -229,7 +257,9 @@ def make_admin_boundary_tools() -> List[Any]:
 
         if not feats:
             like = _query(_LEVELS[lvl][0],
-                          f"UPPER(BASENAME) LIKE {_sql_str('%' + area_text.upper() + '%')}"
+                          "(" + " OR ".join(
+                              f"UPPER(BASENAME) LIKE {_sql_str('%' + v.upper() + '%')}"
+                              for v in variants) + ")"
                           + (f" AND STATE={_sql_str(state_fips)}" if state_fips else ""),
                           "NAME,STATE", geometry=False, limit=10)
             names = sorted({(f.get("properties") or {}).get("NAME")

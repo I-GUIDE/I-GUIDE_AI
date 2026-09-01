@@ -229,14 +229,71 @@ def test_one_huge_row_still_renders():
 def test_every_peer_and_the_router_see_the_ledger():
     """The search peer starts on a fresh thread each turn, so it was the one structurally
     incapable of knowing the answer was already in hand — it searched SoilGrids for soil clay
-    while scale_m sat in the previous turn's result. Pin all five exposure points."""
+    while scale_m sat in the previous turn's result. Pin every exposure point."""
     import inspect
 
     from agent_runtime.supervisor import graph
 
     for fn in (graph.default_search_fn, graph.default_analyze_fn, graph.default_code_fn):
         assert "_prior_actions_note(_prior_actions(state))" in inspect.getsource(fn), fn.__name__
-    # the router gets the structured rows, synthesis gets the rendered note
+    # the router gets the structured rows; synthesis renders the note AND hands the same
+    # lines to the grounding auditor as part of the execution record.
     src = inspect.getsource(graph)
     assert "_budgeted(_prior_actions(state))" in src
-    assert src.count("_prior_actions_note(_prior_actions(state))") >= 4
+    syn = inspect.getsource(graph.build_supervisor_graph)
+    assert "_prior_actions_note(_rows)" in syn
+    assert '"prior_actions": _ledger_lines(_rows)' in syn
+
+
+# --- the ledger must reach the grounding auditor, not just the answering model -------------
+#
+# Observed live (Champaign County tracts, unified peer): turn 2 embedded with gse, turn 3 asked
+# "what parameters were used?". The answer correctly read 64 dims / 7.645 m per pixel off the
+# ledger — and then the grounding caveat appended "may not be fully supported by the retrieved
+# evidence (severity: high)". The answerer had the ledger; the auditor did not. The user saw the
+# feature accuse itself of hallucinating.
+
+def test_the_auditor_is_given_the_same_earlier_turn_records_as_the_answerer():
+    from agent_runtime.evidence_quality import _format_execution_context
+
+    lines = g._ledger_lines(g._ledger_rows(CLAY_TURN))
+    assert lines, "ledger produced no lines to hand over"
+    rendered = _format_execution_context({"prior_actions": lines})
+    assert "earlier turns" in rendered.lower()
+    # the values a follow-up would quote must survive into the auditor's record
+    assert "1024" in rendered and "clay" in rendered
+
+
+def test_a_cross_turn_number_is_not_flagged_as_unsupported():
+    """The deterministic reconciliation must see ledger values, not only this turn's output."""
+    audit = {"severity": "high", "hallucination_detected": True,
+             "issues": [{"claim": "the embeddings have 1024 dimensions",
+                         "reason": "not supported by the retrieved evidence"}]}
+    lines = g._ledger_lines(g._ledger_rows(CLAY_TURN))
+    # Without the ledger the issue survives...
+    kept = g._reconcile_audit_with_artifacts(
+        dict(audit), [], execution_context={"analysis_results": None, "code_result": None})
+    assert (kept or {}).get("issues"), "control: should still be flagged with no ledger"
+    # ...with it, the number is found in the execution record and the caveat is dropped.
+    reconciled = g._reconcile_audit_with_artifacts(
+        dict(audit), [], execution_context={"analysis_results": None, "code_result": None,
+                                            "prior_actions": lines})
+    assert not g._audit_flagged(reconciled), reconciled
+
+
+def test_a_map_layer_from_an_earlier_turn_still_counts_as_delivered():
+    """The map is persistent: a layer added in turn 2 is still on screen in turn 4."""
+    lines = g._ledger_lines(g._ledger_rows(CLAY_TURN))
+    assert g._map_layer_was_delivered({"prior_actions": lines})
+    assert not g._map_layer_was_delivered({"analysis_results": {"note": "nothing mapped"}})
+
+
+def test_a_genuinely_invented_number_is_still_flagged():
+    """The widened record must not become a blanket amnesty."""
+    audit = {"severity": "high", "hallucination_detected": True,
+             "issues": [{"claim": "the study covered 4096 counties",
+                         "reason": "no evidence for this figure"}]}
+    lines = g._ledger_lines(g._ledger_rows(CLAY_TURN))
+    kept = g._reconcile_audit_with_artifacts(
+        dict(audit), [], execution_context={"prior_actions": lines})
+    assert g._audit_flagged(kept), "an invented figure must survive reconciliation"

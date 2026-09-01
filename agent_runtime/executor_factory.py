@@ -181,13 +181,75 @@ def _anvilgpt_settings() -> Optional[Dict[str, Any]]:
     }
 
 
+# --- reasoning carry-over ------------------------------------------------------------------
+# Reasoning models served over an OpenAI-compatible shim (AnvilGPT/Ollama's gpt-oss:120b is
+# the one we hit) return their chain-of-thought in `message.reasoning_content` with
+# `content: None`, alongside the tool call. langchain_openai 1.6 parses neither field onto the
+# message — not into `additional_kwargs`, not into `response_metadata` — so the assistant turn
+# that gets replayed on the next step is `{role: assistant, content: None, tool_calls: [...]}`:
+# a bare tool call with no trace of why it was made.
+#
+# The model then re-derives its plan from the user request alone and reaches the same
+# conclusion, so it re-issues the same call. Observed live: `admin_boundary` called five times
+# with near-identical arguments in one turn, then `execute_code` cycling through guesses at a
+# filename it had already been given. Non-reasoning models (gpt-4o) don't show this because
+# their plan sits in `content`, which does round-trip.
+#
+# So keep it: stash the reasoning on the message, and when the provider left `content` empty on
+# a TOOL-CALLING step, promote the reasoning into `content` so it survives serialization the
+# way an ordinary assistant turn does. Gated on `tool_calls` on purpose — an intermediate step
+# is the only place this is safe; promoting it on a FINAL message would leak deliberation into
+# the user's answer.
+_REASONING_KEYS = ("reasoning_content", "reasoning", "thinking")
+_REASONING_CARRYOVER_MAX = 4000
+
+
+def _reasoning_text(choice: Any) -> str:
+    """The chain-of-thought on a raw API choice, if the provider sent one."""
+    msg = (choice or {}).get("message") if isinstance(choice, dict) else None
+    if not isinstance(msg, dict):
+        return ""
+    for key in _REASONING_KEYS:
+        val = msg.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return ""
+
+
+def _reasoning_preserving_chat_openai() -> Any:
+    """``ChatOpenAI`` that keeps a reasoning model's own thinking attached to the message."""
+    from langchain_openai import ChatOpenAI
+
+    class ReasoningPreservingChatOpenAI(ChatOpenAI):  # type: ignore[misc]
+        def _create_chat_result(self, response: Any, generation_info: Any = None) -> Any:
+            result = super()._create_chat_result(response, generation_info)
+            try:
+                raw = response if isinstance(response, dict) else response.model_dump()
+                choices = (raw or {}).get("choices") or []
+                for gen, choice in zip(result.generations, choices):
+                    msg = getattr(gen, "message", None)
+                    reasoning = _reasoning_text(choice)
+                    if msg is None or not reasoning:
+                        continue
+                    msg.additional_kwargs.setdefault("reasoning_content", reasoning)
+                    content = msg.content if isinstance(msg.content, str) else ""
+                    if not content.strip() and getattr(msg, "tool_calls", None):
+                        # Keep the TAIL: the decision the model reached sits at the end.
+                        msg.content = reasoning[-_REASONING_CARRYOVER_MAX:]
+            except Exception:  # noqa: BLE001 - never fail a turn over a provider quirk
+                return result
+            return result
+
+    return ReasoningPreservingChatOpenAI
+
+
 def build_default_llm() -> Any:
     """Build a ``ChatOpenAI`` instance from environment variables.
 
     Priority: AGENT_LLM_PROVIDER=anvilgpt → VLLM_* → OPENAI_* → defaults.
     """
     try:
-        from langchain_openai import ChatOpenAI
+        ChatOpenAI = _reasoning_preserving_chat_openai()
     except Exception as exc:
         raise RuntimeError(
             "Missing dependency `langchain-openai`. Install it to use the default LLM builder."
@@ -324,7 +386,9 @@ def build_llm(provider: Optional[str] = None, model: Optional[str] = None,
         prov = ("anthropic" if str(model).startswith("claude-")
                 else "anvilgpt" if ":" in str(model) else DEFAULT_PROVIDER)
 
-    from langchain_openai import ChatOpenAI
+    # Same subclass as the default builder: the model PICKER is where gpt-oss:120b actually
+    # gets selected, so the carry-over has to be here or the fix misses the real path.
+    ChatOpenAI = _reasoning_preserving_chat_openai()
 
     if prov == "anvilgpt":
         key = os.getenv("ANVILGPT_KEY")
