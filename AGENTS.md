@@ -199,6 +199,52 @@ There is **no raster analysis**: no zonal statistics, band math, reclassify or t
 that through `execute_code` (rasterio is available) or a GDAL algorithm via
 `qgis_processing_run`. The map client models vector layers only.
 
+## Why this workload is a poor fit for multiple agents
+
+Worth stating plainly, because the supervisor-over-peers shape invites the assumption that
+adding agents adds capability. For THIS workload it mostly adds seams.
+
+**The peers never run in parallel.** `decide()` returns ONE action per step and the graph
+routes through conditional edges, so search/analyze/code execute strictly in sequence. The
+usual justification for a multi-agent design — independent specialists working concurrently —
+has never applied here. What we actually have is a sequential router over fragmented state.
+
+**The work is one long chain over shared state, not separable subproblems.** A real request is
+`admin_boundary` → `embed_zones` → `fit_zone_model` → `add_map_layer`: each step consumes the
+previous step's artifact (a file_id, a GEOID column, a CSV of vectors) and its provenance
+(which model, which date range, which resolution). Specialists pay off when subproblems are
+independent and only their conclusions need to meet. Here almost every intermediate value is
+needed downstream, so every peer boundary is a place for that value to be dropped — and it was.
+Measured consequences, all from one exchange:
+
+* The answer to "what resolution was that" (`scale_m: 10`) sat in the analyze peer's thread.
+  The router sent the follow-up to the SEARCH peer, which starts fresh every turn
+  ("started with 2 message(s)") and was structurally unable to know. It searched for 49 steps —
+  drifting into SoilGrids *soil* clay — until the payload hit 66,275 tokens against a 65,536
+  window and the turn died with a 400. One clay turn reached 199,605.
+* `admin_boundary` must be registered in three peers under three different gating rules
+  (25 `tools.extend` sites in `supervisor/graph.py`). One copy ended up nested inside
+  `if input_file_ids:` — the exact gate its own comment said to avoid — so with nothing
+  attached the tool did not exist, and every model fell back to embedding a rectangle around a
+  city centroid. Two rounds of tool-description tuning could not fix a tool that was absent.
+* The action ledger above exists ONLY to reunify what the peer split broke. It is a patch over
+  the architecture, not a feature of it.
+
+**What the split genuinely buys is not routing but a place to stand.** The structural checks —
+`_MAP_LAYER_TOOLS`/`on_map`, `_has_execution_record`, the model-mismatch retry,
+`_correct_artifact_claims` — work because they run OUTSIDE the loop and can force a retry. That
+value is real and worth keeping: the in-loop LLM grounding audit read
+*"the Clay v1.5 embedding … from the LGND Sentinel-2 collection"* over a gse raster as
+well-supported, because the pages it cited were real; only the deterministic outside check
+caught it. An agent grading its own trace misses what it got wrong, because the error and the
+grader share a premise.
+
+So the two jobs separate: **verification outside the loop is worth its cost; routing between
+peers is not.** If this is ever revisited, collapse the peers into one loop with one context and
+one tool list, keep the checks around it, and add token-budget trimming first — a single loop
+reaches the context window sooner, not later. Design note:
+https://claude.ai/code/artifact/a9fd7318-1125-4fa9-aa3d-0b2e45321f16
+
 ## The conversation remembers what it DID
 
 `session_memory` stored `{userQuery, answer}` — prose. Everything a tool produced was discarded
