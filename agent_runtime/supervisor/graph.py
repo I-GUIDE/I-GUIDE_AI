@@ -116,6 +116,7 @@ class SupervisorState(TypedDict, total=False):
     search_attempts: int           # how many times the search peer has run
     search_empty_streak: int       # consecutive searches that added NO new evidence
     searched_queries: List[str]    # every query string actually searched (incl. refinements)
+    unified_peer: Optional[bool]   # per-request override of AGENT_UNIFIED_PEER
 
 
 def is_supervisor_enabled() -> bool:
@@ -670,7 +671,10 @@ def _available_actions(state: SupervisorState) -> List[str]:
     the mechanism.
     """
     actions: List[str] = []
-    if not _search_exhausted(state):
+    # With the peers merged there is no separate retrieval peer to route to: the one agent
+    # retrieves and analyses in the same loop, so offering `search` would route to a node that
+    # duplicates what `analyze` already does — and split the context again.
+    if not unified_peer_enabled(state) and not _search_exhausted(state):
         actions.append("search")
     for cap in ("analyze", "code"):
         if not _is_unproductive_repeat(cap, state):
@@ -2165,6 +2169,84 @@ def _tool_stuck_observation(failures: Dict[str, str]) -> str:
         "describe a failed tool as having worked. Proceed now; do not ask whether to."
     )
 
+# ---------------------------------------------------------------------------
+# The unified peer (experimental)
+# ---------------------------------------------------------------------------
+# Collapses SEARCH and ANALYZE into one agent with one context and one tool list, leaving the
+# supervisor as a verifier plus the router for the code peer. Behind a flag so both shapes can
+# be A/B'd against the same deployment rather than swapped blind.
+#
+# Why: the peers never ran concurrently (decide() returns one action per step), and every hard
+# failure came from state split across them — the answer to "what resolution was that" sat in
+# the analyse peer's thread while the router sent the follow-up to the search peer, which
+# starts fresh each turn and could not know. See AGENTS.md, "Why this workload is a poor fit
+# for multiple agents".
+UNIFIED_PEER_ENV = "AGENT_UNIFIED_PEER"
+
+# Tools whose output is EVIDENCE. This allowlist is the whole reason the merge is safe:
+# extract_documents_from_search_evidence is name-agnostic and harvests any tool result
+# carrying "results"/"items"/"hits", so in a merged agent geocode_places({"results": [...]})
+# and overpass_search would silently become retrieved "documents" the answer then cites.
+_RETRIEVAL_TOOLS = frozenset({
+    "agent_kb_search", "get_kb_block", "keyword_search", "semantic_search", "spatial_search",
+    "opengeodata_search", "neo4j_search", "neo4j_explore_related_nodes",
+    "neo4j_get_element_by_id", "web_search",
+})
+
+
+def unified_peer_enabled(state: Optional[Dict[str, Any]] = None) -> bool:
+    """Whether search and analyze run as ONE agent. Off by default.
+
+    Per-REQUEST when the caller sets it, falling back to the env default — the same shape as
+    code_peer. Without that, comparing the two architectures would mean restarting the
+    deployment between arms, so the two shapes could never be exercised side by side.
+    """
+    if isinstance(state, dict):
+        override = state.get("unified_peer")
+        if override is not None:
+            return bool(override)
+    return (os.getenv(UNIFIED_PEER_ENV, "") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _dedup_tools(tools: List[Any]) -> List[Any]:
+    """First tool wins per name.
+
+    Naive concatenation of the two lists yields 102 entries with 14 duplicate NAMES in the
+    deployed config. LangChain's ToolNode silently keeps the last of each, but bind_tools
+    ships all 102 to the provider — so dedup here, where the choice is visible.
+    """
+    seen = set()
+    out: List[Any] = []
+    for tool in tools:
+        name = getattr(tool, "name", None)
+        if name in seen:
+            continue
+        if name:
+            seen.add(name)
+        out.append(tool)
+    return out
+
+
+def _evidence_from_artifacts(artifacts: Dict[str, Any]) -> List[Any]:
+    """Documents the unified peer actually retrieved, by tool NAME.
+
+    Deliberately not the name-agnostic harvester: see _RETRIEVAL_TOOLS.
+    """
+    from agent_runtime.supervisor.evidence_subgraph import extract_documents_from_search_evidence
+
+    rows = [
+        {"name": str(r.get("name") or ""), "content": r.get("content")}
+        for r in (artifacts.get("tool_results") or [])
+        if isinstance(r, dict) and str(r.get("name") or "") in _RETRIEVAL_TOOLS
+    ]
+    if not rows:
+        return []
+    try:
+        return extract_documents_from_search_evidence({"search_agent_tool_results": rows}) or []
+    except Exception:  # noqa: BLE001 - evidence is a bonus here, never the run
+        return []
+
+
 def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = True,
                        mcp_modules: Optional[List[str]] = None,
                        skill_roots: Optional[List[str]] = None,
@@ -2303,6 +2385,15 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
             tools.extend(make_code_execution_tools(
                 default_input_file_ids=input_file_ids,
                 session_id=child_thread_id(state.get("thread_id"), "codeexec")))
+        if unified_peer_enabled(state):
+            # One agent, one tool list: fold in the retrieval set the search peer used to own.
+            try:
+                from agent_runtime.langchain_granular_tools import make_langchain_granular_tools
+
+                tools = _dedup_tools([*tools, *make_langchain_granular_tools(
+                    include_file_tools=False, session_id=state.get("thread_id"))])
+            except Exception:  # noqa: BLE001 - never let the merge break the analyse peer
+                pass
         executor = build_agent_executor(
             llm=llm, preloaded_tools=tools, system_prompt_override=ANALYSIS_WORKFLOW_PROMPT,
             agent_name="analysis_agent", skill_roots=skill_roots,
@@ -2933,6 +3024,18 @@ def build_supervisor_graph(
         clean, needs = _extract_needs(do_analyze(q, state.get("evidence") or [], state))
         emit_trace_event("node_completed", {"stage": "analyze", "message": "Analysis workflow complete"}, node="analyze")
         update: Dict[str, Any] = {"analysis_results": clean}
+        if unified_peer_enabled(state) and isinstance(clean, dict):
+            # The state KEYS stay exactly as they were. evidence_quality.py and
+            # runtime_utils.py read "analysis_results"/"evidence" by name, and a rename there
+            # degrades silently rather than raising — so the merge changes who FILLS these,
+            # never what they are called.
+            docs = _evidence_from_artifacts(clean)
+            if docs:
+                merged = _merge_dedup(state.get("evidence") or [], docs)
+                update["evidence"] = merged
+                update["search_attempts"] = state.get("search_attempts", 0) + 1
+                update["searched_queries"] = [*(state.get("searched_queries") or []), q]
+                update["search_empty_streak"] = 0
         enq = _enqueue_needs(state.get("needs"), needs, "analyze")
         if enq is not None:
             update["needs"] = enq
@@ -3100,6 +3203,7 @@ def run_supervisor(
     llm: Optional[Any] = None,
     thread_id: Optional[str] = None,
     max_steps: int = DEFAULT_MAX_STEPS,
+    unified_peer: Optional[bool] = None,
     **graph_kwargs: Any,
 ) -> Dict[str, Any]:
     """Build + run the supervisor graph; return the full final state."""
@@ -3109,6 +3213,7 @@ def run_supervisor(
             "query": query,
             "chat_history": chat_history or [],
             "thread_id": thread_id,
+            "unified_peer": unified_peer,
             "evidence": [],
             "needs": [],
             "actions": [],

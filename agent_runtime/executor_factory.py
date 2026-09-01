@@ -839,6 +839,107 @@ def _make_history_repair_middleware() -> Any:
     return repair_history
 
 
+# ---------------------------------------------------------------------------
+# Context budget
+# ---------------------------------------------------------------------------
+# Nothing measured the outgoing payload before this. A peer thread accumulates every tool
+# result for the life of a conversation — BoundedInMemorySaver caps the number of THREADS, not
+# the messages inside one — and the deployed default (gpt-oss:120b, 65,536) has no fallback
+# configured, so the overflow surfaces as a raw provider 400 in the user's chat:
+#   "Input length (66,275) exceeds model's maximum context length (65,536)"
+# Measured on one clay turn: 199,605. The trim is a floor under that, not a strategy.
+#
+# Budget in TOKENS, approximated. The model-based counter is not an option: ChatOpenAI's
+# get_num_tokens_from_messages raises NotImplementedError for the AnvilGPT model ids this
+# deployment defaults to, so asking for exact counts breaks the default provider outright.
+CONTEXT_BUDGET_ENV = "AGENT_CONTEXT_BUDGET_TOKENS"
+DEFAULT_CONTEXT_BUDGET = 48_000
+
+
+def _context_budget() -> int:
+    """Token ceiling for one model call, or 0 to disable trimming."""
+    raw = (os.getenv(CONTEXT_BUDGET_ENV) or "").strip()
+    if not raw:
+        return DEFAULT_CONTEXT_BUDGET
+    try:
+        return max(0, int(float(raw)))
+    except (TypeError, ValueError):
+        return DEFAULT_CONTEXT_BUDGET
+
+
+def _make_context_budget_middleware() -> Any:
+    """Keep the outgoing message list under a token budget.
+
+    Non-destructive, like the history repairer beside it: it rewrites the OUTGOING request via
+    request.override(), never the checkpointed state, so a trimmed call cannot corrupt the
+    thread it was trimmed from.
+
+    What it keeps, in priority order: every system message, the last human message, and then
+    as much of the recent tail as fits. Dropping from the OLDEST end is deliberate — a
+    follow-up is nearly always about recent work, and the turn ledger
+    (supervisor/graph.py) re-injects the older facts in a form that costs ~130 tokens
+    instead of the thousands the raw tool results cost.
+    """
+    from langchain.agents.middleware import wrap_model_call
+    from langchain_core.messages import SystemMessage
+    from langchain_core.messages.utils import count_tokens_approximately
+
+    budget = _context_budget()
+
+    @wrap_model_call
+    def budget_context(request: Any, handler: Any) -> Any:
+        if budget <= 0:
+            return handler(request)
+        messages = list(getattr(request, "messages", None) or [])
+        if not messages:
+            return handler(request)
+        try:
+            total = count_tokens_approximately(messages)
+        except Exception:  # noqa: BLE001 - counting must never break a call
+            return handler(request)
+        if total <= budget:
+            return handler(request)
+
+        pinned = [m for m in messages if isinstance(m, SystemMessage)]
+        rest = [m for m in messages if not isinstance(m, SystemMessage)]
+        # The current question is the one message whose loss makes the call pointless.
+        tail = rest[-1:] if rest else []
+        body = rest[:-1] if rest else []
+
+        try:
+            used = count_tokens_approximately(pinned + tail)
+        except Exception:  # noqa: BLE001
+            return handler(request)
+        kept: List[Any] = []
+        for msg in reversed(body):
+            try:
+                size = count_tokens_approximately([msg])
+            except Exception:  # noqa: BLE001
+                break
+            if used + size > budget:
+                break
+            kept.append(msg)
+            used += size
+        kept.reverse()
+
+        trimmed = [*pinned, *kept, *tail]
+        # A tool result whose call was dropped is a 400 on most providers; the repair
+        # middleware beside this one exists for exactly that, so hand it a coherent list.
+        try:
+            from agent_runtime.runtime_utils import repair_tool_call_sequence
+
+            trimmed, _ = repair_tool_call_sequence(trimmed)
+        except Exception:  # noqa: BLE001
+            pass
+        logger.info(
+            "context budget: trimmed %d message(s), ~%d -> ~%d tokens (budget %d)",
+            len(messages) - len(trimmed), total, used, budget,
+        )
+        return handler(request.override(messages=trimmed))
+
+    return budget_context
+
+
 def build_agent_executor(
     *,
     llm: Optional[Any] = None,
@@ -895,7 +996,8 @@ def build_agent_executor(
         tools=tools,
         system_prompt=system_prompt,
         checkpointer=checkpointer,
-        middleware=[_make_history_repair_middleware()],
+        # Order matters: repair first so the budgeter sees a coherent list, then budget.
+        middleware=[_make_history_repair_middleware(), _make_context_budget_middleware()],
         debug=verbose,
         name=agent_name,
     )

@@ -118,6 +118,9 @@ def _normalize_agent_chat_request(data: dict) -> dict:
     # meaningful when that peer is the one running; the built-in peer uses the same
     # model as the answer, which the `model` field above already selects.
     code_peer_model = _coalesce(data.get("codePeerModel"), data.get("code_peer_model"))
+    # Per-request A/B of the orchestration shape. Without this the two architectures could
+    # only be compared by restarting the deployment between arms.
+    unified_peer = _coalesce(data.get("unifiedPeer"), data.get("unified_peer"))
 
     return {
         "user_query": str(user_query).strip() if user_query is not None else "",
@@ -141,6 +144,8 @@ def _normalize_agent_chat_request(data: dict) -> dict:
         "code_exec": code_exec,
         "code_peer": (str(code_peer).strip() or None) if code_peer else None,
         "code_peer_model": (str(code_peer_model).strip() or None) if code_peer_model else None,
+        "unified_peer": (str(unified_peer).strip().lower() in {"1", "true", "yes", "on"}
+                         if unified_peer is not None else None),
         "llm_provider": (str(llm_provider).strip() or None) if llm_provider else None,
         "llm_model": (str(llm_model).strip() or None) if llm_model else None,
         "reasoning_effort": (str(reasoning_effort).strip() or None) if reasoning_effort else None,
@@ -1438,6 +1443,7 @@ def agent_chat():
             use_supervisor=normalized.get("use_supervisor"),
             code_exec=normalized.get("code_exec"),
             code_peer=normalized.get("code_peer"),
+            unified_peer=normalized.get("unified_peer"),
             code_peer_model=normalized.get("code_peer_model"),
             llm_provider=normalized.get("llm_provider"),
             llm_model=normalized.get("llm_model"),
@@ -1950,6 +1956,7 @@ def agent_chat_stream():
                     use_supervisor=normalized.get("use_supervisor"),
                     code_exec=normalized.get("code_exec"),
                     code_peer=normalized.get("code_peer"),
+                    unified_peer=normalized.get("unified_peer"),
                     code_peer_model=normalized.get("code_peer_model"),
                     llm_provider=normalized.get("llm_provider"),
                     llm_model=normalized.get("llm_model"),

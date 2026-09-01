@@ -263,6 +263,7 @@ def run_agent_chat(
     code_exec: Optional[bool] = None,
     code_peer: Optional[str] = None,
     code_peer_model: Optional[str] = None,
+    unified_peer: Optional[bool] = None,
     llm_provider: Optional[str] = None,
     llm_model: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
@@ -322,6 +323,7 @@ def run_agent_chat(
         code_exec=code_exec,
         code_peer=code_peer,
         code_peer_model=code_peer_model,
+        unified_peer=unified_peer,
         input_file_ids=effective_file_ids,
     )
 
@@ -395,6 +397,7 @@ def stream_agent_chat_events(
     code_exec: Optional[bool] = None,
     code_peer: Optional[str] = None,
     code_peer_model: Optional[str] = None,
+    unified_peer: Optional[bool] = None,
     llm_provider: Optional[str] = None,
     llm_model: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
@@ -489,6 +492,7 @@ def stream_agent_chat_events(
         code_exec=code_exec,
         code_peer=code_peer,
         code_peer_model=code_peer_model,
+        unified_peer=unified_peer,
         input_file_ids=effective_file_ids,
     ):
         if event.get("event") == "completed" and isinstance(event.get("data"), Mapping):

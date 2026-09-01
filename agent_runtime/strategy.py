@@ -36,6 +36,9 @@ class OrchestrationConfig:
     skill_roots: Optional[List[str]] = None
     code_exec: Optional[bool] = None
     input_file_ids: Optional[List[str]] = None
+    # Per-request override of AGENT_UNIFIED_PEER: run search+analyze as ONE agent. None means
+    # "use the env default", so an unset request keeps whatever the deployment is configured for.
+    unified_peer: Optional[bool] = None
     # Which code-peer backend this request wants; None falls back to AGENT_CODE_PEER.
     code_peer: Optional[str] = None
     # Model for that peer when it is a CLI backend; None falls back to its own env default.

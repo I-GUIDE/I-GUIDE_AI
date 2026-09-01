@@ -58,6 +58,7 @@ def run_supervisor_orchestration(query: str, chat_history: Optional[List[Any]], 
         # The search NODE needs the allowlist too, so its no-platform-evidence web fallback
         # respects a request that excluded web_search.
         enabled_search_methods=cfg.enabled_search_methods,
+        unified_peer=getattr(cfg, "unified_peer", None),
     )
     emit_trace_event(
         "node_completed",

@@ -18,7 +18,7 @@ export interface ChatMessage {
 export type Mode = 'live' | 'local';
 export interface AgentCfg { endpoint: string; uploadEndpoint: string; apiKey: string;
                             model?: string; provider?: string; reasoningEffort?: string;
-                            codePeer?: string; codePeerModel?: string }
+                            codePeer?: string; codePeerModel?: string; orchestration?: string }
 
 const RS_ACTIONS = [
   { label: 'Embed',   prompt: 'Embed this drawn region with the gse model for June–September 2022 and put the embedding on the map.' },
@@ -211,6 +211,17 @@ export function ChatPanel(p: Props) {
                 </label>
               );
             })()}
+            {/* Which SHAPE runs the turn: the supervisor routing between a search peer and
+                an analyze peer, or one agent doing both in one context. Per-request so the
+                two can be compared side by side rather than by restarting the deployment. */}
+            <label>Orchestration
+              <select value={p.cfg.orchestration || ''}
+                      onChange={(e) => p.onSetCfg({ ...p.cfg, orchestration: e.target.value })}>
+                <option value="">Server default</option>
+                <option value="peers">Supervisor + peers</option>
+                <option value="unified">Unified agent (experimental)</option>
+              </select>
+            </label>
             {/* A SECOND axis, deliberately its own control: `Model` picks what writes
                 the answer, this picks what writes the code. A peer whose sandbox image or
                 credential is missing is shown but disabled — absent from the list would

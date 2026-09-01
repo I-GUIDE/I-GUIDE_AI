@@ -19,6 +19,10 @@ export interface AgentConfig {
   /** Model for a CLI code peer, e.g. 'sonnet' | 'opus'. Empty = that peer's default.
    *  Independent of `model`, which is what writes the ANSWER. */
   codePeerModel?: string;
+  /** Orchestration shape: '' = deployment default, 'peers' = supervisor routes between a
+   *  search peer and an analyze peer, 'unified' = one agent does both in one context.
+   *  Per-request so both shapes can be compared side by side in separate tabs. */
+  orchestration?: string;
 }
 
 export interface ModelCatalogue {
@@ -218,6 +222,9 @@ export async function streamChat(
     // sets it behaves exactly as it did before the control existed.
     ...(cfg.codePeer ? { code_peer: cfg.codePeer } : {}),
     ...(cfg.codePeerModel ? { code_peer_model: cfg.codePeerModel } : {}),
+    // Absent = the deployment's AGENT_UNIFIED_PEER default. Sent as a boolean because the
+    // server reads it as one; the two named options exist so the UI can say what they mean.
+    ...(cfg.orchestration ? { unifiedPeer: cfg.orchestration === 'unified' } : {}),
   };
 
   const resp = await fetch(cfg.endpoint, {
