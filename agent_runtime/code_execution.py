@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -50,6 +51,9 @@ def _num_env(name: str, default: float) -> float:
         return default
 
 
+# NOTE the default is the SLIM image on purpose: a fresh checkout must be able to run code
+# without first building anything. The pre-baked image is opt-in via the env var, and the
+# probe below reports which one is actually in play — see _log_image_choice.
 DEFAULT_IMAGE = os.getenv("AGENT_CODE_EXEC_IMAGE", "python:3.11-slim")
 DEFAULT_TIMEOUT = int(os.getenv("AGENT_CODE_EXEC_TIMEOUT", "60"))
 DEFAULT_INSTALL_TIMEOUT = int(os.getenv("AGENT_CODE_EXEC_INSTALL_TIMEOUT", "300"))
@@ -186,7 +190,9 @@ def _infer_deps(code: str, declared: List[str]) -> List[str]:
 PREINSTALLED_ENV = "AGENT_CODE_EXEC_PREINSTALLED"
 PROBE_TIMEOUT = int(_num_env("AGENT_CODE_EXEC_PROBE_TIMEOUT", 60))
 
+_LOG = logging.getLogger(__name__)
 _probe_cache: Dict[str, frozenset] = {}
+_image_logged: set = set()
 _probe_lock = threading.Lock()
 
 # A REAL import, not importlib.util.find_spec. find_spec locates the module file without
@@ -803,6 +809,31 @@ class CodeExecutor:
 
     backend = "base"
 
+    def _log_image_choice(self, names: frozenset) -> None:
+        """Say once which sandbox image is in play, and what it costs.
+
+        The pre-baked image shipped, was built, and was then inert in production for two days:
+        the deployment still set the slim default, so every session re-installed the scientific
+        stack into its own .deps tree (measured: 22 workspaces, 454 MB) while a 1.24 GB
+        iguide-codeexec image sat unused on the same host. Nothing said so — the install phase
+        succeeding looks identical to not needing one. This makes the choice legible.
+
+        Takes the resolved probe result rather than reading ``_probe_cache``: called before the
+        probe populates it, this warned that a correctly-baked image had no stack at all.
+        """
+        if self.image in _image_logged:
+            return
+        _image_logged.add(self.image)
+        if names:
+            _LOG.info("code sandbox image %s: %d packages pre-installed, no install phase "
+                      "needed for them", self.image, len(names))
+        else:
+            _LOG.warning(
+                "code sandbox image %s has no pre-installed scientific stack, so every session "
+                "pays a pip install for pandas/geopandas/etc. Build the baked image and point "
+                "AGENT_CODE_EXEC_IMAGE at it: docker build -t iguide-codeexec sandbox/",
+                self.image)
+
     def preinstalled(self) -> frozenset:
         """pip names importable in this sandbox with no install phase.
 
@@ -984,6 +1015,7 @@ class DockerCodeExecutor(CodeExecutor):
         with _probe_lock:
             cached = _probe_cache.get(self.image)
         if cached is not None:
+            self._log_image_choice(frozenset(cached))
             return frozenset(cached)
         found = self._probe_versions()
         if found is None:
@@ -995,6 +1027,7 @@ class DockerCodeExecutor(CodeExecutor):
             return frozenset()
         with _probe_lock:
             _probe_cache[self.image] = found
+        self._log_image_choice(frozenset(found))
         return frozenset(found)
 
     def preinstalled_versions(self) -> Dict[str, str]:

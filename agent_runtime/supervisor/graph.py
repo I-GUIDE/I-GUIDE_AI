@@ -1025,6 +1025,40 @@ def _raw_history_text(chat_history: Optional[List[Any]]) -> str:
     return "\n".join(parts)
 
 
+# A file id as it appears in an agent download URL or cited bare in an answer.
+_HISTORY_FILE_ID_RE = re.compile(r"\bfile_[0-9a-f]{6,}\b", re.I)
+_HISTORY_FILE_URL_RE = re.compile(r"[^\s\(\)\[\]\"'<>]*/agent/files/[^/\s]+/download", re.I)
+
+
+def _refs_in_history(chat_history: Optional[List[Any]]) -> Dict[str, List[str]]:
+    """Artifact references the conversation ALREADY offered, as ``{"file_ids", "urls"}``.
+
+    ``sanitize_answer_links`` verifies a download link only against the allowlist handed to it
+    (``runtime_utils.sanitize_answer_links``) — there is no file-store lookup — and the
+    allowlist is built from THIS turn's ``analysis_results``/``code_result``. Today an earlier
+    turn's artifact survives by accident, because a peer's checkpointed thread replays its old
+    tool results into this turn's payload. Scope those artifacts to the turn that produced them
+    (the correct fix for four verifiers that are currently fooled by the same replay) and the
+    accident stops: a turn-4 answer offering a turn-1 CSV would have its link silently degraded
+    to plain text.
+
+    So read the references out of the conversation itself. This is strictly better than relying
+    on the replay even before that change lands: the ``claude`` and ``opencode`` peers return a
+    plain dict and never had a checkpointed thread, so an artifact THEY produced in an earlier
+    turn has never been re-offerable.
+
+    A file id is only trusted here because it was already emitted to this user in this
+    conversation — an id the model invents still fails the check.
+    """
+    text = _raw_history_text(chat_history)
+    if not text:
+        return {"file_ids": [], "urls": []}
+    return {
+        "file_ids": sorted({m.group(0) for m in _HISTORY_FILE_ID_RE.finditer(text)}),
+        "urls": sorted({m.group(0) for m in _HISTORY_FILE_URL_RE.finditer(text)}),
+    }
+
+
 def _drop_previously_shown(images: List[Dict[str, str]], chat_history: Optional[List[Any]]) -> List[Dict[str, str]]:
     """Drop artifacts already displayed in an EARLIER turn.
 
@@ -3188,6 +3222,10 @@ def build_supervisor_graph(
             from agent_runtime.runtime_utils import sanitize_answer_links
 
             refs = _collect_download_refs(ar, cr)
+            # An artifact from an EARLIER turn is still downloadable, so a link to it is not a
+            # fabrication. Read those ids out of the conversation rather than depending on a
+            # peer thread replaying its old tool results into this turn — see _refs_in_history.
+            hist_refs = _refs_in_history(state.get("chat_history"))
             # Evidence URLs are legitimate targets too (platform element pages, external
             # OpenGeoData landing pages), so citing them is never mistaken for a fabricated file.
             from agent_runtime.supervisor.evidence_subgraph import _element_url
@@ -3200,8 +3238,9 @@ def build_supervisor_graph(
 
             final = sanitize_answer_links(
                 final,
-                allowed_file_ids=refs["file_ids"],
-                allowed_urls=[*refs["urls"], *evidence_urls, *web_allowed_urls()],
+                allowed_file_ids=[*refs["file_ids"], *hist_refs["file_ids"]],
+                allowed_urls=[*refs["urls"], *hist_refs["urls"], *evidence_urls,
+                              *web_allowed_urls()],
             )
             if not (final or "").strip():
                 # Never ship an empty answer with a success status.

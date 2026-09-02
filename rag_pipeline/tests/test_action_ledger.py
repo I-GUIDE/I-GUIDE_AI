@@ -390,3 +390,108 @@ def test_a_custom_five_argument_synthesize_fn_still_works():
     out = graph.invoke({"query": "q", "thread_id": "t-arity", "actions": [],
                         "evidence": [{"doc_id": "d1", "title": "t", "contents": "c"}]})
     assert out["final_answer"] == "ans"
+
+
+# --- an EARLIER turn's artifact is still downloadable --------------------------------------
+#
+# sanitize_answer_links verifies a download link only against the allowlist handed to it, and
+# that list is built from THIS turn's analysis_results/code_result. Today an earlier turn's
+# artifact survives by accident, because a peer's checkpointed thread replays its old tool
+# results into this turn's payload. Scoping artifacts to their own turn — the correct fix for
+# four verifiers currently fooled by the same replay — removes the accident, and a turn-4 answer
+# offering a turn-1 CSV would have its link silently degraded to plain text.
+#
+# _refs_in_history reads those references out of the conversation instead. It is also strictly
+# better than the replay TODAY: the claude/opencode peers return a plain dict and never had a
+# checkpointed thread, so an artifact they produced has never been re-offerable.
+
+HIST = [
+    {"role": "user", "content": "embed the tracts"},
+    {"role": "assistant",
+     "content": "Done — [vectors](https://iguide.test/agent/files/file_7753f6d913c2/download)."},
+]
+
+
+def test_a_link_to_an_earlier_turns_file_is_recognised():
+    refs = g._refs_in_history(HIST)
+    assert "file_7753f6d913c2" in refs["file_ids"]
+    assert "https://iguide.test/agent/files/file_7753f6d913c2/download" in refs["urls"]
+    # the markdown "(" must not be swallowed into the URL
+    assert not any(u.startswith("(") for u in refs["urls"])
+
+
+@pytest.mark.parametrize("content,expected", [
+    ("[a](https://h/agent/files/file_aa1111/download)", "file_aa1111"),
+    ("bare https://h/agent/files/file_bb2222/download here", "file_bb2222"),
+    ("<https://h/agent/files/file_cc3333/download>", "file_cc3333"),
+    ("saved as file_dd4444ee", "file_dd4444ee"),
+])
+def test_every_form_a_reference_takes_in_an_answer_is_found(content, expected):
+    assert expected in g._refs_in_history([{"role": "assistant", "content": content}])["file_ids"]
+
+
+def test_an_invented_file_id_is_still_not_trusted():
+    """The mitigation must not become blanket amnesty: only ids ALREADY shown to this user."""
+    refs = g._refs_in_history(HIST)
+    assert "file_deadbeef99" not in refs["file_ids"]
+
+
+def test_an_empty_or_odd_history_is_harmless():
+    for hist in (None, [], [("user", "hi")], ["a bare string"], [{"role": "user"}]):
+        refs = g._refs_in_history(hist)
+        assert refs == {"file_ids": [], "urls": []} or not refs["file_ids"]
+
+
+def test_the_sanitizer_allowlist_includes_the_history_references():
+    """Pin the wiring, since the helper alone protects nothing."""
+    import inspect
+
+    src = inspect.getsource(g.build_supervisor_graph)
+    assert 'hist_refs = _refs_in_history(state.get("chat_history"))' in src
+    assert '*hist_refs["file_ids"]' in src
+    assert '*hist_refs["urls"]' in src
+
+
+def test_an_earlier_turn_link_survives_sanitation_end_to_end():
+    """The real contract, and the exact shape the risk takes.
+
+    `sanitize_answer_links` only verifies when the allowlist is NON-EMPTY
+    (`verifying = bool(ids or urls)`) — an empty list means "do not verify", not "verify against
+    nothing". So the regression needs a turn that produced its OWN artifact: the allowlist is
+    then non-empty, verification switches on, and an earlier turn's link is the one thing in the
+    answer that cannot be vouched for. That is a normal answer shape — "here is the new layer,
+    plus the CSV from before".
+    """
+    from agent_runtime.runtime_utils import sanitize_answer_links
+
+    old_url = "https://iguide.test/agent/files/file_7753f6d913c2/download"   # turn 1
+    new_url = "https://iguide.test/agent/files/file_99newnew9999/download"   # this turn
+    answer = f"New layer [here]({new_url}); the earlier vectors are [still here]({old_url})."
+    this_turn = {"file_ids": ["file_99newnew9999"], "urls": [new_url]}
+
+    # WITHOUT the history references: verification is on, and turn 1's link is stripped.
+    without = sanitize_answer_links(answer, allowed_file_ids=this_turn["file_ids"],
+                                    allowed_urls=this_turn["urls"])
+    assert new_url in without, "control: this turn's own link must always survive"
+    assert old_url not in without, (
+        "control failed — the regression this mitigation exists for is not reproducible")
+
+    # WITH them: both survive.
+    hist = g._refs_in_history(HIST)
+    with_hist = sanitize_answer_links(
+        answer,
+        allowed_file_ids=[*this_turn["file_ids"], *hist["file_ids"]],
+        allowed_urls=[*this_turn["urls"], *hist["urls"]])
+    assert old_url in with_hist and new_url in with_hist
+
+
+def test_verification_stays_strict_for_a_file_the_conversation_never_saw():
+    """The mitigation widens the allowlist; it must not switch verification off."""
+    from agent_runtime.runtime_utils import sanitize_answer_links
+
+    fake = "https://iguide.test/agent/files/file_deadbeef99/download"
+    answer = f"Here is [the data]({fake})."
+    hist = g._refs_in_history(HIST)
+    out = sanitize_answer_links(answer, allowed_file_ids=hist["file_ids"],
+                                allowed_urls=hist["urls"])
+    assert fake not in out, "an invented artifact link must still be defused"
