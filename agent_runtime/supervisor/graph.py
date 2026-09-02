@@ -684,6 +684,46 @@ def _ledger_lines(rows: List[Dict[str, Any]]) -> List[str]:
 _LEDGER_HEADING = "What this conversation already did (tool records from EARLIER turns)"
 
 
+# Extensions that cannot carry geometry. A tool needing a vector FILE is unusable when the only
+# upload is one of these — offering it is not just wasted schema, it invites a call that must
+# fail. Anything not on this list, including an unrecognised extension, counts as possibly-vector
+# and binds everything: misclassifying here would recreate the absent-tool bug that caused half
+# the selection failures in this repo's history, and a per-call filter cannot widen afterwards.
+_TABULAR_ONLY_SUFFIXES = frozenset({".csv", ".tsv", ".txt", ".xlsx", ".xls"})
+# Needs a vector file to do anything. add_map_layer and render_map_image are deliberately absent:
+# they work from geometry the peer already holds.
+_VECTOR_FILE_TOOLS = frozenset({"inspect_vector", "reproject_vector", "vector_spatial_join",
+                                "vector_to_geojson"})
+
+
+def _uploads_are_tabular_only(input_file_ids: Optional[List[str]]) -> bool:
+    """True only when EVERY upload is a recognised non-geometry format.
+
+    Fails open in every uncertain case — no ids, an id that will not resolve, an extension not
+    on the list. The saving is small (~857 schema tokens); the reason to do it is that a CSV
+    cannot be reprojected, and a tool that cannot work is a worse thing to offer than a tool
+    that is merely irrelevant.
+    """
+    ids = [str(i) for i in (input_file_ids or []) if i]
+    if not ids:
+        return False
+    try:
+        from pathlib import PurePosixPath
+
+        from agent_runtime.file_store import get_file_record
+
+        for fid in ids:
+            record = get_file_record(fid) or {}
+            name = str(record.get("filename") or "")
+            if not name:
+                return False                       # unknown -> assume it may be vector
+            if PurePosixPath(name.lower()).suffix not in _TABULAR_ONLY_SUFFIXES:
+                return False
+        return True
+    except Exception:      # noqa: BLE001 - never let this decide by crashing
+        return False
+
+
 def _visible_state_lines(rows: List[Dict[str, Any]]) -> List[str]:
     """What the user can still SEE and download from earlier turns.
 
@@ -2750,7 +2790,12 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
             # zip or extracted). Guarded so a missing geopandas never breaks the agent.
             try:
                 from agent_runtime.langchain_geo_tools import make_langchain_geo_tools
-                tools.extend(make_langchain_geo_tools(default_input_file_ids=input_file_ids))
+
+                _geo = make_langchain_geo_tools(default_input_file_ids=input_file_ids)
+                if _uploads_are_tabular_only(input_file_ids):
+                    _geo = [t for t in _geo
+                            if str(getattr(t, "name", "")) not in _VECTOR_FILE_TOOLS]
+                tools.extend(_geo)
             except Exception:
                 pass
             # Overlay / aggregation / temporal analysis tools. Same guard and the same
@@ -3065,7 +3110,12 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         if input_file_ids:
             try:
                 from agent_runtime.langchain_geo_tools import make_langchain_geo_tools
-                tools.extend(make_langchain_geo_tools(default_input_file_ids=input_file_ids))
+
+                _geo = make_langchain_geo_tools(default_input_file_ids=input_file_ids)
+                if _uploads_are_tabular_only(input_file_ids):
+                    _geo = [t for t in _geo
+                            if str(getattr(t, "name", "")) not in _VECTOR_FILE_TOOLS]
+                tools.extend(_geo)
             except Exception:
                 pass
             # Overlay / aggregation / temporal tools, same as the analysis peer: the code

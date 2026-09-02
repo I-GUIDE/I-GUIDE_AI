@@ -196,3 +196,82 @@ def test_only_read_only_listers_are_handed_to_the_capability_agent():
     assert "list_embedding_models" in names, "the real model names must be reachable"
     non_listers = [n for n in names if not n.startswith("list_")]
     assert non_listers == [], f"only read-only listers belong here, got {non_listers}"
+
+
+# --- the upload gate -----------------------------------------------------------------------
+#
+# `if input_file_ids:` binds ~10,432 schema tokens on the presence of ANY file. Measured, only
+# ~857 of those (8%) can be safely excluded from the file NAME: overlay, aggregate, temporal and
+# spatial-stats tools cannot be ruled out by extension, because buffer_layer on a point CSV is
+# legitimate, spatial weights can be built from coordinates, and a GeoJSON can carry a date
+# column. Ruling them out would need the file READ, and misclassifying recreates the absent-tool
+# bug behind half the selection failures in this repo — which a per-call filter cannot undo,
+# since narrowing raises ValueError when it tries to widen.
+#
+# So this is scoped to tools that need a vector FILE, and it fails open everywhere else.
+
+def _record(monkeypatch, mapping):
+    import agent_runtime.file_store as fs
+    monkeypatch.setattr(fs, "get_file_record",
+                        lambda fid: ({"filename": mapping[fid]} if fid in mapping else None))
+
+
+def test_a_csv_upload_does_not_offer_vector_file_tools(monkeypatch):
+    from agent_runtime.supervisor.graph import _uploads_are_tabular_only
+
+    _record(monkeypatch, {"f1": "incidents.csv"})
+    assert _uploads_are_tabular_only(["f1"]) is True
+
+
+def test_a_geojson_upload_still_offers_everything(monkeypatch):
+    from agent_runtime.supervisor.graph import _uploads_are_tabular_only
+
+    _record(monkeypatch, {"f1": "tracts.geojson"})
+    assert _uploads_are_tabular_only(["f1"]) is False
+
+
+def test_a_mixed_upload_offers_everything(monkeypatch):
+    """One vector file among tabular ones means the vector tools are needed."""
+    from agent_runtime.supervisor.graph import _uploads_are_tabular_only
+
+    _record(monkeypatch, {"f1": "incidents.csv", "f2": "tracts.zip"})
+    assert _uploads_are_tabular_only(["f1", "f2"]) is False
+
+
+@pytest.mark.parametrize("name", ["data.parquet", "boundary.shp", "layer.gpkg", "odd.bin", ""])
+def test_anything_unrecognised_fails_open(monkeypatch, name):
+    """The expensive mistake is withholding a tool, so uncertainty binds everything."""
+    from agent_runtime.supervisor.graph import _uploads_are_tabular_only
+
+    _record(monkeypatch, {"f1": name})
+    assert _uploads_are_tabular_only(["f1"]) is False
+
+
+def test_it_never_decides_by_crashing(monkeypatch):
+    import agent_runtime.file_store as fs
+
+    from agent_runtime.supervisor.graph import _uploads_are_tabular_only
+
+    def _boom(fid):
+        raise RuntimeError("store unavailable")
+
+    monkeypatch.setattr(fs, "get_file_record", _boom)
+    assert _uploads_are_tabular_only(["f1"]) is False
+
+
+def test_map_layer_tools_are_never_withheld():
+    """add_map_layer and render_map_image work from geometry the peer already holds, so they
+    must stay bound whatever was uploaded."""
+    from agent_runtime.supervisor.graph import _VECTOR_FILE_TOOLS
+
+    assert "add_map_layer" not in _VECTOR_FILE_TOOLS
+    assert "render_map_image" not in _VECTOR_FILE_TOOLS
+
+
+def test_both_peers_apply_the_refinement():
+    import inspect
+
+    from agent_runtime.supervisor import graph as g
+
+    for fn in (g.default_analyze_fn, g.default_code_fn):
+        assert "_uploads_are_tabular_only(input_file_ids)" in inspect.getsource(fn), fn.__name__
