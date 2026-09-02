@@ -370,7 +370,10 @@ def test_the_answerer_and_the_auditor_see_the_same_lines():
     """One rendering, two consumers — the property the whole feature rests on."""
     from agent_runtime.evidence_quality import _format_execution_context
 
-    rows = g._ledger_rows(CLAY_TURN) * 12          # past the auditor's old 2200-char cut
+    # Span many TOOLS, not one repeated: _LEDGER_ROWS_PER_TOOL deliberately thins repeats of
+    # a single tool to 3, so a x12 fixture of one tool no longer exceeds the old cap.
+    rows = [{"tool": f"tool_{i}", "args": {"query": "q" * 100},
+             "facts": {"results_returned": i}} for i in range(20)]
     text = "\n".join(g._ledger_lines(rows))
     assert len(text) > 2200, "make the fixture bigger; this must exceed the old cap"
     assert text in g._prior_actions_note(rows)
@@ -504,3 +507,151 @@ def test_verification_stays_strict_for_a_file_the_conversation_never_saw():
     out = sanitize_answer_links(answer, allowed_file_ids=hist["file_ids"],
                                 allowed_urls=hist["urls"])
     assert fake not in out, "an invented artifact link must still be defused"
+
+
+# --- the ledger can now answer the questions people actually ask ---------------------------
+#
+# It could not say what was searched, what code computed, what Moran's I came back, which
+# distance a buffer used, or whether anything FAILED. Worse, a failed call and a successful one
+# of the same tool were paired by position within the tool name, so the failed call wore the
+# good run's result — including its file_id and map_layer, which then read as a delivered layer.
+
+def _pair(name, args, payload, call_id="c1", result_id=None):
+    """A call/result pair in the shape extract_search_artifacts emits."""
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    from agent_runtime.runtime_utils import extract_search_artifacts
+
+    return extract_search_artifacts({"messages": [
+        AIMessage(content="", tool_calls=[{"name": name, "args": args, "id": call_id}]),
+        ToolMessage(content=json.dumps(payload), name=name,
+                    tool_call_id=result_id or call_id),
+    ]})
+
+
+def _merge(*artifact_sets):
+    out = {"tool_calls": [], "tool_results": []}
+    for a in artifact_sets:
+        out["tool_calls"] += a["tool_calls"]
+        out["tool_results"] += a["tool_results"]
+    return out
+
+
+def test_a_failed_call_does_not_wear_the_next_calls_result():
+    """The headline pairing bug, with the fail-then-succeed pair that produced it."""
+    bad = _pair("embed_zones", {"model": "clay", "file_id": "BAD"},
+                {"ok": False, "error": "no such file: BAD"}, call_id="c1")
+    good = _pair("embed_zones", {"model": "gse", "file_id": "GOOD"},
+                 {"ok": True, "dim": 64, "file_id": "OUT",
+                  "map_layer": {"url": "/f/1", "label": "gse zones"}}, call_id="c2")
+    rows = g._ledger_rows(_merge(bad, good))
+
+    failed = [r for r in rows if r.get("args", {}).get("file_id") == "BAD"]
+    assert len(failed) == 1
+    assert failed[0].get("failed") is True
+    assert "facts" not in failed[0], "a failed call has no facts"
+    assert "map_layer" not in failed[0], "and must not inherit the good run's layer"
+
+    ok = [r for r in rows if r.get("args", {}).get("file_id") == "GOOD"]
+    assert len(ok) == 1 and ok[0]["facts"]["dim"] == 64
+
+
+def test_a_failure_reads_as_a_failure():
+    rows = g._ledger_rows(_pair("embed_zones", {"model": "clay"},
+                                {"ok": False, "error": "TypeError: bad geometry"}))
+    note = g._prior_actions_note(rows)
+    assert "FAILED embed_zones" in note
+    assert "DID NOT RUN" in note and "bad geometry" in note
+    assert "never describe it as completed" in note
+
+
+def test_execute_code_leaves_a_row():
+    """It produced ZERO rows before: none of its args or result keys were curated."""
+    rows = g._ledger_rows(_pair(
+        "execute_code",
+        {"code": "print(1)", "language": "python", "label": "sum_1_to_100"},
+        {"ok": True, "exit_code": 0, "stdout": "5050",
+         "artifacts": [{"filename": "out.csv"}]}))
+    assert len(rows) == 1
+    assert rows[0]["args"]["label"] == "sum_1_to_100"
+    assert "code" not in rows[0]["args"], "80 chars of a program is noise"
+    assert rows[0]["outputs"] == "out.csv"
+
+
+def test_a_morans_i_survives_its_nesting():
+    """results.morans_i.statistic is two levels down; a flat key caught a truncated dict."""
+    rows = g._ledger_rows(_pair(
+        "global_spatial_autocorrelation", {"file_id": "f1", "column": "income", "weights": "queen"},
+        {"ok": True, "results": {"morans_i": {"statistic": 0.42, "p_value": 0.001,
+                                              "significance": "significant"}}}))
+    assert "0.42" in str(rows[0]["facts"]["morans_i"])
+    assert rows[0]["args"]["column"] == "income" and rows[0]["args"]["weights"] == "queen"
+    assert "Moran's I: 0.42" in g._prior_actions_note(rows)
+
+
+def test_a_buffer_distance_is_recorded():
+    rows = g._ledger_rows(_pair("buffer_layer", {"file_id": "f1", "distance": 2, "units": "km"},
+                                {"ok": True, "feature_count": 1}))
+    line = g._prior_actions_note(rows)
+    assert "distance=2" in line and "units=km" in line
+
+
+def test_a_search_result_is_not_reported_as_imagery():
+    """`source` means the search METHOD for retrieval and the IMAGERY for rs-embed.
+
+    Rendered naively the ledger asserted "imagery source: keyword" as a fact about imagery.
+    """
+    rows = g._ledger_rows(_pair("keyword_search", {"query": "flood risk"},
+                                {"ok": True, "source": "keyword", "count": 2}))
+    note = g._prior_actions_note(rows)
+    assert "imagery source" not in note
+    assert "retrieval method: keyword" in note and "documents returned: 2" in note
+
+
+def test_partial_coverage_is_not_silently_dropped():
+    rows = g._ledger_rows(_pair("embed_zones", {"model": "gse", "max_tiles": 24},
+                                {"ok": True, "zones_total": 48, "zones_with_pixels": 3,
+                                 "tiles_planned": 1140, "truncated": "24 of 1140 tiles"}))
+    note = g._prior_actions_note(rows)
+    assert "PARTIAL COVERAGE" in note
+    assert "zones that actually got pixels: 3" in note
+
+
+def test_every_curated_fact_key_has_a_phrase():
+    """Mechanically prevents the four bare key=value gaps from recurring."""
+    missing = set(g._LEDGER_FACTS) - set(g._FACT_PHRASES)
+    assert missing == set(), f"facts with no phrase: {sorted(missing)}"
+
+
+def test_an_id_less_peer_still_pairs():
+    """claude/opencode build {"name","args"} / {"name","content"} with no ids at all."""
+    ctx = {"tool_calls": [{"name": "claude_run", "args": {"label": "x"}}],
+           "tool_results": [{"name": "claude_run",
+                             "content": {"ok": True, "file_id": "f9"}}]}
+    rows = g._ledger_rows(ctx)
+    assert len(rows) == 1 and rows[0]["file_id"] == "f9" and rows[0]["args"]["label"] == "x"
+
+
+def test_a_nested_name_is_not_mistaken_for_a_tool():
+    """admin_boundary's `matched` entries are {"name": "Champaign County", ...}."""
+    rows = g._ledger_rows(_pair(
+        "admin_boundary", {"area": "Champaign", "state": "Illinois", "level": "county"},
+        {"ok": True, "matched": [{"name": "Champaign County", "geoid": "17019"}],
+         "file_id": "f1"}))
+    assert [r["tool"] for r in rows] == ["admin_boundary"]
+
+
+def test_one_tool_cannot_crowd_out_the_others():
+    searches = [{"tool": "keyword_search", "args": {"query": f"q{i}"}} for i in range(40)]
+    kept = g._budgeted([*searches, {"tool": "embed_zones", "facts": {"dims": 64}}])
+    assert any(r["tool"] == "embed_zones" for r in kept), "the analysis row must survive"
+    assert sum(1 for r in kept if r["tool"] == "keyword_search") <= g._LEDGER_ROWS_PER_TOOL
+
+
+def test_an_internal_knob_is_not_amnesty_for_an_invented_figure():
+    """Why permutations/tile_px/timeout_seconds are deliberately NOT curated."""
+    rows = g._ledger_rows(_pair("global_spatial_autocorrelation",
+                                {"file_id": "f1", "permutations": 999},
+                                {"ok": True, "results": {}}))
+    blob = json.dumps(rows)
+    assert "999" not in blob, "a 3-digit knob in the record excuses a fabricated 999"

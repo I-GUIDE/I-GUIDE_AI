@@ -26,7 +26,7 @@ import json
 import logging
 import os
 import re
-from typing import Any, Callable, Dict, List, Optional, TypedDict
+from typing import Any, Callable, Dict, List, Optional, TypedDict, Tuple
 
 from langgraph.graph import END, START, StateGraph
 
@@ -285,6 +285,26 @@ _LEDGER_LOG = logging.getLogger(__name__)
 _LEDGER_ARGS = (
     "model", "area", "state", "level", "subdivide", "place", "feature", "query",
     "lon", "lat", "bbox", "start", "end", "year", "file_id", "zone_id_field", "zone_ids",
+    # embed_region / predict_for_region take LISTS; "model"/"year" above miss them entirely.
+    "models", "years", "buffer_m", "max_tiles", "clusters",
+    # WHICH variable, WHICH neighbours, WHICH estimator. Without these,
+    # local_moran_lisa(column="income", weights="queen") recorded as
+    # `local_moran_lisa (file_id=f2)` and a follow-up asking what was tested was unanswerable.
+    "column", "columns", "y_column", "x_columns", "value_column", "by", "time_column",
+    "statistic", "weights", "method", "n_regions", "freq", "render",
+    # buffer_layer takes distance + units (there is no `distance_m`), so a 2 km buffer
+    # recorded as `buffer_layer (file_id=f1)`.
+    "distance", "units", "cell_km",
+    # execute_code produced no row at all. `code` stays OUT on purpose: 80 chars of a program
+    # is noise, and label/entrypoint already name it.
+    "language", "label", "entrypoint", "dependencies",
+    "limit", "element_id",
+    # DELIBERATELY EXCLUDED: permutations (999), tile_px (200), timeout_seconds (120/300).
+    # _reconcile_audit_with_artifacts drops any audit issue whose 3+ digit numbers all appear
+    # in the json-dumped execution record, so curating an internal knob converts it into
+    # blanket amnesty for a fabricated 3-digit figure. Rule: curate a 3+ digit argument only
+    # when a user would plausibly quote it back. distance/buffer_m/years pass; a permutation
+    # count does not.
 )
 _LEDGER_FACTS = (
     "model", "dims", "dim", "scale_m", "pixel_ground_m", "scale_m_mercator", "year",
@@ -294,17 +314,47 @@ _LEDGER_FACTS = (
     # instead. Without these, "original resolution or downsampled?" is unanswerable for
     # every model except the precomputed ones — which is exactly how it read.
     "image_size", "input_size_hw", "patch_size", "grid_hw_tokens", "source", "sensor",
+    # Spatial statistics were lost entirely. `verdict` is the tool's own plain sentence and
+    # carries the statistic with its expectation, which is what an answer needs.
+    "verdict", "features_analyzed", "column", "crs", "filename",
+    # Coverage. embed_zones' default max_tiles covers a few per cent of a county and
+    # `truncated` is the tool SAYING so — losing it is how "the whole county was embedded"
+    # gets asserted over 24 of 1140 tiles.
+    "zones_total", "zones_with_pixels", "tiles_planned", "truncated", "row_count", "cells",
+    # search, after the rename at capture
+    "search_method", "results_returned",
 )
+_LEDGER_SEARCH_TOOLS = frozenset({
+    "keyword_search", "semantic_search", "neo4j_search", "neo4j_get_element_by_id",
+    "neo4j_explore_related_nodes", "spatial_search", "opengeodata_search", "agent_kb_search",
+    "get_kb_block", "overpass_search", "web_search", "web_fetch", "baseline_sweep",
+})
+_LEDGER_SEARCH_RENAMES = {"source": "search_method", "count": "results_returned"}
 _LEDGER_VALUE_CHARS = 80
 _LEDGER_ROWS_SHOWN = 25
 # A hard ceiling on the rendered ledger, independent of the row count. 25 rows of long args
 # could reach several thousand tokens, and this thing exists BECAUSE a turn overflowed the
 # context window — it must not be able to cause that itself. Oldest rows drop first.
-_LEDGER_MAX_CHARS = 4000
+_LEDGER_MAX_CHARS = int(os.getenv("AGENT_LEDGER_MAX_CHARS") or "6000")
+# A single tool must not crowd out the others. Retrieval is the high-cardinality producer (12
+# tools x several queries x several turns); without this cap it evicts the analysis rows that
+# answer the follow-ups this feature exists for. Newest kept.
+_LEDGER_ROWS_PER_TOOL = 3
 
 
 def _budgeted(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """The newest rows that fit the char budget, oldest dropped first."""
+    per_tool: Dict[str, int] = {}
+    thinned: List[Dict[str, Any]] = []
+    for row in reversed(rows or []):
+        tool = str(row.get("tool"))
+        if per_tool.get(tool, 0) >= _LEDGER_ROWS_PER_TOOL:
+            continue
+        per_tool[tool] = per_tool.get(tool, 0) + 1
+        thinned.append(row)
+    thinned.reverse()
+    rows = thinned
+
     kept: List[Dict[str, Any]] = []
     total = 0
     for row in reversed(rows[-_LEDGER_ROWS_SHOWN:]):
@@ -317,12 +367,18 @@ def _budgeted(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return kept
 
 
-def _ledger_value(value: Any) -> Any:
+# `verdict` and `error` ARE the answer to "what did it find" / "why did it fail"; the default
+# 80 chars cuts both mid-sentence. Everything else stays at the default.
+_LEDGER_VALUE_CHARS_BY_KEY = {"verdict": 200, "error": 160}
+
+
+def _ledger_value(value: Any, key: str = "") -> Any:
     """A value small enough to sit in a routing payload."""
     if isinstance(value, (int, float, bool)) or value is None:
         return value
     text = str(value)
-    return text if len(text) <= _LEDGER_VALUE_CHARS else text[:_LEDGER_VALUE_CHARS] + "…"
+    limit = _LEDGER_VALUE_CHARS_BY_KEY.get(key, _LEDGER_VALUE_CHARS)
+    return text if len(text) <= limit else text[:limit] + "…"
 
 
 def _pick(source: Any, keys) -> Dict[str, Any]:
@@ -331,8 +387,12 @@ def _pick(source: Any, keys) -> Dict[str, Any]:
     out = {}
     for k in keys:
         if k in source and source[k] not in (None, "", [], {}):
-            out[k] = _ledger_value(source[k])
+            out[k] = _ledger_value(source[k], k)
     return out
+
+
+def _row_has_result(row: Dict[str, Any]) -> bool:
+    return any(k in row for k in ("facts", "file_id", "map_layer", "failed"))
 
 
 def _delivers_layer(tool_name: str, payload: Any) -> bool:
@@ -352,9 +412,10 @@ def _ledger_rows(*contexts: Any) -> List[Dict[str, Any]]:
     reads as "embed_region(model=clay, …) -> pixel_ground_m=10" rather than as two half-rows
     the decider has to correlate itself.
     """
-    calls: Dict[str, List[Dict[str, Any]]] = {}
-    results: Dict[str, List[Dict[str, Any]]] = {}
-    order: List[str] = []
+    # (name, kind, call_id, part) in ENCOUNTER order. The previous version bucketed by tool
+    # name and zipped calls to results positionally, so a fail-then-succeed pair of the same
+    # tool put the failed call's arguments on the successful call's result.
+    records: List[Tuple[str, str, Optional[str], Dict[str, Any]]] = []
 
     def note(obj: Any) -> None:
         if not isinstance(obj, dict):
@@ -396,8 +457,41 @@ def _ledger_rows(*contexts: Any) -> List[Dict[str, Any]]:
             prov = payload.get("provenance")
             if isinstance(prov, dict):
                 facts = {**_pick(prov, _LEDGER_FACTS), **facts}
+            # The esda tools nest their numbers a level down under `results`
+            # ({morans_i: {statistic, p_value, significance}}) — the same shape problem
+            # `provenance` had. A flat fact key would capture a stringified dict cut at 80
+            # chars instead of the number, so Moran's I was simply lost.
+            res = payload.get("results")
+            if isinstance(res, dict):
+                for stat, body in list(res.items())[:4]:
+                    if isinstance(body, dict) and body.get("statistic") is not None:
+                        sig = body.get("significance") or f"p={body.get('p_value')}"
+                        facts[stat] = _ledger_value(f"{body['statistic']} ({sig})", stat)
+            # The SAME json key means different things depending on the tool. A retrieval
+            # payload's top-level `source` is the search METHOD ("keyword") and its `count` is a
+            # hit count, while rs-embed's `source` is the IMAGERY ("sentinel-2"). Renamed at
+            # capture, keyed on the tool, because the phrase book cannot tell them apart: the
+            # sentence it actually produced was "imagery source: keyword".
+            if name in _LEDGER_SEARCH_TOOLS:
+                facts = {_LEDGER_SEARCH_RENAMES.get(k, k): v for k, v in facts.items()}
             if facts:
                 part["facts"] = facts
+            # A failed call used to render IDENTICALLY to a success, under a note instructing
+            # the model not to re-derive the work. Row-level, not a fact, so the fact-dict
+            # merges above cannot reorder it away.
+            if (payload.get("ok") is False
+                    or (payload.get("exit_code") not in (None, 0))
+                    or payload.get("timed_out") is True):
+                part["failed"] = True
+                err = payload.get("error") or payload.get("hint")
+                if err:
+                    part["error"] = _ledger_value(err, "error")
+            arts = payload.get("artifacts")
+            if isinstance(arts, list):
+                names = [str(a.get("filename")) for a in arts[:3]
+                         if isinstance(a, dict) and a.get("filename")]
+                if names:
+                    part["outputs"] = _ledger_value(", ".join(names))
             if payload.get("file_id"):
                 part["file_id"] = _ledger_value(payload["file_id"])
             # The ledger is now the ONLY cross-turn map signal (_map_delivered_earlier reads
@@ -409,12 +503,25 @@ def _ledger_rows(*contexts: Any) -> List[Dict[str, Any]]:
                 part["map_layer"] = _ledger_value(ml["label"])
             elif _delivers_layer(name, payload):
                 part["map_layer"] = _ledger_value(name or "map layer")
-        if not part:
+        # `walk` visits EVERY nested dict, and some carry a `name` that is not a tool
+        # (admin_boundary's `matched` entries are {"name": "Champaign County", ...}), so the
+        # empty-part guard has to stay for those. But never drop something that is
+        # STRUCTURALLY a call or a result: "embed_zones ran and failed" is information, and
+        # discarding it is what shifted the positional pairing in the first place.
+        is_call = "args" in obj or "arguments" in obj
+        is_result = bool(obj.get("tool_call_id")) or payload is not None
+        if not part and not (is_call or is_result):
             return
-        if name not in order:
-            order.append(name)
-        bucket = results if ("facts" in part or "file_id" in part or "map_layer" in part) else calls
-        bucket.setdefault(name, []).append(part)
+        if is_call and not is_result:
+            kind, cid = "call", obj.get("id")
+        elif is_result and not is_call:
+            kind, cid = "result", obj.get("tool_call_id")
+        else:
+            # Ambiguous (or a peer's flat dict): fall back to what the part looks like.
+            looks_like_result = any(k in part for k in ("facts", "file_id", "map_layer", "failed"))
+            kind = "result" if looks_like_result else "call"
+            cid = obj.get("tool_call_id") or obj.get("id")
+        records.append((name, kind, cid, part))
 
     def walk(obj: Any) -> None:
         if isinstance(obj, dict):
@@ -428,21 +535,43 @@ def _ledger_rows(*contexts: Any) -> List[Dict[str, Any]]:
     for ctx in contexts:
         walk(ctx)
 
+    calls = [(i, n, cid, p) for i, (n, k, cid, p) in enumerate(records) if k == "call"]
+    results = [(i, n, cid, p) for i, (n, k, cid, p) in enumerate(records) if k == "result"]
+    by_id = {cid: (i, p) for i, _n, cid, p in results if cid}
+    used: set = set()
+
     rows: List[Dict[str, Any]] = []
+    for _i, name, cid, part in calls:
+        row: Dict[str, Any] = {"tool": name, **part}
+        if cid and cid in by_id:
+            ri, rpart = by_id[cid]
+            row.update(rpart)
+            used.add(ri)
+        rows.append(row)
+
+    # The CLI peers build {"name", "args"} / {"name", "content"} with no ids at all
+    # (claude_peer, opencode_peer), so an id-less pair still needs positional matching — but
+    # only among the leftovers, and only within one tool name.
+    leftover = [(i, n, p) for i, n, cid, p in results if i not in used and not cid]
+    for idx, (ri, name, rpart) in enumerate(leftover):
+        target = next((r for r in rows if r["tool"] == name and not _row_has_result(r)), None)
+        if target is not None:
+            target.update(rpart)
+            used.add(ri)
+
+    # A result with no recorded call is information, not noise.
+    for i, name, _cid, part in results:
+        if i not in used:
+            rows.append({"tool": name, **part})
+
+    deduped: List[Dict[str, Any]] = []
     seen = set()
-    for name in order:
-        cs, rs = calls.get(name, []), results.get(name, [])
-        for i in range(max(len(cs), len(rs))):
-            row: Dict[str, Any] = {"tool": name}
-            if i < len(cs):
-                row.update(cs[i])
-            if i < len(rs):
-                row.update(rs[i])
-            key = json.dumps(row, sort_keys=True, default=str)
-            if key not in seen:
-                seen.add(key)
-                rows.append(row)
-    return rows
+    for row in rows:
+        key = json.dumps(row, sort_keys=True, default=str)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(row)
+    return deduped
 
 
 # The key names are the service's, not the user's. Given `scale_m=10` the model answered
@@ -454,7 +583,7 @@ _FACT_PHRASES = {
     "input_size_hw": "model input size (h, w) in px: {v} — imagery is resampled to this",
     "patch_size": "ViT patch size: {v} px, so each output token covers {v}x{v} input pixels",
     "grid_hw_tokens": "output token grid (h, w): {v}",
-    "source": "imagery source: {v}",
+    "source": "data source: {v}",
     "sensor": "sensor: {v}",
     "scale_m": "ground resolution / pixel size: {v} m per pixel (this IS the resolution it was computed at)",
     "pixel_ground_m": "ground resolution / pixel size: {v} m per pixel",
@@ -465,6 +594,28 @@ _FACT_PHRASES = {
     "year": "imagery year: {v}",
     "geoid": "GEOID: {v}",
     "feature_count": "features: {v}",
+    # The four that used to fall through to a bare key=value — the exact failure the phrase
+    # table was built to prevent.
+    "count": "items: {v}",
+    "level": "administrative level: {v}",
+    "tiles_fetched": "imagery tiles fetched: {v}",
+    "zone_id_field": "zone id column: {v} (pass this as zone_id_field)",
+    "verdict": "statistical verdict: {v}",
+    "features_analyzed": "features analysed: {v}",
+    "column": "variable analysed: {v}",
+    "crs": "coordinate system: {v}",
+    "filename": "output file: {v}",
+    "zones_total": "zones in the layer: {v}",
+    "zones_with_pixels": "zones that actually got pixels: {v}",
+    "tiles_planned": "imagery tiles a full sweep would need: {v}",
+    "truncated": "PARTIAL COVERAGE — {v}",
+    "row_count": "rows: {v}",
+    "cells": "grid cells: {v}",
+    "search_method": "retrieval method: {v}",
+    "results_returned": "documents returned: {v}",
+    "morans_i": "Moran's I: {v}",
+    "gearys_c": "Geary's C: {v}",
+    "getis_ord_g": "Getis-Ord G: {v}",
 }
 
 
@@ -484,11 +635,19 @@ def _ledger_lines(rows: List[Dict[str, Any]]) -> List[str]:
     """
     lines: List[str] = []
     for r in _budgeted(rows or []):
-        bits = [str(r.get("tool"))]
+        bits = [("FAILED " if r.get("failed") else "") + str(r.get("tool"))]
         if r.get("args"):
             bits.append("(" + ", ".join(f"{k}={v}" for k, v in r["args"].items()) + ")")
-        if r.get("facts"):
+        if r.get("failed"):
+            # A failed call has no facts. Showing its ARGUMENTS and its error is the half that
+            # matters: the note tells the model not to re-derive completed work, and a failure
+            # rendered as a success is exactly how "already done" gets said about work that
+            # never happened.
+            bits.append(f"-> DID NOT RUN: {r.get('error') or 'the tool returned ok=false'}")
+        elif r.get("facts"):
             bits.append("-> " + ", ".join(_fact_phrase(k, v) for k, v in r["facts"].items()))
+        if r.get("outputs"):
+            bits.append(f"[produced {r['outputs']}]")
         if r.get("map_layer"):
             bits.append(f"[on the map as {r['map_layer']!r}]")
         lines.append("- " + " ".join(bits))

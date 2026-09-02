@@ -61,7 +61,7 @@ _DEFAULT_MAX_FILES = 50
 # Rows, not turns: one substantial turn can be a dozen tool calls. Small on purpose — this is
 # injected into a routing decision, and a ledger that crowds the window recreates the very
 # failure it exists to prevent.
-_DEFAULT_MAX_ACTIONS = 40
+_DEFAULT_MAX_ACTIONS = 80
 
 
 def _max_files() -> int:
