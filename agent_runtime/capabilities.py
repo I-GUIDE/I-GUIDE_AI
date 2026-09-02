@@ -125,6 +125,42 @@ def collect_capability_inventory(
         tools += _tool_entries(make_geo_analysis_tools)
     except Exception:
         pass
+    # These five are bound by EVERY peer and were invisible to "what can you do" — so the
+    # capability answer omitted the entire satellite-embedding surface (embed_region,
+    # embed_zones, fit_zone_model, predict_for_region, segment_region), the named-area
+    # boundary lookup every no-upload map workflow runs through, QGIS, and code execution.
+    # Each in its own try/except, matching the per-registry pattern above: a registry that
+    # cannot be constructed must leave the others intact.
+    try:
+        from agent_runtime.rs_embed_tools import make_rs_embed_tools
+
+        tools += _tool_entries(make_rs_embed_tools, default_input_file_ids=None)
+    except Exception:
+        pass
+    try:
+        from agent_runtime.rs_embed_tools import make_rs_embed_zonal_tools
+
+        tools += _tool_entries(make_rs_embed_zonal_tools, default_input_file_ids=None)
+    except Exception:
+        pass
+    try:
+        from agent_runtime.admin_boundary_tools import make_admin_boundary_tools
+
+        tools += _tool_entries(make_admin_boundary_tools)
+    except Exception:
+        pass
+    try:
+        from agent_runtime.langchain_qgis_tools import make_langchain_qgis_tools
+
+        tools += _tool_entries(make_langchain_qgis_tools)
+    except Exception:
+        pass
+    try:
+        from agent_runtime.langchain_exec_tools import make_code_execution_tools
+
+        tools += _tool_entries(make_code_execution_tools)
+    except Exception:
+        pass
 
     mcp_on = include_mcp_tools
     if mcp_on is None:

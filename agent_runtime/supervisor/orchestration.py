@@ -49,6 +49,10 @@ def run_supervisor_orchestration(query: str, chat_history: Optional[List[Any]], 
             skill_roots=cfg.skill_roots,
             code_exec=cfg.code_exec,
             input_file_ids=cfg.input_file_ids,
+            # Mirrors the search_fn above: in unified mode the analyse peer owns retrieval, so
+            # a request's enabledSearchMethods has to reach it or the allowlist silently
+            # applies to only one of the two arms.
+            enabled_search_methods=cfg.enabled_search_methods,
         ),
         code_fn=default_code_fn(
             llm=cfg.llm, skill_roots=cfg.skill_roots, code_exec=cfg.code_exec,

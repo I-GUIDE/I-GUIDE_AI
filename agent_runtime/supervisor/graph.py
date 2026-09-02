@@ -2596,7 +2596,8 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
                        mcp_modules: Optional[List[str]] = None,
                        skill_roots: Optional[List[str]] = None,
                        code_exec: Optional[bool] = None,
-                       input_file_ids: Optional[List[str]] = None) -> AnalyzeFn:
+                       input_file_ids: Optional[List[str]] = None,
+                       enabled_search_methods: Optional[List[str]] = None) -> AnalyzeFn:
     """Run the GIS/data analysis workflow (QGIS + spatial-analysis MCP tools)."""
 
     def fn(query: str, evidence: List[Any], state: SupervisorState) -> Any:
@@ -2668,6 +2669,30 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
             tools.extend(make_admin_boundary_tools())
         except Exception:
             pass
+        # `add_map_layer` is the ONLY geo tool that needs no uploaded file: it registers a layer
+        # from geometry the peer already has. Bound unconditionally so "show me X on the map"
+        # can be delivered with nothing attached — previously the peer had no way to deliver,
+        # and the corrective retry was gated on the same flag, so the gap was silent.
+        #
+        # Only that one tool. The other five (inspect_vector, reproject_vector,
+        # vector_spatial_join, vector_to_geojson, render_map_image) all need a vector file that
+        # exists only on an upload turn, and render_map_image is the static-PNG route the map
+        # observation exists to discourage: hoisting the whole factory costs ~1,479 tokens every
+        # turn against ~299 for this.
+        #
+        # The corrective map retry stays gated on input_file_ids ON PURPOSE. Three separate
+        # changes now make it fire more readily (turn-scoping, success-required delivery, this),
+        # and _WANTS_MAP_RE matches a bare "on the map" — so un-gating it would have an ordinary
+        # follow-up told the map received nothing and redundantly re-add a layer already on
+        # screen. The tool is available; we simply do not nag.
+        try:
+            from agent_runtime.langchain_geo_tools import make_langchain_geo_tools
+
+            if not input_file_ids:
+                tools.extend(t for t in make_langchain_geo_tools(default_input_file_ids=None)
+                             if str(getattr(t, "name", "")) == "add_map_layer")
+        except Exception:
+            pass
         if input_file_ids:
             from agent_runtime.langchain_file_tools import make_langchain_file_tools
 
@@ -2736,8 +2761,13 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
             try:
                 from agent_runtime.langchain_granular_tools import make_langchain_granular_tools
 
+                # The allowlist a request set with enabledSearchMethods was ignored here, so
+                # in unified mode the merged peer got the FULL retrieval set regardless — the
+                # one place the search node honours it (orchestration passes it there) and this
+                # one did not.
                 tools = _dedup_tools([*tools, *make_langchain_granular_tools(
-                    include_file_tools=False, session_id=state.get("thread_id"))])
+                    include_file_tools=False, session_id=state.get("thread_id"),
+                    enabled_search_methods=enabled_search_methods)])
             except Exception:  # noqa: BLE001 - never let the merge break the analyse peer
                 pass
         executor = build_agent_executor(
@@ -2957,6 +2987,30 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         try:
             from agent_runtime.admin_boundary_tools import make_admin_boundary_tools
             tools.extend(make_admin_boundary_tools())
+        except Exception:
+            pass
+        # `add_map_layer` is the ONLY geo tool that needs no uploaded file: it registers a layer
+        # from geometry the peer already has. Bound unconditionally so "show me X on the map"
+        # can be delivered with nothing attached — previously the peer had no way to deliver,
+        # and the corrective retry was gated on the same flag, so the gap was silent.
+        #
+        # Only that one tool. The other five (inspect_vector, reproject_vector,
+        # vector_spatial_join, vector_to_geojson, render_map_image) all need a vector file that
+        # exists only on an upload turn, and render_map_image is the static-PNG route the map
+        # observation exists to discourage: hoisting the whole factory costs ~1,479 tokens every
+        # turn against ~299 for this.
+        #
+        # The corrective map retry stays gated on input_file_ids ON PURPOSE. Three separate
+        # changes now make it fire more readily (turn-scoping, success-required delivery, this),
+        # and _WANTS_MAP_RE matches a bare "on the map" — so un-gating it would have an ordinary
+        # follow-up told the map received nothing and redundantly re-add a layer already on
+        # screen. The tool is available; we simply do not nag.
+        try:
+            from agent_runtime.langchain_geo_tools import make_langchain_geo_tools
+
+            if not input_file_ids:
+                tools.extend(t for t in make_langchain_geo_tools(default_input_file_ids=None)
+                             if str(getattr(t, "name", "")) == "add_map_layer")
         except Exception:
             pass
         if input_file_ids:

@@ -1174,7 +1174,20 @@ def build_agent_executor(
 ) -> Any:
     """Create a LangGraph agent (``create_agent``) wired with the given tools."""
     if preloaded_tools is not None:
-        tools = preloaded_tools
+        # `skill_roots` was accepted and then forwarded ONLY into _collect_tools, which this
+        # branch skips — so a caller that passed both (the analyze peer does) silently got no
+        # list_available_skills / load_skill at all. Fixed at the boundary rather than the call
+        # sites: there are three callers and the next one would forget too. The dedup makes it a
+        # no-op for the code peer, which already calls make_skill_tools itself.
+        tools = list(preloaded_tools)
+        try:
+            from agent_runtime.skills import make_skill_tools
+
+            have = {str(getattr(t, "name", "")) for t in tools}
+            tools += [t for t in make_skill_tools(skill_roots=skill_roots)
+                      if str(getattr(t, "name", "")) not in have]
+        except Exception:      # skills are optional; never fail executor construction over them
+            pass
     else:
         tools = _collect_tools(
             tool_strategy=tool_strategy,
