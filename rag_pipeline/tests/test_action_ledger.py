@@ -747,3 +747,71 @@ def test_every_retrieval_producer_is_in_the_rename_set():
     for tool in ("baseline_sweep", "web_fallback", "related_elements", "element_lookup",
                  "popularity_ranking", "keyword_search", "overpass_search"):
         assert tool in g._LEDGER_SEARCH_TOOLS, tool
+
+
+# --- what the user is looking at -----------------------------------------------------------
+#
+# A projection of the ledger rows, not new state: it regroups the map_layer and outputs fields
+# _ledger_rows already sets. Worth stating separately because the per-row form was not usable as
+# an answer — two mechanisms had to reconstruct exactly this by hand. The map-delivery predicate
+# walked rows hunting for a layer, and _refs_in_history regexed the CONVERSATION TEXT to recover
+# download links, because nothing carried them forward. And the map is persistent, so "no map was
+# produced" is a false statement the answerer previously had no way to check.
+
+DELIVERED = [
+    {"tool": "admin_boundary", "args": {"area": "Champaign"},
+     "facts": {"feature_count": 48}, "map_layer": "48 tracts"},
+    {"tool": "embed_zones", "args": {"model": "gse"}, "facts": {"dims": 64},
+     "map_layer": "gse zone groups (k=3)", "outputs": "gse_zone_embeddings.csv"},
+]
+
+
+def test_the_note_says_what_is_still_on_the_map():
+    note = g._prior_actions_note(DELIVERED)
+    assert "WHAT THE USER IS LOOKING AT" in note
+    assert "48 tracts" in note and "gse zone groups (k=3)" in note
+    assert "gse_zone_embeddings.csv" in note
+
+
+def test_it_is_derived_from_the_rows_not_stored_separately():
+    """So it costs almost nothing on top of a note that is being sent anyway."""
+    lines = g._visible_state_lines(DELIVERED)
+    assert len(lines) == 2
+    assert len("\n".join(lines)) < 200
+
+
+def test_nothing_visible_means_no_section():
+    assert g._visible_state_lines([{"tool": "keyword_search", "args": {"query": "q"}}]) == []
+    note = g._prior_actions_note([{"tool": "keyword_search", "args": {"query": "q"}}])
+    assert "WHAT THE USER IS LOOKING AT" not in note
+
+
+def test_a_failed_call_delivers_nothing_to_look_at():
+    """The consistency that matters: §2 and §3 are built from the same rows, so a failed row
+    must not claim a layer in one and be excluded from the other."""
+    rows = [*DELIVERED,
+            {"tool": "regionalize", "args": {"n_regions": 5}, "failed": True,
+             "error": "weights required", "map_layer": "phantom", "outputs": "phantom.csv"}]
+    note = g._prior_actions_note(rows)
+    assert "FAILED regionalize" in note
+    assert "phantom" not in note, "a failed call must not claim a layer or an output anywhere"
+    assert "48 tracts" in note, "and the real deliveries must survive"
+
+
+def test_duplicates_are_collapsed():
+    rows = [*DELIVERED, dict(DELIVERED[0])]
+    lines = g._visible_state_lines(rows)
+    assert lines[0].count("48 tracts") == 1
+
+
+def test_the_auditor_sees_the_visible_state_too():
+    """"the layer is on your map" is exactly the claim it used to flag as unsupported."""
+    import inspect
+
+    src = inspect.getsource(g.build_supervisor_graph)
+    assert "*_visible_state_lines(_rows)" in src, "the auditor's rendering must include it"
+
+
+def test_a_malformed_row_is_harmless():
+    for junk in ([None], ["x"], [{}], [{"map_layer": None}], None):
+        assert isinstance(g._visible_state_lines(junk), list)

@@ -668,16 +668,55 @@ def _ledger_lines(rows: List[Dict[str, Any]]) -> List[str]:
             bits.append(f"-> DID NOT RUN: {r.get('error') or 'the tool returned ok=false'}")
         elif r.get("facts"):
             bits.append("-> " + ", ".join(_fact_phrase(k, v) for k, v in r["facts"].items()))
-        if r.get("outputs"):
-            bits.append(f"[produced {r['outputs']}]")
-        if r.get("map_layer"):
-            bits.append(f"[on the map as {r['map_layer']!r}]")
+        # A failed call delivered nothing. Rendering its layer or its outputs would contradict
+        # the visible-state section built from these same rows, and it is the same bug class as
+        # a failed call wearing a successful one's result.
+        if not r.get("failed"):
+            if r.get("outputs"):
+                bits.append(f"[produced {r['outputs']}]")
+            if r.get("map_layer"):
+                bits.append(f"[on the map as {r['map_layer']!r}]")
         lines.append("- " + " ".join(bits))
     return lines
 
 
 # The section header the synthesizer prompt names, so the two cannot drift apart.
 _LEDGER_HEADING = "What this conversation already did (tool records from EARLIER turns)"
+
+
+def _visible_state_lines(rows: List[Dict[str, Any]]) -> List[str]:
+    """What the user can still SEE and download from earlier turns.
+
+    A projection of the ledger rows, not new state: it regroups the `map_layer` and `outputs`
+    fields ``_ledger_rows`` already sets, so it costs almost nothing on top of a note that is
+    being sent anyway.
+
+    Worth stating separately because the per-row form was not usable as an answer. Two
+    mechanisms had to reconstruct exactly this by hand: the map-delivery predicate walked rows
+    hunting for a layer, and ``_refs_in_history`` regexed the CONVERSATION TEXT to recover
+    download links, because nothing carried them forward. And the map is persistent — a layer
+    added in turn 2 is still on screen in turn 4 — so "no map was produced" is a false statement
+    the answerer had no way to check.
+
+    Only earlier turns, matching the note's heading: this turn's own layers and files are in the
+    answer path already.
+    """
+    layers, files = [], []
+    for row in rows or []:
+        if not isinstance(row, dict) or row.get("failed"):
+            continue                       # a failed call delivered nothing to look at
+        layer = row.get("map_layer")
+        if layer and str(layer) not in layers:
+            layers.append(str(layer))
+        out = row.get("outputs")
+        if out and str(out) not in files:
+            files.append(str(out))
+    lines = []
+    if layers:
+        lines.append("- still on the user's map from earlier turns: " + ", ".join(layers))
+    if files:
+        lines.append("- already produced and downloadable: " + ", ".join(files))
+    return lines
 
 
 def _prior_actions_note(rows: List[Dict[str, Any]]) -> Optional[str]:
@@ -696,7 +735,17 @@ def _prior_actions_note(rows: List[Dict[str, Any]]) -> Optional[str]:
             "from here rather than saying the information is unavailable, and do not re-derive "
             "it. A line marked FAILED records a tool that did NOT work: that work was never "
             "done, its result does not exist, and re-running it may be the right move — never "
-            "describe it as completed.\n" + "\n".join(lines))
+            "describe it as completed.\n" + "\n".join(lines) + _visible_state_note(rows))
+
+
+def _visible_state_note(rows: List[Dict[str, Any]]) -> str:
+    """The visible-state section, appended to the note when there is anything to see."""
+    visible = _visible_state_lines(rows)
+    if not visible:
+        return ""
+    return ("\n\nWHAT THE USER IS LOOKING AT (already delivered — do not say it was not "
+            "produced, and do not re-add a layer that is already there):\n"
+            + "\n".join(visible))
 
 
 def _prior_actions(state: SupervisorState) -> List[Dict[str, Any]]:
@@ -3532,7 +3581,10 @@ def build_supervisor_graph(
             # The answering model needs the ledger too, not just the router: the router only
             # decides whether to search, while THIS is what decides whether the answer is right.
             _history = list(state.get("chat_history") or [])
-            _ledger_text = "\n".join(_ledger_lines(_rows))   # THE single rendering
+            # THE single rendering, and the auditor gets the visible-state summary too: "the
+            # layer is on your map" is precisely the claim it used to flag as unsupported,
+            # because nothing in its evidence said a layer from an earlier turn still exists.
+            _ledger_text = "\n".join([*_ledger_lines(_rows), *_visible_state_lines(_rows)])
             _note = _prior_actions_note(_rows)
             answer = do_synthesize(q, evidence, ar, cr, _history, _note)
             # The auditor must be given the SAME earlier-turn tool records the answerer was
