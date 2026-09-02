@@ -106,10 +106,14 @@ def test_undercount_ratio_exposes_the_estimator_gap(caplog):
 
 
 def test_ratio_denominator_includes_the_system_prompt(caplog):
-    """The provider counts the system prompt; a denominator that omits it reports a phantom
-    overcount. Measured live: at messages=1 the estimate was essentially schemas alone (4,397)
-    against a real 3,255, purely because ~1,000 tokens of system prompt were missing from the
-    comparison rather than from the payload."""
+    """The provider counts the system prompt, so the denominator must too.
+
+    The magnitude turned out to be smaller than the guess that prompted this: the deployed
+    default executor's prompt is 95 tokens, so including it moved the live ratio only 0.736 ->
+    0.720. The fix is still required — a peer's prompt is an order of magnitude larger, and a
+    denominator that does not mirror what the provider counted is not a measurement — but the
+    real finding underneath was the SCHEMA estimate, which overstates by ~40% (4,397 estimated
+    against ~3,130 actual for the same 24 tools)."""
     reply = AIMessage(content="ok", usage_metadata={
         "input_tokens": 500, "output_tokens": 1, "total_tokens": 501})
     _run(caplog, reply, tools=[alpha])
