@@ -189,13 +189,52 @@ def test_a_rejected_call_still_logs(caplog):
     assert "real_input_tokens" not in lines[0]
 
 
-def test_the_deployed_default_model_has_a_measured_window():
-    """gpt-5.6-luna matched no prefix and silently inherited the 65,536 floor, capping messages
-    at ~50k of a real 922,000-token limit (measured 2026-09-02 from the provider's own error)."""
-    class M:
-        model_name = "gpt-5.6-luna"
+# Measured 2026-09-02 by probing every chat model the deployed key can see with a deliberately
+# oversized request and reading the limit out of the provider's rejection. These are the ground
+# truth this table exists to encode, so the test is the measurement, not a restatement of code.
+MEASURED_WINDOWS = {
+    "gpt-5.6-luna": 922_000, "gpt-5.6-sol": 922_000, "gpt-5.6-terra": 922_000,
+    "gpt-5.5": 922_000, "gpt-5.4": 922_000,
+    "gpt-5.4-mini": 272_000, "gpt-5.2": 272_000, "gpt-5-2025-08-07": 272_000,
+    "gpt-5-mini-2025-08-07": 272_000, "gpt-5-nano-2025-08-07": 272_000,
+    "gpt-4.1-2025-04-14": 1_047_576, "gpt-4.1-mini-2025-04-14": 1_047_576,
+    "gpt-4.1-nano-2025-04-14": 1_047_576,
+    "gpt-4o-2024-11-20": 128_000, "gpt-4o-2024-08-06": 128_000, "gpt-4o-mini": 128_000,
+    "o4-mini-2025-04-16": 200_000, "o3-2025-04-16": 200_000, "o3-mini-2025-01-31": 200_000,
+}
 
-    assert ef._model_context_window(M()) == 922_000
+
+@pytest.mark.parametrize("model_id,window", sorted(MEASURED_WINDOWS.items()))
+def test_every_measured_window_resolves_correctly(model_id, window):
+    """Three of the table's original entries were wrong, two of them badly:
+    gpt-4.1 was assumed 128,000 against a real 1,047,576 (8.2x), o4-mini 128,000 against
+    200,000, and gpt-5.6-luna - the deployed default - took the 65,536 floor against 922,000."""
+    class M:
+        model_name = model_id
+
+    assert ef._model_context_window(M()) == window
+
+
+def test_the_mini_variant_does_not_inherit_its_family_window():
+    """The specific trap prefix matching creates here: gpt-5.4-mini (272,000) extends
+    gpt-5.4 (922,000). Reversed, every mini call is handed 3.4x its real window - a 400."""
+    class Mini:
+        model_name = "gpt-5.4-mini"
+
+    class Full:
+        model_name = "gpt-5.4"
+
+    assert ef._model_context_window(Mini()) == 272_000
+    assert ef._model_context_window(Full()) == 922_000
+
+
+def test_an_unlisted_gpt5_lands_on_the_conservative_family_size():
+    """A future gpt-5.x must waste context, not overrun: the bare gpt-5 entry is last in the
+    family and carries 272,000, the SMALLER of the two observed tiers."""
+    class M:
+        model_name = "gpt-5.9-unreleased"
+
+    assert ef._model_context_window(M()) == 272_000
 
 
 def test_an_unlisted_model_warns_instead_of_silently_taking_the_floor(caplog):

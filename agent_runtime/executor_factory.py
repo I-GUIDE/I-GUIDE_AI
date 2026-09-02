@@ -1079,20 +1079,38 @@ DEFAULT_CONTEXT_BUDGET = 48_000
 # A flat budget was wrong in BOTH directions: 48,000 throws away context that fits comfortably
 # in gpt-4o's 128k, and on gpt-oss:120b's 65,536 it leaves headroom that the tool schemas and
 # system prompt then eat without anything counting them.
-# Longest prefix first: a specific id must win over its family. No provider here reports a
-# window (OpenAI's /v1/models returns only id/created/owned_by/shutdown_date), so every number
-# is CONFIGURED, and each one below was measured or quoted from a provider error rather than
-# assumed. Guessing high produces the 400 this machinery exists to prevent.
+# Every number here was MEASURED, not assumed: no provider in this stack reports a context
+# window (OpenAI's /v1/models returns only id/created/owned_by/shutdown_date), so each was
+# obtained by sending a deliberately oversized request and reading the provider's rejection,
+# which names the limit. Measured 2026-09-02 across all 26 chat models the deployed key can
+# see. Guessing high produces the 400 this machinery exists to prevent.
+#
+# ORDER IS LOAD-BEARING: matching is by prefix, first hit wins, so a specific id MUST precede
+# the family it belongs to. The real trap here is gpt-5.4-mini (272,000), which is a prefix
+# extension of gpt-5.4 (922,000) — reversed, every mini call would be handed 3.4x its real
+# window. The family sizes do NOT follow version order, so no broad "gpt-5" rule is safe:
+# gpt-5.4 is 922,000 while gpt-5.2 and gpt-5.4-mini are 272,000.
 _MODEL_WINDOWS = (
-    # Measured 2026-09-02 by an oversized request: "Input tokens exceed the configured limit
-    # of 922000 tokens." This is the DEPLOYED DEFAULT model and it matched no prefix before,
-    # so it silently inherited 65,536 - capping messages at ~50k of a ~922k window.
-    ("gpt-5.6-luna", 922_000),
-    ("gpt-oss", 65_536),
-    ("gpt-4o", 128_000),
-    ("gpt-4.1", 128_000),
-    ("o4-mini", 128_000),
-    ("claude-", 200_000),
+    # --- measured: the 922,000 tier (includes the deployed default, gpt-5.6-luna) ---
+    ("gpt-5.6-", 922_000),        # luna, sol, terra all measured at 922,000
+    ("gpt-5.5", 922_000),
+    # --- measured: the 272,000 tier. gpt-5.4-mini MUST stay ahead of gpt-5.4 ---
+    ("gpt-5.4-mini", 272_000),
+    ("gpt-5.4", 922_000),
+    ("gpt-5.2", 272_000),
+    ("gpt-5-mini", 272_000),
+    ("gpt-5-nano", 272_000),
+    # Last of the family on purpose: an unlisted future gpt-5.x lands on the family's
+    # CONSERVATIVE size rather than its largest, so a new model wastes context instead of 400ing.
+    ("gpt-5", 272_000),
+    # --- measured: earlier families. gpt-4.1 was assumed 128,000 and is really 1,047,576 ---
+    ("gpt-4.1", 1_047_576),       # mini and nano measured identical
+    ("gpt-4o", 128_000),          # the one prior assumption that was correct; mini identical
+    ("o4-mini", 200_000),         # was assumed 128,000
+    ("o3", 200_000),              # covers o3-mini
+    # --- quoted, not measured here ---
+    ("gpt-oss", 65_536),          # from AnvilGPT's own error: "exceeds ... (65,536)"
+    ("claude-", 200_000),         # not reachable with this key; unverified
 )
 # Deliberately the SMALLEST window we have seen, because being wrong low only wastes context
 # while being wrong high is a user-visible 400. It is a floor, not an estimate — which is
