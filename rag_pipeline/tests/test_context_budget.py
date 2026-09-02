@@ -16,20 +16,39 @@ from langchain_core.messages.utils import count_tokens_approximately
 from agent_runtime import executor_factory as ef
 
 
+class _Model:
+    def __init__(self, model_name="gpt-oss:120b"):
+        self.model_name = model_name
+
+
 class _Req:
-    def __init__(self, messages):
+    """The shape a real ModelRequest has — and the reason the accounting bug survived.
+
+    `messages` is annotated "excluding system message" upstream, and `tools` is a sibling
+    field: both the system prompt and every tool schema are added downstream in langchain's
+    model node. The old stub carried ONLY `messages`, and it put a SystemMessage inside them,
+    so a middleware that pinned SystemMessages and counted only `messages` looked correct here
+    while being a no-op that undercounted the real payload by the larger half.
+    """
+
+    def __init__(self, messages, *, system_message=None, tools=None, model=None):
         self.messages = messages
+        self.system_message = system_message
+        self.tools = list(tools or [])
+        self.model = model or _Model()
 
     def override(self, messages):
-        return _Req(messages)
+        return _Req(messages, system_message=self.system_message,
+                    tools=self.tools, model=self.model)
 
 
-def _send(messages, budget, monkeypatch):
-    monkeypatch.setattr(ef, "DEFAULT_CONTEXT_BUDGET", budget)
-    monkeypatch.delenv(ef.CONTEXT_BUDGET_ENV, raising=False)
+def _send(messages, budget, monkeypatch, **req_kw):
+    """Drive the middleware with an EXPLICIT ceiling, via the env override."""
+    monkeypatch.setenv(ef.CONTEXT_BUDGET_ENV, str(budget))
     mw = ef._make_context_budget_middleware()
     seen = {}
-    mw.wrap_model_call(_Req(list(messages)), lambda r: seen.setdefault("out", r.messages))
+    mw.wrap_model_call(_Req(list(messages), **req_kw),
+                       lambda r: seen.setdefault("out", r.messages))
     return seen["out"]
 
 
@@ -96,17 +115,63 @@ def test_an_oversized_thread_is_brought_under_budget(monkeypatch):
     assert len(out) < len(msgs)
 
 
-def test_the_system_prompt_and_the_current_question_always_survive(monkeypatch):
-    """Losing either makes the call pointless rather than merely shorter."""
-    out = _send(_fat_thread(), 2000, monkeypatch)
-    assert any(isinstance(m, SystemMessage) for m in out)
-    assert out[-1].content == "what resolution was that?"
+def test_the_current_question_always_survives(monkeypatch):
+    """The system prompt is not in `messages` at all, so it cannot be trimmed — and the old
+    "pin every SystemMessage" behaviour was a no-op. What must survive is the last HUMAN
+    message: the question, whose loss makes the call pointless."""
+    out = _send(_fat_thread(), 3000, monkeypatch,
+                system_message=SystemMessage("you are an agent"))
+    humans = [m for m in out if isinstance(m, HumanMessage)]
+    assert humans, "the question must survive"
+    assert humans[-1].content == "what resolution was that?"
+
+
+def test_the_system_prompt_and_tool_schemas_are_counted(monkeypatch):
+    """They are the larger half of the analyze peer's request and were counted as zero."""
+    tool = {"type": "function", "function": {
+        "name": "t", "description": "d" * 3000, "parameters": {"type": "object", "properties": {}}}}
+    bare = ef._overhead_tokens(_Req([]))
+    loaded = ef._overhead_tokens(_Req([], system_message=SystemMessage("s" * 4000), tools=[tool]))
+    assert bare == 0
+    assert loaded > 1000, f"overhead measured only {loaded} tokens"
+
+
+def test_the_ceiling_is_derived_per_model(monkeypatch):
+    """A flat budget was wrong in both directions: it discarded context that fits in gpt-4o's
+    128k while leaving gpt-oss's 65,536 to be overrun by the schemas nothing counted."""
+    monkeypatch.delenv(ef.CONTEXT_BUDGET_ENV, raising=False)
+    monkeypatch.delenv("AGENT_MODEL_CONTEXT_WINDOW", raising=False)
+    small = ef._derive_budget(_Req([], model=_Model("gpt-oss:120b")))
+    large = ef._derive_budget(_Req([], model=_Model("gpt-4o-2024-11-20")))
+    assert large > small, f"gpt-4o ({large}) must get more room than gpt-oss ({small})"
+    assert small < 65_536 and large < 128_000, "the output reserve must come off the top"
+
+
+def test_the_bound_tools_shrink_the_ceiling(monkeypatch):
+    """Per PEER, not just per model: the analyze peer binds far more schemas than the code peer."""
+    monkeypatch.delenv(ef.CONTEXT_BUDGET_ENV, raising=False)
+    fat = [{"type": "function", "function": {
+        "name": f"t{i}", "description": "d" * 2000,
+        "parameters": {"type": "object", "properties": {}}}} for i in range(20)]
+    assert ef._derive_budget(_Req([], tools=fat)) < ef._derive_budget(_Req([]))
+
+
+def test_an_unknown_model_gets_the_observed_conservative_window(monkeypatch):
+    """Guessing high produces the 400 this mechanism exists to prevent."""
+    monkeypatch.delenv("AGENT_MODEL_CONTEXT_WINDOW", raising=False)
+    assert ef._model_context_window(_Model("some-new-model")) == ef._DEFAULT_WINDOW
+    monkeypatch.setenv("AGENT_MODEL_CONTEXT_WINDOW", "200000")
+    assert ef._model_context_window(_Model("some-new-model")) == 200_000
 
 
 def test_the_oldest_messages_go_first(monkeypatch):
     """A follow-up is nearly always about recent work, and the turn ledger re-injects the
     older facts at ~130 tokens instead of the thousands the raw tool results cost."""
-    out = _send(_fat_thread(pairs=20), 6000, monkeypatch)
+    # Sized from measurement: one realistic GeoJSON tool result is ~5,366 approx tokens, ~9,658
+    # after the payload-safety markup, so a ceiling has to be tens of thousands for ANY of them
+    # to fit. The old 6,000 was sized for "x" * 4000 filler and now keeps nothing but the
+    # question — which is correct behaviour, and no longer tests ordering.
+    out = _send(_fat_thread(pairs=20), 34_000, monkeypatch)
     kept_ids = {getattr(m, "tool_call_id", None) for m in out}
     assert "c0" not in kept_ids            # oldest dropped
     assert "c19" in kept_ids               # newest kept
@@ -128,8 +193,11 @@ def test_the_trimmed_list_has_no_orphaned_tool_results(monkeypatch):
 
 
 def test_trimming_can_be_disabled(monkeypatch):
+    """A NEGATIVE value disables it. 0 / unset now means "derive from the model", so the old
+    "0 disables" reading would have silently switched trimming off for every deployment that
+    had set it to zero."""
     msgs = _fat_thread()
-    monkeypatch.setenv(ef.CONTEXT_BUDGET_ENV, "0")
+    monkeypatch.setenv(ef.CONTEXT_BUDGET_ENV, "-1")
     mw = ef._make_context_budget_middleware()
     seen = {}
     mw.wrap_model_call(_Req(list(msgs)), lambda r: seen.setdefault("out", r.messages))
@@ -137,11 +205,11 @@ def test_trimming_can_be_disabled(monkeypatch):
 
 
 def test_the_budget_env_tolerates_junk(monkeypatch):
-    for junk in ("", "   ", "not-a-number"):
-        monkeypatch.setenv(ef.CONTEXT_BUDGET_ENV, junk)
-        assert ef._context_budget() == ef.DEFAULT_CONTEXT_BUDGET
-    monkeypatch.setenv(ef.CONTEXT_BUDGET_ENV, "12000")
-    assert ef._context_budget() == 12000
+    """Junk falls back to derivation rather than to a flat number or a crash."""
+    monkeypatch.setenv(ef.CONTEXT_BUDGET_ENV, "not-a-number")
+    assert ef._context_budget() == 0                      # 0 == derive
+    monkeypatch.delenv("AGENT_MODEL_CONTEXT_WINDOW", raising=False)
+    assert ef._derive_budget(_Req([])) > 4_000
 
 
 def test_the_counter_is_the_approximate_one_not_the_model_one():

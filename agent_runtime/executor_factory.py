@@ -1070,16 +1070,125 @@ def _make_history_repair_middleware() -> Any:
 CONTEXT_BUDGET_ENV = "AGENT_CONTEXT_BUDGET_TOKENS"
 DEFAULT_CONTEXT_BUDGET = 48_000
 
+# Context windows, by model-id prefix. CONFIGURED, not detected: no provider here reports its
+# window, and the only evidence in this repo for the deployed default is a quoted provider error
+# ("maximum context length (65,536)"). So the fallback is that observed value — the conservative
+# choice, since guessing high produces the 400 this whole mechanism exists to prevent — and a
+# deployment that knows better sets AGENT_MODEL_CONTEXT_WINDOW.
+#
+# A flat budget was wrong in BOTH directions: 48,000 throws away context that fits comfortably
+# in gpt-4o's 128k, and on gpt-oss:120b's 65,536 it leaves headroom that the tool schemas and
+# system prompt then eat without anything counting them.
+_MODEL_WINDOWS = (
+    ("gpt-oss", 65_536),
+    ("gpt-4o", 128_000),
+    ("gpt-4.1", 128_000),
+    ("o4-mini", 128_000),
+    ("claude-", 200_000),
+)
+_DEFAULT_WINDOW = 65_536
+# Output has to fit in the same window on most providers, and the AnvilGPT path sets no
+# max_tokens at all, so reserve room rather than discovering it as a truncated answer.
+_OUTPUT_RESERVE_ENV = "AGENT_CONTEXT_OUTPUT_RESERVE"
+_DEFAULT_OUTPUT_RESERVE = 4_096
+# count_tokens_approximately is chars/4. Measured against o200k_base, that UNDERCOUNTS the
+# payloads this agent actually moves: 1.72x for GeoJSON boundaries, 2.25x for per-zone embedding
+# vectors (it overcounts prose slightly). A ceiling computed from a real window using an
+# undercounting estimate is still unsafe, so treat the estimate as optimistic by this factor.
+_PAYLOAD_SAFETY_ENV = "AGENT_CONTEXT_PAYLOAD_SAFETY"
+_DEFAULT_PAYLOAD_SAFETY = 1.8
 
-def _context_budget() -> int:
-    """Token ceiling for one model call, or 0 to disable trimming."""
-    raw = (os.getenv(CONTEXT_BUDGET_ENV) or "").strip()
+
+def _int_env(name: str, default: int) -> int:
+    raw = (os.getenv(name) or "").strip()
     if not raw:
-        return DEFAULT_CONTEXT_BUDGET
+        return default
     try:
         return max(0, int(float(raw)))
     except (TypeError, ValueError):
-        return DEFAULT_CONTEXT_BUDGET
+        return default
+
+
+def _model_context_window(model: Any = None) -> int:
+    """This model's window: explicit env, else the prefix table, else the observed default."""
+    override = _int_env("AGENT_MODEL_CONTEXT_WINDOW", 0)
+    if override:
+        return override
+    name = ""
+    for attr in ("model_name", "model", "model_id"):
+        value = getattr(model, attr, None)
+        if isinstance(value, str) and value:
+            name = value.lower()
+            break
+    for prefix, window in _MODEL_WINDOWS:
+        if name.startswith(prefix):
+            return window
+    return _DEFAULT_WINDOW
+
+
+def _context_budget() -> int:
+    """Explicit override for the message ceiling, or 0 when none is set.
+
+    0 no longer means "disabled": it means "derive it from the model and the bound tools", which
+    is what _derive_budget does per request. An explicit value still wins, and a NEGATIVE one
+    disables trimming for a deployment that wants the raw behaviour back.
+    """
+    raw = (os.getenv(CONTEXT_BUDGET_ENV) or "").strip()
+    if not raw:
+        return 0
+    try:
+        return int(float(raw))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _overhead_tokens(request: Any) -> int:
+    """The parts of the payload the old accounting could not see.
+
+    ModelRequest.messages is annotated "excluding system message", and `tools` is a sibling
+    field — both are added downstream in langchain's model node. So the previous count omitted
+    the system prompt AND every tool schema, which for the analyze peer with an upload is the
+    larger share of the request.
+    """
+    from langchain_core.messages.utils import count_tokens_approximately
+
+    total = 0
+    system = getattr(request, "system_message", None)
+    if system is not None:
+        try:
+            total += count_tokens_approximately([system])
+        except Exception:      # noqa: BLE001
+            pass
+    tools = list(getattr(request, "tools", None) or [])
+    if tools:
+        try:
+            from langchain_core.utils.function_calling import convert_to_openai_tool
+
+            rendered = json.dumps([convert_to_openai_tool(t) for t in tools], default=str)
+            total += count_tokens_approximately([("user", rendered)])
+        except Exception:      # noqa: BLE001 - a tool that will not render is not worth a crash
+            pass
+    return total
+
+
+def _derive_budget(request: Any) -> int:
+    """The message ceiling for THIS request: window - output - overhead, or the explicit env."""
+    explicit = _context_budget()
+    if explicit:
+        return max(0, explicit)
+    window = _model_context_window(getattr(request, "model", None))
+    reserve = _int_env(_OUTPUT_RESERVE_ENV, _DEFAULT_OUTPUT_RESERVE)
+    ceiling = window - reserve - _overhead_tokens(request)
+    # Never trim to nothing: a floor keeps a coherent question+answer pair possible even when
+    # the bound schemas are enormous, and makes the failure a visible warning rather than an
+    # empty call.
+    if ceiling < 4_000:
+        logger.warning(
+            "context budget floor hit: window %d leaves only %d for messages after output "
+            "reserve and %d tokens of system prompt + tool schemas",
+            window, ceiling, _overhead_tokens(request))
+        return 4_000
+    return ceiling
 
 
 def _make_context_budget_middleware() -> Any:
@@ -1096,48 +1205,63 @@ def _make_context_budget_middleware() -> Any:
     instead of the thousands the raw tool results cost.
     """
     from langchain.agents.middleware import wrap_model_call
-    from langchain_core.messages import SystemMessage
+    from langchain_core.messages import HumanMessage
     from langchain_core.messages.utils import count_tokens_approximately
 
-    budget = _context_budget()
+    safety = float(os.getenv(_PAYLOAD_SAFETY_ENV) or _DEFAULT_PAYLOAD_SAFETY) or 1.0
+
+    def _cost(msgs: Any) -> int:
+        """The estimate, marked up for how badly it undercounts real payloads."""
+        return int(count_tokens_approximately(msgs) * safety)
 
     @wrap_model_call
     def budget_context(request: Any, handler: Any) -> Any:
+        if _context_budget() < 0:
+            return handler(request)                 # explicitly disabled
+        # Per REQUEST, not per process: the ceiling depends on the model's window and on how
+        # many tool schemas THIS peer bound, and both vary. A flat 48,000 threw away context
+        # that fits in gpt-4o's 128k while leaving gpt-oss:120b's 65,536 to be overrun by the
+        # schemas nothing was counting.
+        budget = _derive_budget(request)
         if budget <= 0:
             return handler(request)
         messages = list(getattr(request, "messages", None) or [])
         if not messages:
             return handler(request)
         try:
-            total = count_tokens_approximately(messages)
+            total = _cost(messages)
         except Exception:  # noqa: BLE001 - counting must never break a call
             return handler(request)
         if total <= budget:
             return handler(request)
 
-        pinned = [m for m in messages if isinstance(m, SystemMessage)]
-        rest = [m for m in messages if not isinstance(m, SystemMessage)]
-        # The current question is the one message whose loss makes the call pointless.
-        tail = rest[-1:] if rest else []
-        body = rest[:-1] if rest else []
+        # request.messages EXCLUDES the system message (langchain prepends it downstream), so
+        # this filter found nothing and the "pin every system message" docstring described a
+        # no-op. Pin the last HUMAN message — the question, whose loss makes the call pointless —
+        # and keep the original order when reassembling, since in a ReAct loop the last human
+        # message is NOT last: tool-call pairs follow it, and reordering splits them.
+        anchor = next((m for m in reversed(messages) if isinstance(m, HumanMessage)), None)
+        if anchor is None:
+            anchor = messages[-1]
+        pinned_ids = {id(anchor)}
+        body = [m for m in messages if id(m) not in pinned_ids]
 
         try:
-            used = count_tokens_approximately(pinned + tail)
+            used = _cost([anchor])
         except Exception:  # noqa: BLE001
             return handler(request)
-        kept: List[Any] = []
+        kept_ids = set(pinned_ids)
         for msg in reversed(body):
             try:
-                size = count_tokens_approximately([msg])
+                size = _cost([msg])
             except Exception:  # noqa: BLE001
                 break
             if used + size > budget:
                 break
-            kept.append(msg)
+            kept_ids.add(id(msg))
             used += size
-        kept.reverse()
 
-        trimmed = [*pinned, *kept, *tail]
+        trimmed = [m for m in messages if id(m) in kept_ids]
         # A tool result whose call was dropped is a 400 on most providers; the repair
         # middleware beside this one exists for exactly that, so hand it a coherent list.
         try:
@@ -1146,9 +1270,22 @@ def _make_context_budget_middleware() -> Any:
             trimmed, _ = repair_tool_call_sequence(trimmed)
         except Exception:  # noqa: BLE001
             pass
+        if not trimmed:
+            # Repair is purely subtractive, so it can cascade the anchor away as an orphan and
+            # leave NOTHING — previously shipped as a question-less call while the log claimed a
+            # number well over budget.
+            trimmed = [anchor]
+            logger.warning("context budget: repair emptied the payload; sending the question only")
+        try:
+            after = _cost(trimmed)                  # the truth is the POST-repair count
+        except Exception:  # noqa: BLE001
+            after = used
         logger.info(
-            "context budget: trimmed %d message(s), ~%d -> ~%d tokens (budget %d)",
-            len(messages) - len(trimmed), total, used, budget,
+            "context budget: trimmed %d message(s), ~%d -> ~%d tokens (ceiling %d = window %d "
+            "- output reserve - %d overhead; x%.1f payload safety)",
+            len(messages) - len(trimmed), total, after, budget,
+            _model_context_window(getattr(request, "model", None)),
+            _overhead_tokens(request), safety,
         )
         return handler(request.override(messages=trimmed))
 
