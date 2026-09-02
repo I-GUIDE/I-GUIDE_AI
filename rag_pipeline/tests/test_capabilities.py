@@ -57,13 +57,21 @@ def test_new_tool_appears_without_touching_this_module(monkeypatch):
     """
     import agent_runtime.capabilities as cap
 
-    monkeypatch.setattr(cap, "collect_capability_inventory", lambda **k: {
-        "tools": [{"name": "brand_new_tool", "description": "Does a brand new thing."}],
-        "code_execution": {"enabled": True, "sandbox_backend": "docker"}, "skills": [],
-    })
-    out = cap.make_capability_tools()[0].invoke({"topic": ""})
-    assert "brand_new_tool" in out
-    assert "Does a brand new thing." in out
+    from langchain_core.tools import tool
+
+    @tool
+    def brand_new_tool(x: str) -> str:
+        """Does a brand new thing."""
+        return x
+
+    # Stub at the DISCOVERY seam, which is the real contract now: a registry appears and its
+    # tools come with it, without this module (or the tool) naming either.
+    monkeypatch.setattr(cap, "_discover_registry_factories",
+                        lambda: [("make_brand_new_tools", lambda: [brand_new_tool])])
+
+    introspect = cap.make_capability_tools(include_mcp_tools=False)[0]
+    assert "brand_new_tool" in introspect.invoke({})                      # in the area map
+    assert "Does a brand new thing." in introspect.invoke({"area": "brand_new"})
 
 
 def test_answer_is_llm_composed_not_authored(monkeypatch):

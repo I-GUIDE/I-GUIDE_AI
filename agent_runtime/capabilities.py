@@ -230,6 +230,52 @@ def _mechanical_summary(inventory: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _area_id(factory_name: str) -> str:
+    """A readable area id from a factory name — mechanical, so a new registry names itself.
+
+    make_rs_embed_zonal_tools -> rs_embed_zonal ; make_langchain_granular_tools -> granular
+    """
+    name = factory_name
+    for prefix in ("make_",):
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+    if name.endswith("_tools"):
+        name = name[: -len("_tools")]
+    if name.startswith("langchain_"):
+        name = name[len("langchain_"):]
+    return name or factory_name
+
+
+def _safe_inventory_bits(**config: Any) -> Dict[str, Any]:
+    """Deployment facts that belong in the overview (code exec on/off, installed skills)."""
+    inv = collect_capability_inventory(**config)
+    return {"code_execution": inv.get("code_execution"), "skills": inv.get("skills")}
+
+
+def _registry_areas(**config: Any) -> List[Dict[str, Any]]:
+    """The capability tree: one AREA per discovered registry, its tools beneath it.
+
+    The hierarchy is free — it is the registry structure the code already has, so a new module
+    becomes a new area with no branch defined anywhere. Nothing here is authored per tool.
+    """
+    skill_roots = config.get("skill_roots")
+    areas: List[Dict[str, Any]] = []
+    for factory_name, factory in _discover_registry_factories():
+        if factory_name == "make_langchain_mcp_tools":
+            entries = (_tool_entries(factory, modules=config.get("mcp_modules"))
+                       if config.get("include_mcp_tools") else [])
+        else:
+            entries = _tool_entries(
+                factory,
+                **_factory_kwargs(factory, default_input_file_ids=None,
+                                  enabled_search_methods=None, skill_roots=skill_roots,
+                                  session_id=None),
+            )
+        if entries:
+            areas.append({"area": _area_id(factory_name), "tools": entries})
+    return areas
+
+
 def make_capability_tools(**config: Any) -> List[Any]:
     """Tools that let the agent inspect its OWN tool surface.
 
@@ -244,55 +290,56 @@ def make_capability_tools(**config: Any) -> List[Any]:
     except Exception:
         return []
 
-    def list_my_capabilities(topic: str = "") -> str:
-        """List the tools THIS deployment actually has, to ground an answer about what you can do.
+    def list_my_capabilities(area: str = "", topic: str = "") -> str:
+        """Discover what THIS deployment can do. Start with no arguments, then drill in.
 
-        Pass a `topic` to filter — a domain word ("satellite imagery", "flood", "census"), a
-        format ("geojson", "csv"), or an action ("cluster", "buffer", "predict"). Matching is
-        LITERAL against the tool name and description, so the user's wording may miss: the full
-        list of tool names always comes back too, and you should scan it and call again with a
-        better word rather than answering from a weak match. Omit `topic` for everything.
+        No arguments returns the capability AREAS with the tool names in each — a small map of
+        the whole surface. Pass `area` (an id from that map) for full descriptions of just that
+        area. Pass `topic` to search names and descriptions across every area at once; matching
+        is LITERAL, so a topic that finds little may just be the wrong word — the area map comes
+        back every time so you can navigate instead of guessing.
         """
-        inv = collect_capability_inventory(**config)
-        tools = list(inv.get("tools") or [])
+        areas = _registry_areas(**config)
+        index = [{"area": a["area"], "tools": len(a["tools"]),
+                  "tool_names": [t["name"] for t in a["tools"]]} for a in areas]
+        # DISTINCT, not the sum of the per-area counts: a few tools are registered by more
+        # than one registry (select_by_attribute is in both aggregate and overlay), so summing
+        # would report 78 where 70 exist. Listing them under each area they live in is right
+        # for a map; the total must still be the truth.
+        distinct = {t["name"] for a in areas for t in a["tools"]}
+        out: Dict[str, Any] = {"areas": index, "total_tools": len(distinct),
+                               "listings": sum(a["tools"] for a in index)}
+
+        want = (area or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if want:
+            picked = [a for a in areas if want in a["area"]] or \
+                     [a for a in areas if a["area"] in want]
+            out["area_requested"] = area
+            out["detail"] = [{"area": a["area"], "tools": a["tools"]} for a in picked]
+            if not picked:
+                out["hint"] = "no such area; pick one of `areas` above"
+            return json.dumps(out, ensure_ascii=True, separators=(",", ":"))
+
         needle = (topic or "").strip().lower()
         if needle:
             words = [w for w in re.split(r"[^a-z0-9]+", needle) if len(w) > 2]
-            def hit(e: Dict[str, Any]) -> bool:
-                blob = f"{e.get('name','')} {e.get('description','')}".lower()
-                return any(w in blob for w in words) if words else False
-            tools = [e for e in tools if hit(e)]
-        every = list(inv.get("tools") or [])
-        out: Dict[str, Any] = {
-            "topic": topic or "(everything)",
-            "matched": len(tools),
-            "total_available": len(every),
-            "tools": [{"name": e.get("name"),
-                       "description": str(e.get("description") or "")[:_INVENTORY_DESC_CHARS]}
-                      for e in tools[:40]],
-            # ALWAYS the full name list — it is under a thousand characters and it is what
-            # stops a weak topic match from reading as the whole answer. Substring matching
-            # cannot bridge the user's words and the developer's: "satellite imagery" hit only
-            # 2 of the 8 embedding tools because their descriptions say "remote-sensing
-            # foundation model". With every name visible the agent can spot the right ones and
-            # ask again, instead of confidently answering from a third of the surface.
-            "all_tool_names": [str(e.get("name")) for e in every],
-            "code_execution": inv.get("code_execution"),
-            "skills": inv.get("skills"),
-        }
-        out["descriptions_shown"] = len(out["tools"])
-        if needle:
-            out["hint"] = ("a topic filter is a STARTING POINT, not the whole answer: matching "
-                           "is literal, so the user's words may not be the developer's. Scan "
-                           "all_tool_names and call again with a better word before concluding "
-                           "anything is unsupported.")
-        elif len(out["tools"]) < len(every):
-            # The same "always the last registries" cut, in miniature: descriptions are capped
-            # at 40 of 66, and the embedding tools are last. Say so, so the agent filters for
-            # the rest instead of treating the first 40 as the whole surface.
-            out["hint"] = (f"descriptions shown for {len(out['tools'])} of {len(every)} tools; "
-                           "all_tool_names lists them all — call again with a `topic` to get "
-                           "descriptions for the rest.")
+            matches = []
+            for a in areas:
+                for t in a["tools"]:
+                    blob = f"{t['name']} {t['description']}".lower()
+                    if any(w in blob for w in words):
+                        matches.append({"area": a["area"], **t})
+            out["topic"] = topic
+            out["matched"] = len(matches)
+            out["detail"] = matches[:40]
+            out["hint"] = ("matching is literal, so a small or empty result may be the wrong "
+                           "word rather than a missing capability — read `areas` and open the "
+                           "one that looks right before concluding anything is unsupported.")
+            return json.dumps(out, ensure_ascii=True, separators=(",", ":"))
+
+        out["hint"] = ("this is the map, not the detail: call again with `area` for full "
+                       "descriptions of the part you need.")
+        out["code_execution"] = _safe_inventory_bits(**config)
         return json.dumps(out, ensure_ascii=True, separators=(",", ":"))
 
     return [StructuredTool.from_function(list_my_capabilities)]

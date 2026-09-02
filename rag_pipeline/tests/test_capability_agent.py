@@ -30,39 +30,39 @@ def introspect():
 # --- introspection is live, filterable, and cannot mislead --------------------------------
 
 def test_the_agent_can_look_up_its_own_surface(introspect):
-    out = json.loads(introspect.invoke({"topic": ""}))
-    assert out["total_available"] > 40
-    # Descriptions are capped, and the cap lands on the LAST registries — the same cut that
-    # hid the embedding tools before. The name index must still carry them, and the response
-    # must say descriptions were omitted rather than implying 40 is the whole surface.
-    assert "embed_zones" in out["all_tool_names"]
-    if out["descriptions_shown"] < out["total_available"]:
-        assert "hint" in out and "of" in out["hint"]
+    """The overview is now the AREA MAP — every tool name, grouped, no descriptions."""
+    out = json.loads(introspect.invoke({}))
+    assert out["total_tools"] > 40
+    every = [n for a in out["areas"] for n in a["tool_names"]]
+    assert "embed_zones" in every
 
 
 def test_a_topic_narrows_the_result(introspect):
     out = json.loads(introspect.invoke({"topic": "cluster"}))
-    assert 0 < out["matched"] < out["total_available"]
+    assert 0 < out["matched"] < out["total_tools"]
     assert any("cluster" in t["name"] or "cluster" in (t["description"] or "").lower()
-               for t in out["tools"])
+               for t in out["detail"])
+    # every match says which area it came from, so the agent can open the neighbours
+    assert all(t.get("area") for t in out["detail"])
 
 
 def test_a_weak_topic_match_cannot_read_as_the_whole_answer(introspect):
     """The vocabulary gap is real: the embedding tools say "remote-sensing foundation model",
-    so "satellite imagery" matches only a couple of them by substring. Returning every tool
-    NAME regardless is what stops the agent answering from a third of the surface."""
+    so "satellite imagery" matches almost nothing by substring. The area map coming back every
+    time is what stops that reading as the whole answer — and unlike a flat list of 70 names it
+    tells the agent WHERE to look next."""
     out = json.loads(introspect.invoke({"topic": "satellite imagery"}))
-    names = set(out["all_tool_names"])
+    every = [n for a in out["areas"] for n in a["tool_names"]]
     for want in ("embed_region", "embed_zones", "segment_region", "fit_zone_model",
                  "predict_for_region", "embedding_change"):
-        assert want in names, f"{want} must be discoverable even on a weak match"
-    assert "hint" in out, "a filtered result must say the filter is only a starting point"
+        assert want in every, f"{want} must stay discoverable on a weak match"
+    assert "hint" in out
 
 
 def test_an_unsupported_topic_says_so_rather_than_guessing(introspect):
     out = json.loads(introspect.invoke({"topic": "quantum computing"}))
     assert out["matched"] == 0
-    assert out["all_tool_names"], "and still shows what IS available"
+    assert out["areas"], "and still shows what IS available"
 
 
 def test_the_payload_stays_small_enough_to_reason_over(introspect):
@@ -144,3 +144,90 @@ def test_the_route_passes_the_users_question(monkeypatch):
 
     src = inspect.getsource(orchestrator_graph)
     assert 'query=state.get("query")' in src
+
+
+# --- hierarchical discovery ----------------------------------------------------------------
+#
+# The tree is the registry structure the code already has, so a new module becomes a new area
+# with no branch defined anywhere. Nothing is authored per tool or per area.
+
+def test_no_arguments_returns_a_navigable_map_not_the_detail(introspect):
+    import json as _j
+
+    out = _j.loads(introspect.invoke({}))
+    assert len(out["areas"]) > 10
+    assert all(set(a) == {"area", "tools", "tool_names"} for a in out["areas"])
+    # a map, not a dump: no descriptions at this level
+    assert "description" not in _j.dumps(out["areas"])
+    assert len(_j.dumps(out)) < 6000, "the overview must stay cheap to read"
+
+
+def test_the_total_is_distinct_not_the_sum_of_areas(introspect):
+    """A few tools are registered by two registries, so summing per-area counts overstates."""
+    import json as _j
+
+    from agent_runtime.capabilities import collect_capability_inventory
+
+    out = _j.loads(introspect.invoke({}))
+    assert out["total_tools"] == len(collect_capability_inventory(include_mcp_tools=False)["tools"])
+    assert out["listings"] >= out["total_tools"]
+
+
+def test_an_area_can_be_opened_for_detail(introspect):
+    import json as _j
+
+    out = _j.loads(introspect.invoke({"area": "rs_embed_zonal"}))
+    names = [t["name"] for d in out["detail"] for t in d["tools"]]
+    assert "embed_zones" in names
+    assert all(t.get("description") for d in out["detail"] for t in d["tools"])
+
+
+def test_an_unknown_area_says_so_and_still_shows_the_map(introspect):
+    import json as _j
+
+    out = _j.loads(introspect.invoke({"area": "quantum"}))
+    assert out["detail"] == [] and "hint" in out
+    assert out["areas"], "the map must always come back so the agent can navigate"
+
+
+def test_a_weak_topic_match_leaves_the_agent_somewhere_to_go(introspect):
+    """The real recovery path: "satellite imagery" matches almost nothing by substring, but
+    rs_embed and rs_embed_zonal are visible in the map and can be opened."""
+    import json as _j
+
+    out = _j.loads(introspect.invoke({"topic": "satellite imagery"}))
+    area_ids = [a["area"] for a in out["areas"]]
+    assert any("embed" in a for a in area_ids)
+    assert "hint" in out and "literal" in out["hint"]
+
+
+def test_area_ids_are_derived_from_the_factory_name():
+    """So a new registry names its own area — nothing to add to a table."""
+    from agent_runtime.capabilities import _area_id
+
+    assert _area_id("make_rs_embed_zonal_tools") == "rs_embed_zonal"
+    assert _area_id("make_langchain_granular_tools") == "granular"
+    assert _area_id("make_admin_boundary_tools") == "admin_boundary"
+
+
+def test_a_new_registry_becomes_a_new_area(monkeypatch):
+    """The property that matters when the tool set changes."""
+    import json as _j
+
+    import agent_runtime.capabilities as cap
+    from langchain_core.tools import tool
+
+    @tool
+    def brand_new_thing(x: str) -> str:
+        """Does something nobody anticipated."""
+        return x
+
+    real = cap._discover_registry_factories
+    monkeypatch.setattr(cap, "_discover_registry_factories",
+                        lambda: [*real(), ("make_brand_new_tools", lambda: [brand_new_thing])])
+
+    out = _j.loads(cap.make_capability_tools(include_mcp_tools=False)[0].invoke({}))
+    assert "brand_new" in [a["area"] for a in out["areas"]]
+    detail = _j.loads(cap.make_capability_tools(include_mcp_tools=False)[0]
+                      .invoke({"area": "brand_new"}))
+    assert "brand_new_thing" in [t["name"] for d in detail["detail"] for t in d["tools"]]
