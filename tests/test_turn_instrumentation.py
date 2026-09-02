@@ -16,6 +16,7 @@ import logging
 
 import pytest
 from langchain.agents import create_agent
+from langchain.agents.middleware import wrap_model_call
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import tool
@@ -133,12 +134,93 @@ def test_absent_usage_is_labelled_not_silently_dropped(caplog):
     assert "real_input_tokens" not in line
 
 
-def test_turn_and_peer_are_split_from_the_child_thread_id(caplog):
-    """Peer threads are '{thread}::{label}' — the prefix groups a turn, the suffix names a peer."""
-    _run(caplog, AIMessage(content="x"), thread="thread-abc::code")
+def test_session_and_peer_are_split_from_the_child_thread_id(caplog):
+    """Peer threads are '{thread}::{label}': prefix = CONVERSATION id, suffix = peer name.
+
+    Named `session`, not `turn` — live lines carry "sess-4fa362d4-..." which every turn of a
+    conversation shares, so it cannot group a turn and must not claim to.
+    """
+    _run(caplog, AIMessage(content="x"), thread="sess-abc::code")
     line = _lines(caplog)[0]
-    assert line["turn"] == "thread-abc"
+    assert line["session"] == "sess-abc"
     assert line["peer"] == "code"
+    assert "turn" not in line, "the field must not claim to identify a turn"
+
+
+def test_calls_are_sequenced_per_conversation_and_peer(caplog):
+    """Without an ordinal, the lines of a multi-turn conversation cannot even be ordered."""
+    caplog.set_level(logging.INFO, logger="agent_runtime.executor_factory")
+    ef._CALL_SEQ.clear()
+    for _ in range(3):
+        agent = _agent(AIMessage(content="x"))
+        agent.invoke({"messages": [HumanMessage(content="q")]},
+                     config={"configurable": {"thread_id": "sess-1::analysis"}})
+    other = _agent(AIMessage(content="x"))
+    other.invoke({"messages": [HumanMessage(content="q")]},
+                 config={"configurable": {"thread_id": "sess-1::code"}})
+    lines = _lines(caplog)
+    assert [ln["seq"] for ln in lines[:3]] == [1, 2, 3]
+    assert lines[3]["peer"] == "code" and lines[3]["seq"] == 1, "a different peer counts separately"
+
+
+def test_a_rejected_call_still_logs(caplog):
+    """The provider 400 is the event this instrumentation most needs to capture.
+
+    It used to log only after a SUCCESSFUL handler call, so a rejection produced no line —
+    censoring the sample exactly at the tail that matters.
+    """
+    caplog.set_level(logging.INFO, logger="agent_runtime.executor_factory")
+
+    @wrap_model_call
+    def explode(request, handler):
+        raise RuntimeError("Input tokens exceed the configured limit of 922000 tokens")
+
+    agent = create_agent(model=ToolAwareFake(messages=iter([AIMessage(content="never")])),
+                         tools=[alpha], system_prompt="s",
+                         middleware=[ef._make_instrumentation_middleware(), explode])
+    with pytest.raises(Exception):
+        agent.invoke({"messages": [HumanMessage(content="q")]},
+                     config={"configurable": {"thread_id": "sess-x::analysis"}})
+    lines = _lines(caplog)
+    assert len(lines) == 1, "the rejected call must still produce a line"
+    assert lines[0]["error"] == "RuntimeError"
+    assert "922000" in lines[0]["error_detail"]
+    assert lines[0]["tools_bound"] == 1          # the payload it was rejected for is recorded
+    assert "real_input_tokens" not in lines[0]
+
+
+def test_the_deployed_default_model_has_a_measured_window():
+    """gpt-5.6-luna matched no prefix and silently inherited the 65,536 floor, capping messages
+    at ~50k of a real 922,000-token limit (measured 2026-09-02 from the provider's own error)."""
+    class M:
+        model_name = "gpt-5.6-luna"
+
+    assert ef._model_context_window(M()) == 922_000
+
+
+def test_an_unlisted_model_warns_instead_of_silently_taking_the_floor(caplog):
+    caplog.set_level(logging.WARNING, logger="agent_runtime.executor_factory")
+    ef._UNKNOWN_WINDOW_WARNED.clear()
+
+    class M:
+        model_name = "some-brand-new-model-9"
+
+    assert ef._model_context_window(M()) == ef._DEFAULT_WINDOW
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("not configured" in w and "some-brand-new-model-9" in w for w in warnings)
+    # ...once per process, not once per call
+    caplog.clear()
+    ef._model_context_window(M())
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_a_specific_id_wins_over_its_family_prefix():
+    """Ordering is load-bearing: gpt-5.6-luna must not be captured by a broader gpt-5 entry."""
+    seen = set()
+    for prefix, _ in ef._MODEL_WINDOWS:
+        assert not any(prefix.startswith(p) for p in seen), \
+            f"{prefix} is shadowed by an earlier, broader prefix"
+        seen.add(prefix)
 
 
 def test_supervisor_thread_without_a_label_is_named(caplog):

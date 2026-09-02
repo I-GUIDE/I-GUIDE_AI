@@ -1079,14 +1079,28 @@ DEFAULT_CONTEXT_BUDGET = 48_000
 # A flat budget was wrong in BOTH directions: 48,000 throws away context that fits comfortably
 # in gpt-4o's 128k, and on gpt-oss:120b's 65,536 it leaves headroom that the tool schemas and
 # system prompt then eat without anything counting them.
+# Longest prefix first: a specific id must win over its family. No provider here reports a
+# window (OpenAI's /v1/models returns only id/created/owned_by/shutdown_date), so every number
+# is CONFIGURED, and each one below was measured or quoted from a provider error rather than
+# assumed. Guessing high produces the 400 this machinery exists to prevent.
 _MODEL_WINDOWS = (
+    # Measured 2026-09-02 by an oversized request: "Input tokens exceed the configured limit
+    # of 922000 tokens." This is the DEPLOYED DEFAULT model and it matched no prefix before,
+    # so it silently inherited 65,536 - capping messages at ~50k of a ~922k window.
+    ("gpt-5.6-luna", 922_000),
     ("gpt-oss", 65_536),
     ("gpt-4o", 128_000),
     ("gpt-4.1", 128_000),
     ("o4-mini", 128_000),
     ("claude-", 200_000),
 )
+# Deliberately the SMALLEST window we have seen, because being wrong low only wastes context
+# while being wrong high is a user-visible 400. It is a floor, not an estimate — which is
+# exactly why a model landing here is worth a warning.
 _DEFAULT_WINDOW = 65_536
+# Model ids already warned about, so an unlisted model costs one line per process, not one
+# per call.
+_UNKNOWN_WINDOW_WARNED: set = set()
 # Output has to fit in the same window on most providers, and the AnvilGPT path sets no
 # max_tokens at all, so reserve room rather than discovering it as a truncated answer.
 _OUTPUT_RESERVE_ENV = "AGENT_CONTEXT_OUTPUT_RESERVE"
@@ -1123,6 +1137,16 @@ def _model_context_window(model: Any = None) -> int:
     for prefix, window in _MODEL_WINDOWS:
         if name.startswith(prefix):
             return window
+    # Falling back is safe but lossy, and it was SILENT: the deployed default (gpt-5.6-luna)
+    # sat on a 65,536 guess against a real 922,000 limit until instrumentation exposed it.
+    # The model is chosen per REQUEST by the client, so an unlisted id is normal operation,
+    # not a misconfiguration — say so once instead of hiding it.
+    if name and name not in _UNKNOWN_WINDOW_WARNED:
+        _UNKNOWN_WINDOW_WARNED.add(name)
+        logger.warning(
+            "context window for %r is not configured; assuming the %d floor. If this model's "
+            "window is larger, every call needlessly trims. Add it to _MODEL_WINDOWS or set "
+            "AGENT_MODEL_CONTEXT_WINDOW.", name, _DEFAULT_WINDOW)
     return _DEFAULT_WINDOW
 
 
@@ -1364,6 +1388,10 @@ INSTRUMENTATION_ENV = "AGENT_TURN_INSTRUMENTATION"
 # ~2 KB, which is worth logging once and pure noise logged per request.
 _TOOLSET_LOGGED: set = set()
 
+# Per (conversation, peer) call counter. The thread id identifies a CONVERSATION, not a turn,
+# so without an ordinal the lines of a multi-turn conversation cannot even be sequenced.
+_CALL_SEQ: Dict[Any, int] = {}
+
 
 def _instrumentation_enabled() -> bool:
     """On by default — the cost is one log line per model call, the alternative is guessing."""
@@ -1438,11 +1466,17 @@ def _make_instrumentation_middleware() -> Any:
             system_tokens = count_tokens_approximately([system]) if system is not None else 0
             thread = _active_thread_id() or ""
             # Peer threads are checkpointed under "{thread_id}::{label}", so the suffix is the
-            # peer name and the prefix groups every line belonging to one turn.
-            turn, _, label = thread.partition("::")
+            # peer name. The prefix is the CONVERSATION id (observed live: "sess-4fa362d4-..."),
+            # NOT a turn id — every turn of a conversation shares it, so this field cannot
+            # group a turn on its own. `seq` below is what orders the calls; a turn boundary
+            # shows up as `messages` dropping back down.
+            session, _, label = thread.partition("::")
             model = getattr(request, "model", None)
+            key = (session, label)
+            _CALL_SEQ[key] = _CALL_SEQ.get(key, 0) + 1
             record = {
-                "turn": turn,
+                "session": session,
+                "seq": _CALL_SEQ[key],
                 "peer": label or "supervisor",
                 "model": next((getattr(model, a) for a in ("model_name", "model", "model_id")
                                if isinstance(getattr(model, a, None), str)), "unknown"),
@@ -1466,7 +1500,20 @@ def _make_instrumentation_middleware() -> Any:
         except Exception:  # noqa: BLE001 - instrumentation must never break a turn
             record = {}
 
-        response = handler(request)
+        try:
+            response = handler(request)
+        except Exception as exc:  # noqa: BLE001
+            # The previous version logged only after a SUCCESSFUL call, so a provider rejection
+            # — the 400 the whole context budget exists to prevent — produced no line at all.
+            # That censored the sample precisely at the tail worth measuring.
+            if record:
+                record["error"] = type(exc).__name__
+                record["error_detail"] = str(exc)[:300]
+                try:
+                    logger.info("turn_instrumentation %s", json.dumps(record, default=str))
+                except Exception:  # noqa: BLE001
+                    pass
+            raise
 
         try:
             usage, called = _usage_and_calls(response)
