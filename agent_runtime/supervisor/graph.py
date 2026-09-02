@@ -776,7 +776,8 @@ def _apply_grounding_caveat(answer: str, audit: Optional[Dict[str, Any]]) -> str
     return f"{answer}\n\n---\n\n{note}" if (answer or "").strip() else note
 
 
-def _correct_artifact_claims(answer: str, *contexts: Any) -> str:
+def _correct_artifact_claims(answer: str, *contexts: Any,
+                             prior_rows: Optional[List[Dict[str, Any]]] = None) -> str:
     """Deterministic corrections for an answer that misdescribes what was delivered.
 
     Both cases were produced by one live query. Neither was caught by the LLM grounding
@@ -802,7 +803,8 @@ def _correct_artifact_claims(answer: str, *contexts: Any) -> str:
                 f"other model, not the layer you were given — which was computed here by {ran}."
             )
 
-    if _DENIES_MAP_RE.search(text) and any(_map_layer_was_delivered(c) for c in contexts):
+    if _DENIES_MAP_RE.search(text) and (any(_map_delivered_this_turn(c) for c in contexts)
+                                         or _map_delivered_earlier(prior_rows)):
         notes.append(
             "The layer is already on your interactive map — it was added automatically. "
             "There is no need to add it from a URL; the download link is only if you want a "
@@ -858,41 +860,83 @@ _MAP_CLAIM_MARKERS = (
 # "hallucinated claims about buffering and map display" caveat over nine real artifacts.
 # Match the payload itself rather than enumerating tool names, so new layer-emitting tools
 # are covered the day they are added.
-_MAP_DELIVERY_RE = re.compile(
-    r'"map_layer"\s*:\s*\{|"on_map"\s*:\s*true|\[on the map as ', re.I)
+def _map_delivered_this_turn(*contexts: Any) -> bool:
+    """A layer THIS turn actually reached the user's map.
 
+    Asks the delivery boundary itself (:func:`map_layers.delivers_map_layer`) per tool result,
+    and requires the tool to have SUCCEEDED. The four signals this replaces each answered by
+    pattern: a tool NAME in tool_calls, a bare ``"on_map": true`` anywhere in a nested payload,
+    a regex over the JSON blob. Every one of them said "delivered" for a failed
+    ``admin_boundary`` — which returns ``{"ok": false}`` with no descriptor on its ambiguity and
+    error paths — so the supervisor suppressed its own corrective retry, wrote the conclusion
+    into its result, and then RE-READ that conclusion as evidence a layer existed.
 
-def _map_layer_was_delivered(execution_context: Optional[Dict[str, Any]]) -> bool:
-    """Whether a layer reached the user's map — this turn, or on an earlier ledger turn.
-
-    Earlier turns count because the map is persistent: a layer added in turn 2 is still on
-    screen in turn 4, so "the tracts are shown on the map" is true then and must not be
-    audited as an unsupported claim.
+    Reads only ``tool_results`` entries and the peer-level descriptor, never a bare ``on_map``
+    key. That is what severs the feedback loop: the supervisor's own conclusion (stored as
+    ``result["on_map"]``) is no longer visible to this predicate, while ``on_map`` stays a
+    legitimate protocol field for the tools that emit it.
     """
+    from agent_runtime.map_layers import delivers_map_layer
+
+    def _payload(content: Any) -> Any:
+        if isinstance(content, str):
+            try:
+                return json.loads(content)
+            except Exception:
+                return None
+        return content
+
     def walk(obj: Any) -> bool:
+        # The execution context is a WRAPPER — {"analysis_results": ..., "code_result": ...} —
+        # so tool_results sit a level down; the analyze peer passes its artifacts directly, so
+        # they sit at the top. Both shapes reach here, hence the descent.
         if isinstance(obj, dict):
-            if obj.get("on_map") is True or isinstance(obj.get("map_layer"), dict):
+            # A real descriptor anywhere is a real delivery (the CLI peers put theirs at the
+            # top level of their result). A bare `on_map` or a tool NAME is not: delivers_
+            # map_layer requires a descriptor with a url, or inline features. That asymmetry is
+            # what keeps the supervisor's own result["on_map"] from proving itself.
+            if delivers_map_layer("", obj):
                 return True
-            if str(obj.get("name") or obj.get("tool_name") or "") in _MAP_LAYER_TOOLS:
-                return True
-            return any(walk(v) for v in obj.values())
+            for entry in obj.get("tool_results") or []:
+                if not isinstance(entry, dict):
+                    continue
+                payload = _payload(entry.get("content"))
+                if isinstance(payload, dict) and payload.get("ok") is False:
+                    continue                # a tool that failed delivered nothing
+                if delivers_map_layer(str(entry.get("name") or ""), entry.get("content")):
+                    return True
+            return any(walk(v) for k, v in obj.items() if k != "tool_results")
         if isinstance(obj, (list, tuple)):
             return any(walk(v) for v in obj)
         return False
 
-    if walk(execution_context):
-        return True
-    try:
-        blob = json.dumps(execution_context, default=str)
-    except Exception:
-        blob = str(execution_context)
-    # Un-escape so a payload nested as a JSON string matches the same pattern.
-    return bool(_MAP_DELIVERY_RE.search(blob.replace('\\"', '"')))
+    return any(walk(ctx) for ctx in contexts)
+
+
+def _map_delivered_earlier(prior_rows: Optional[List[Dict[str, Any]]]) -> bool:
+    """A layer from an EARLIER turn is still on the user's map.
+
+    The map is persistent: a layer added in turn 2 is still on screen in turn 4, so "the tracts
+    are shown on the map" is true then and must not be audited as an unsupported claim.
+
+    Reads the ledger row's ``map_layer`` FIELD. The previous version matched the literal
+    ``"[on the map as "`` that ``_ledger_lines`` writes — two hand-synced strings in different
+    functions, where a formatting change in one would silently switch the other off and hand the
+    user a hallucination caveat over a layer that really is on their screen.
+    """
+    return any(isinstance(r, dict) and r.get("map_layer") for r in (prior_rows or []))
+
+
+def _map_layer_was_delivered(execution_context: Optional[Dict[str, Any]],
+                             prior_rows: Optional[List[Dict[str, Any]]] = None) -> bool:
+    """This turn, or any earlier one. The single predicate every caller uses."""
+    return _map_delivered_this_turn(execution_context) or _map_delivered_earlier(prior_rows)
 
 
 def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
                                     artifacts: List[Dict[str, str]],
-                                    execution_context: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+                                    execution_context: Optional[Dict[str, Any]] = None,
+                                    prior_rows: Optional[List[Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
     """Deterministic override of LLM-auditor false positives. Drops an audit issue when it:
     (1) merely disputes artifact generation/availability and an artifact WAS produced,
     (2) disputes a numeric value that actually appears in the execution record, or
@@ -911,7 +955,7 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
         except Exception:
             blob = str(execution_context)
         blob = blob.replace(",", "")
-    map_delivered = _map_layer_was_delivered(execution_context)
+    map_delivered = _map_layer_was_delivered(execution_context, prior_rows)
     kept = []
     for it in issues:
         if isinstance(it, dict):
@@ -2077,6 +2121,10 @@ def _run_qgis_map_workflow(query: str, *, input_file_ids: Optional[List[str]],
 # about an interactive map" and the claim shipped anyway. A static PNG cannot be panned,
 # zoomed or clicked, so this is not a wording quibble — the deliverable was missing. Verified
 # structurally (like the unrun-code check) rather than demanded in the prompt.
+# The tools EXPECTED to deliver a map layer. Documentation and a test invariant
+# (test_rs_embed_zonal asserts the zonal tools are in here) — deliberately NOT a delivery
+# signal any more: a tool NAME says nothing about whether the call succeeded, and matching on it
+# is what let a failed admin_boundary report a layer. Ask _map_delivered_this_turn instead.
 _MAP_LAYER_TOOLS = ("add_map_layer", "overpass_search", "spatial_search",
                     "embed_region", "segment_region", "embed_zones",
                     "fit_zone_model", "admin_boundary")
@@ -2525,9 +2573,12 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
         # the map (or the answer says it is there) and no layer-emitting tool ran, hand the
         # peer that observation once. A peer that asked for another capability is stopping
         # legitimately, so it is left alone. Only meaningful when geo tools were loaded.
-        # Any tool that reports a map_layer/on_map counts — not just add_map_layer, or the
-        # spatial toolkit's own layers (buffer_layer, aggregate_to_grid, …) would look undelivered.
-        on_map = _called_tool(artifacts, _MAP_LAYER_TOOLS) or _map_layer_was_delivered(artifacts)
+        # Any tool that actually DELIVERS a layer counts — not just add_map_layer, or the
+        # spatial toolkit's own layers (buffer_layer, aggregate_to_grid, …) would look
+        # undelivered. Turn-scoped and success-required: this drives the corrective retry below,
+        # which is a question about THIS turn, and a tool that returned ok=false delivered
+        # nothing however promising its name.
+        on_map = _map_delivered_this_turn(artifacts)
         wants_map = bool(_WANTS_MAP_RE.search(query or "")
                          or _CLAIMS_MAP_RE.search(result["summary"] or ""))
         if input_file_ids and wants_map and not on_map and not caps:
@@ -2542,8 +2593,7 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
                 config=agent_config(child_thread_id(thread_id, "analysis")),
             )
             retry_artifacts = extract_search_artifacts(resp_retry)
-            on_map = (_called_tool(retry_artifacts, _MAP_LAYER_TOOLS)
-                      or _map_layer_was_delivered(retry_artifacts))
+            on_map = _map_delivered_this_turn(retry_artifacts)
             result["summary"] = extract_final_answer(resp_retry) or result["summary"]
             result["tool_calls"] = [*result["tool_calls"], *(retry_artifacts.get("tool_calls") or [])]
             result["tool_results"] = [*result["tool_results"], *(retry_artifacts.get("tool_results") or [])]
@@ -2570,7 +2620,7 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
             result["summary"] = extract_final_answer(resp_retry) or result["summary"]
             result["tool_calls"] = [*result["tool_calls"], *(retry_artifacts.get("tool_calls") or [])]
             result["tool_results"] = [*result["tool_results"], *(retry_artifacts.get("tool_results") or [])]
-            on_map = on_map or _map_layer_was_delivered(retry_artifacts)
+            on_map = on_map or _map_delivered_this_turn(retry_artifacts)
         # Carried downstream so synthesis can describe the map honestly either way.
         result["on_map"] = bool(on_map)
         if caps:
@@ -3154,6 +3204,9 @@ def build_supervisor_graph(
         # A general question (definition, how-to, concept, chit-chat) does not need platform
         # evidence — answer it from general knowledge instead of refusing. Only a genuine
         # content/retrieval request gets the "no supporting evidence" reply.
+        # Hoisted above both branches: _correct_artifact_claims runs on the insufficiency path
+        # too, and it needs the ledger to know a layer from an earlier turn is still on screen.
+        _rows = _prior_actions(state)
         if not has_grounding and not has_history and not _needs_kb_evidence(q):
             emit_trace_event(
                 "node_started",
@@ -3190,7 +3243,6 @@ def build_supervisor_graph(
             # The answering model needs the ledger too, not just the router: the router only
             # decides whether to search, while THIS is what decides whether the answer is right.
             _history = list(state.get("chat_history") or [])
-            _rows = _prior_actions(state)
             _ledger_text = "\n".join(_ledger_lines(_rows))   # THE single rendering
             _note = _prior_actions_note(_rows)
             answer = do_synthesize(q, evidence, ar, cr, _history, _note)
@@ -3212,7 +3264,8 @@ def build_supervisor_graph(
             # Deterministic reconciliation: produced artifacts + the execution record are
             # ground truth, so the LLM auditor can't false-flag a genuinely-generated
             # map/file or a number/method it actually computed.
-            audit = _reconcile_audit_with_artifacts(audit, artifacts, execution_context=exec_ctx)
+            audit = _reconcile_audit_with_artifacts(audit, artifacts, execution_context=exec_ctx,
+                                                    prior_rows=_rows)
             # Act on the verdict: a flagged audit appends a user-visible caveat to the answer.
             final = _apply_grounding_caveat(answer, audit)
             # Embed produced image artifacts (maps/plots) inline so they render in markdown.
@@ -3265,7 +3318,7 @@ def build_supervisor_graph(
             {"stage": "synthesize", "message": audit.get("summary") or "Answer composed"},
             node="synthesize",
         )
-        final = _correct_artifact_claims(final, ar, cr)
+        final = _correct_artifact_claims(final, ar, cr, prior_rows=_rows)
         # Record what this turn DID before the state is discarded — the next turn's routing
         # decision is the only thing standing between a follow-up and a redundant search.
         _record_actions(state, ar, cr)

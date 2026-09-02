@@ -1340,11 +1340,30 @@ def _stub_code_peer(monkeypatch, responses):
     return out, seen
 
 
-def _resp(answer, tool_names=()):
-    """Shape extract_search_artifacts/extract_final_answer read: a messages payload."""
-    from langchain_core.messages import AIMessage
+# A tool RESULT that really delivers a layer. A name in tool_calls no longer counts: the
+# delivery check asks map_layers.build_map_layers whether the client would get anything, and a
+# descriptor needs a url. That strictness is the point — a FAILED admin_boundary used to satisfy
+# the old name match and suppress the corrective retry.
+_DELIVERED = {"ok": True, "on_map": True,
+              "map_layer": {"url": "/agent/files/file_layer1/download",
+                            "label": "layer", "render": "shapes"}}
+
+
+def _resp(answer, tool_names=(), results=None):
+    """Shape extract_search_artifacts/extract_final_answer read: a messages payload.
+
+    ``results`` maps a tool name to the payload it returned; extract_search_artifacts only
+    records a tool_result for a ToolMessage carrying both a name and a tool_call_id.
+    """
+    import json as _j
+
+    from langchain_core.messages import AIMessage, ToolMessage
     calls = [{"name": n, "args": {}, "id": f"c{i}"} for i, n in enumerate(tool_names)]
     msgs = [AIMessage(content="", tool_calls=calls)] if calls else []
+    for i, n in enumerate(tool_names):
+        payload = (results or {}).get(n)
+        if payload is not None:
+            msgs.append(ToolMessage(content=_j.dumps(payload), tool_call_id=f"c{i}", name=n))
     msgs.append(AIMessage(content=answer))
     return {"messages": msgs}
 
@@ -1403,7 +1422,7 @@ def test_analyze_peer_retries_once_when_the_map_got_nothing(monkeypatch):
     png_only = _resp("You can view the heat map on the interactive map beside this chat.",
                      tool_names=["execute_code", "heatmap_image"])
     delivered = _resp("Added the incident density layer to your map.",
-                      tool_names=["add_map_layer"])
+                      tool_names=["add_map_layer"], results={"add_map_layer": _DELIVERED})
     out, seen = _stub_analyze_peer(monkeypatch, [png_only, delivered])
 
     assert len(seen) == 2, "should re-invoke exactly once"
@@ -1414,7 +1433,8 @@ def test_analyze_peer_retries_once_when_the_map_got_nothing(monkeypatch):
 
 def test_analyze_peer_does_not_retry_when_the_layer_was_delivered(monkeypatch):
     out, seen = _stub_analyze_peer(
-        monkeypatch, [_resp("Layer is on your map.", tool_names=["add_map_layer"])])
+        monkeypatch, [_resp("Layer is on your map.", tool_names=["add_map_layer"],
+                            results={"add_map_layer": _DELIVERED})])
     assert len(seen) == 1
     assert out["on_map"] is True
 
@@ -1440,7 +1460,8 @@ def test_a_map_claim_alone_triggers_the_check(monkeypatch):
     """Even when the ASK did not mention a map, claiming one must be backed by a layer."""
     out, seen = _stub_analyze_peer(
         monkeypatch, [_resp("I put the results on the map for you.", tool_names=["execute_code"]),
-                      _resp("Corrected: added the layer.", tool_names=["add_map_layer"])],
+                      _resp("Corrected: added the layer.", tool_names=["add_map_layer"],
+                            results={"add_map_layer": _DELIVERED})],
         query="summarise these incidents")
     assert len(seen) == 2
     assert out["on_map"] is True
@@ -1463,7 +1484,10 @@ _MAP_AUDIT = {
 def test_a_delivered_map_layer_clears_the_map_hallucination_flag():
     from agent_runtime.supervisor.graph import _reconcile_audit_with_artifacts
 
-    ar = {"summary": "done", "on_map": True, "tool_calls": [{"name": "add_map_layer"}]}
+    ar = {"summary": "done", "on_map": True,
+          "tool_calls": [{"name": "add_map_layer", "args": {}, "id": "c0"}],
+          "tool_results": [{"name": "add_map_layer", "tool_call_id": "c0",
+                            "content": json.dumps(_DELIVERED)}]}
     out = _reconcile_audit_with_artifacts(
         _MAP_AUDIT, [{"filename": "grid.geojson"}], {"analysis_results": ar})
 
@@ -1487,8 +1511,14 @@ def test_map_delivery_is_detected_from_a_nested_tool_record():
     """on_map can sit anywhere in the execution context (peer result, tool output, nested)."""
     from agent_runtime.supervisor.graph import _map_layer_was_delivered
 
-    assert _map_layer_was_delivered({"code_result": {"tool_results": [{"name": "add_map_layer"}]}})
-    assert _map_layer_was_delivered({"analysis_results": [{"steps": [{"result": {"on_map": True}}]}]})
+    # A real descriptor, however deeply nested, IS a delivery.
+    layer = {"url": "/agent/files/file_n1/download", "label": "n", "render": "shapes"}
+    assert _map_layer_was_delivered({"analysis_results": [{"steps": [{"map_layer": layer}]}]})
+    # A tool NAME with no result is not — this assertion used to be the bug: it is what let a
+    # failed admin_boundary report a layer and suppress the corrective retry.
+    assert not _map_layer_was_delivered({"code_result": {"tool_results": [{"name": "add_map_layer"}]}})
+    # Nor is a bare on_map flag with nothing for the client to fetch.
+    assert not _map_layer_was_delivered({"analysis_results": [{"steps": [{"result": {"on_map": True}}]}]})
     assert not _map_layer_was_delivered({"analysis_results": {"tool_calls": [{"name": "heatmap_image"}]}})
 
 
@@ -1518,7 +1548,9 @@ def test_toolkit_layers_count_as_delivery_for_the_analyze_peer(monkeypatch):
 
     from langchain_core.messages import ToolMessage
 
-    payload = _json.dumps({"ok": True, "on_map": True, "map_layer": {"render": "shapes"}})
+    payload = _json.dumps({"ok": True, "on_map": True,
+                           "map_layer": {"url": "/agent/files/file_b1/download",
+                                         "render": "shapes"}})
     resp = {"messages": [
         AIMessage(content="", tool_calls=[{"name": "buffer_layer", "args": {}, "id": "c0"}]),
         ToolMessage(content=payload, tool_call_id="c0", name="buffer_layer"),

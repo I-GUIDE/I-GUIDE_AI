@@ -120,7 +120,7 @@ def layers_for_artifacts(directory: Any, artifacts: List[Dict[str, Any]]) -> Lis
     return out
 
 
-def build_map_layers(tool_name: str, output: Any) -> List[Dict[str, Any]]:
+def build_map_layers(tool_name: str, output: Any, *, qa: bool = True) -> List[Dict[str, Any]]:
     """Every layer a tool result delivers, in order.
 
     One tool call can legitimately produce more than one view — embed_zones returns the
@@ -136,18 +136,24 @@ def build_map_layers(tool_name: str, output: Any) -> List[Dict[str, Any]]:
         for ml in extra:
             if not isinstance(ml, dict):
                 continue
-            built = build_map_layer(tool_name, {"map_layer": ml})
+            built = build_map_layer(tool_name, {"map_layer": ml}, qa=qa)
             if built and built["id"] not in seen:
                 seen.add(built["id"])
                 out.append(built)
         if out:
             return out
-    one = build_map_layer(tool_name, output)
+    one = build_map_layer(tool_name, output, qa=qa)
     return [one] if one else []
 
 
-def build_map_layer(tool_name: str, output: Any) -> Optional[Dict[str, Any]]:
-    """Return a ``LayerArtifact``-shaped dict for a geometry-bearing tool result, else None."""
+def build_map_layer(tool_name: str, output: Any, *, qa: bool = True) -> Optional[Dict[str, Any]]:
+    """Return a ``LayerArtifact``-shaped dict for a geometry-bearing tool result, else None.
+
+    ``qa=False`` skips the data inspection below. That block only ever DOWNGRADES a
+    descriptor's ``render`` (never returns None), so it cannot change whether a layer is
+    delivered — which lets :func:`delivers_map_layer` ask that question without the
+    file read.
+    """
     obj = _coerce_obj(output)
     if obj is None:
         return None
@@ -225,17 +231,17 @@ def build_map_layer(tool_name: str, output: Any) -> Optional[Dict[str, Any]]:
                 from agent_runtime.file_store import resolve_file_id
                 from agent_runtime.layer_qa import inspect_geojson
                 fid = str(url).rstrip("/").split("/")[-2] if "/files/" in str(url) else ""
-                local = str(resolve_file_id(fid)) if fid else ""
-                qa = inspect_geojson(local, render=render, style_by=out.get("style_by"),
-                                    legend=out.get("legend")) if local else {"ok": True}
+                local = str(resolve_file_id(fid)) if fid and qa else ""
+                qa_result = inspect_geojson(local, render=render, style_by=out.get("style_by"),
+                                            legend=out.get("legend")) if local else {"ok": True}
             except Exception:
-                qa = {"ok": True}
-            if not qa.get("ok"):
+                qa_result = {"ok": True}
+            if not qa_result.get("ok"):
                 logger.warning("map_layer %r would render meaninglessly (%s); shipping it as "
-                               "plain shapes", out["id"], "; ".join(qa.get("problems") or []))
+                               "plain shapes", out["id"], "; ".join(qa_result.get("problems") or []))
                 out["render"] = "shapes"
                 out.pop("style_by", None)
-                out["degenerate"] = qa.get("problems") or True
+                out["degenerate"] = qa_result.get("problems") or True
 
             if render == "categories" and not out.get("legend"):
                 logger.warning(
@@ -272,3 +278,26 @@ def build_map_layer(tool_name: str, output: Any) -> Optional[Dict[str, Any]]:
         "truncated": len(features) > len(capped),
         "geojson": {"type": "FeatureCollection", "features": capped},
     }
+
+
+def delivers_map_layer(tool_name: str, output: Any) -> bool:
+    """Whether this tool output would ACTUALLY put a layer on the user's map.
+
+    The single authority on that question, because this module is the boundary the layer has to
+    cross to reach the client: if :func:`build_map_layers` yields nothing, the user sees nothing,
+    whatever the tool claimed.
+
+    It replaces four looser signals in the supervisor that each answered by pattern rather than
+    by construction — a tool NAME appearing in tool_calls, a bare ``"on_map": true`` anywhere in
+    a nested payload, a regex over the JSON blob. All of them said "delivered" for a FAILED
+    ``admin_boundary``, which returns ``{"ok": false}`` with no descriptor; the supervisor then
+    suppressed its own corrective retry and told the user the layer was already on their map.
+
+    ``qa=False``: the data inspection only downgrades ``render``, so skipping it cannot change
+    the answer, and it keeps this cheap and free of file reads for a question asked per tool
+    result.
+    """
+    try:
+        return bool(build_map_layers(tool_name, output, qa=False))
+    except Exception:      # a malformed payload delivers nothing; never fail the turn over it
+        return False

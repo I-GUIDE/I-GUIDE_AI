@@ -11,6 +11,8 @@ which is why these are deterministic.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from agent_runtime.supervisor import graph as g
@@ -25,8 +27,13 @@ CONFABULATED = (
     'Add to the I-Guide map - in the map sidebar, choose "Add Layer -> From URL" and paste '
     "the download link above."
 )
-GSE_RUN = {"tool_results": [{"name": "embed_region", "output": {
-    "model": "gse", "map_layer": {"url": "/f/1", "label": "gse embedding (PCA-RGB)"}}}]}
+# `content`, not `output`: extract_search_artifacts emits {name, tool_call_id, content} and so
+# do both CLI peers — nothing in the tree produces an `output` key. The invented shape passed
+# only because the old delivery check walked every nested dict looking for a `map_layer`
+# anywhere, which is the looseness this fixture now stops relying on.
+GSE_RUN = {"tool_results": [{"name": "embed_region", "tool_call_id": "c1", "content": json.dumps({
+    "ok": True, "model": "gse",
+    "map_layer": {"url": "/f/1", "label": "gse embedding (PCA-RGB)"}})}]}
 
 
 @pytest.fixture(autouse=True)

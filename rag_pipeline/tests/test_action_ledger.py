@@ -286,9 +286,18 @@ def test_a_cross_turn_number_is_not_flagged_as_unsupported():
 
 
 def test_a_map_layer_from_an_earlier_turn_still_counts_as_delivered():
-    """The map is persistent: a layer added in turn 2 is still on screen in turn 4."""
-    lines = g._ledger_lines(g._ledger_rows(CLAY_TURN))
-    assert g._map_layer_was_delivered({"prior_actions": lines})
+    """The map is persistent: a layer added in turn 2 is still on screen in turn 4.
+
+    The cross-turn signal now reads the ledger row's `map_layer` FIELD, passed explicitly as
+    prior_rows. It used to regex the rendered line for the literal "[on the map as " — two
+    hand-synced strings in different functions, where reformatting one would silently switch
+    the other off and staple a hallucination caveat onto a real layer.
+    """
+    rows = g._ledger_rows(CLAY_TURN)
+    assert any(r.get("map_layer") for r in rows), "fixture must carry a map_layer row"
+    assert g._map_layer_was_delivered(None, rows)
+    assert g._map_delivered_earlier(rows)
+    assert not g._map_delivered_earlier([{"tool": "keyword_search"}])
     assert not g._map_layer_was_delivered({"analysis_results": {"note": "nothing mapped"}})
 
 

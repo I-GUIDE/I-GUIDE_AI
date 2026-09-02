@@ -604,8 +604,20 @@ def make_langchain_geo_tools(default_input_file_ids: Optional[List[str]] = None)
             rec = create_output_file_from_path(out, filename=fname)
             res = {"ok": True, "file_id": rec["file_id"], "filename": rec.get("filename"),
                    "download_url": rec.get("download_url"), "format": suffix,
-                   "on_map": as_geojson,
+                   "on_map": bool(as_geojson) and bool(len(joined)),
                    "feature_count": int(len(joined)), "crs": _epsg(getattr(joined, "crs", None))}
+            # on_map alone never delivered anything: build_map_layer needs a DESCRIPTOR (or an
+            # inline `features` array) and returned None without one, so nothing from this tool
+            # has ever reached the map. The old delivery check matched a bare `"on_map": true`
+            # by regex and covered for it; asking the delivery boundary itself exposes it.
+            if res["on_map"]:
+                res["map_layer"] = {
+                    "url": rec.get("download_url"),
+                    "label": (name or Path(fname).stem).replace("_", " "),
+                    "render": "shapes",
+                    "source": "spatial_join",
+                    "count": int(len(joined)),
+                }
             if note:
                 res["note"] = note
             return json.dumps(res, default=str)
