@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from agent_runtime.supervisor_graph import (
     build_supervisor_graph,
     is_supervisor_enabled,
@@ -1505,6 +1507,159 @@ def test_a_map_claim_with_no_layer_is_still_flagged():
 
     assert out["severity"] == "high"
     assert len(out["issues"]) == 1
+
+
+# --- the AFFORDANCE residue ---------------------------------------------------------------
+# The map-delivery fix stopped a FAILED tool from claiming a layer and stopped a delivered
+# layer from being flagged for EXISTENCE. What survived was the answer's description of the map
+# itself. Reproduced on the deployed agent, 2026-09-02, "Show hospitals near Chicago on the
+# map": one layer delivered, 49 features drawn, 1 map_layer and 1 ledger row in the logs, and
+# the auditor accepted the count, the location and the OpenStreetMap source — then flagged the
+# single sentence "You can pan, zoom, and click the hospital markers for details" at high
+# severity, so a wholly correct answer shipped wearing a hallucination caveat.
+#
+# No tool result can EVER evidence an affordance: pan/zoom/toggle/click are properties of the
+# client (MapLibre + deck.gl getTooltip/onClick + the layers panel), not of the data. So this
+# fired on every map answer, and the marker list missed it only because the sentence used the
+# bare verbs "pan"/"zoom"/"click" rather than "panning"/"zooming"/"interactive map".
+
+_AFFORDANCE_AUDIT = {
+    "hallucination_detected": True, "severity": "high",
+    "issues": [{"claim": "You can pan, zoom, and click the hospital markers for details",
+                "reason": "The retrieved evidence does not describe any interactive map "
+                          "capabilities."}],
+    "summary": "The hospital count, location, and OpenStreetMap source are supported, but the "
+               "claimed interactive-map creation and capabilities are not evidenced.",
+}
+
+
+def _osm_delivery():
+    """The execution context of the reproduced turn: one succeeded OSM layer, 49 features."""
+    layer = {"url": "/agent/files/file_h1/download", "render": "shapes",
+             "label": "OSM: hospital in Chicago, Illinois"}
+    return {"analysis_results": {"summary": "49 hospitals", "tool_results": [
+        {"name": "osm_features", "tool_call_id": "c0",
+         "content": json.dumps({"ok": True, "count": 49, "map_layer": layer})}]}}
+
+
+def test_an_affordance_claim_is_cleared_when_a_layer_was_delivered():
+    """The reproduced false positive: the exact claim, the exact delivery, no caveat."""
+    from agent_runtime.supervisor.graph import _reconcile_audit_with_artifacts
+
+    out = _reconcile_audit_with_artifacts(
+        dict(_AFFORDANCE_AUDIT), [], execution_context=_osm_delivery())
+
+    assert out["severity"] == "none", out
+    assert out["hallucination_detected"] is False
+    assert out["issues"] == []
+
+
+def test_an_affordance_claim_with_no_layer_is_still_flagged():
+    """The other direction, which must not be loosened: describing a map nobody was given.
+
+    This is the failure the analyze peer's own map check exists to catch — a PNG, or a FAILED
+    admin_boundary, written up as an explorable layer.
+    """
+    from agent_runtime.supervisor.graph import _reconcile_audit_with_artifacts
+
+    failed = {"analysis_results": {"summary": "boundary lookup failed", "tool_results": [
+        {"name": "admin_boundary", "tool_call_id": "c0",
+         "content": json.dumps({"ok": False, "error": "ambiguous place name"})}]}}
+    out = _reconcile_audit_with_artifacts(
+        dict(_AFFORDANCE_AUDIT), [], execution_context=failed)
+
+    assert out["severity"] == "high", out
+    assert len(out["issues"]) == 1
+
+
+@pytest.mark.parametrize("claim", [
+    "You can pan, zoom, and click the hospital markers for details",
+    "The map is interactive and lets you explore the hospital locations",
+    "Users can toggle the layer on and off",
+    "click a feature for its attributes",
+    "Hover over a marker to see its tags",
+    "You may zoom in to see individual facilities",
+    "Zoom into the map for a closer look",
+    "the layer allows you to inspect each polygon",
+])
+def test_affordance_phrasings(claim):
+    from agent_runtime.supervisor.graph import _is_map_claim
+
+    assert _is_map_claim(claim)
+
+
+@pytest.mark.parametrize("claim", [
+    # Substring matching on the bare verbs is what these guard. "pan" is inside
+    # "expand"/"Japan"/"company"; "click" is inside the "[popularity: 42 clicks]" that real
+    # evidence carries; and "selected N features" is analysis prose, not a map gesture — which
+    # is why tier 2 admits only verbs that mean nothing else here.
+    "the model selected 4096 features",
+    "the model inspected 300 samples during training",
+    "the dataset has 1,200 clicks of popularity",
+    "the analysis expanded to Japan and the company's holdings",
+    "the study covered 4096 counties",
+    "the embeddings have 1024 dimensions",
+    "the raster was produced at 7.645 m/px",
+    "the paper was published in Nature Geoscience in 2021",
+])
+def test_claims_that_are_not_about_the_map(claim):
+    from agent_runtime.supervisor.graph import _is_map_claim
+
+    assert not _is_map_claim(claim)
+
+
+def test_an_invented_figure_survives_even_with_a_layer_on_the_map():
+    """A delivered layer must not become a blanket amnesty for everything else in the answer."""
+    from agent_runtime.supervisor.graph import _reconcile_audit_with_artifacts
+
+    audit = {"hallucination_detected": True, "severity": "high",
+             "issues": [{"claim": "You can click the markers for details",
+                         "reason": "no evidence of map capabilities"},
+                        {"claim": "Chicago funded 4096 of these hospitals in 1974",
+                         "reason": "no evidence for this figure"}]}
+    out = _reconcile_audit_with_artifacts(dict(audit), [], execution_context=_osm_delivery())
+
+    assert out["severity"] == "high", out
+    assert [i["claim"] for i in out["issues"]] == ["Chicago funded 4096 of these hospitals in 1974"]
+
+
+def test_the_auditor_is_told_what_the_map_client_does_only_when_a_layer_is_there():
+    """The second half of the fix: a span the auditor can legitimately copy.
+
+    The audit prompt requires a VERBATIM span for any row it marks "supported", so with nothing
+    in the record about the viewer the auditor's only honest verdict on an affordance was
+    "absent". This does not replace the deterministic drop above — evidence_quality.py records
+    four audit-prompt formulations that were measured and did not hold — it just stops the
+    auditor from being asked a question its inputs cannot answer.
+    """
+    from agent_runtime.evidence_quality import _format_execution_context
+    from agent_runtime.supervisor.graph import _map_environment_lines
+
+    assert _map_environment_lines(False) == []
+    lines = _map_environment_lines(True)
+    assert lines and "pan and zoom" in lines[0]
+
+    rendered = _format_execution_context({"analysis_results": {"summary": "49 hospitals"},
+                                          "environment": lines})
+    assert "pan and zoom" in rendered and "click a vector feature" in rendered
+    # It must NOT arrive under the prior_actions heading, which says "EARLIER TURNS": this is
+    # true of the run NOW, and mislabelling it invites the auditor to read it as stale.
+    assert "EARLIER TURNS" not in rendered
+    # And nothing is said about a map when no layer reached one.
+    bare = _format_execution_context({"analysis_results": {"summary": "49 hospitals"},
+                                      "environment": _map_environment_lines(False)})
+    assert "pan and zoom" not in bare
+
+
+def test_the_environment_fact_is_wired_into_the_audit_record():
+    """_map_environment_lines is fed by the same delivery predicate the reconciler uses, so the
+    prose half and the deterministic half can never disagree about whether a layer exists."""
+    from agent_runtime.supervisor.graph import _map_environment_lines, _map_layer_was_delivered
+
+    assert _map_environment_lines(_map_layer_was_delivered(_osm_delivery()))
+    failed = {"analysis_results": {"tool_results": [
+        {"name": "admin_boundary", "content": json.dumps({"ok": False})}]}}
+    assert _map_environment_lines(_map_layer_was_delivered(failed)) == []
 
 
 def test_map_delivery_is_detected_from_a_nested_tool_record():

@@ -759,6 +759,36 @@ def _visible_state_lines(rows: List[Dict[str, Any]]) -> List[str]:
     return lines
 
 
+# What the client the layer landed in actually does. Stated to the AUDITOR only, because the
+# audit prompt demands a VERBATIM span be copied for any row it marks "supported" and no tool
+# result can ever provide one for an affordance: pan/zoom/toggle/click are properties of the
+# viewer, not of the data. Without a span to copy the auditor has no honest option but "absent",
+# which is how a correct answer earned a high-severity hallucination caveat for the one sentence
+# describing the map it had just filled.
+#
+# Every clause is true of the deployed client: MapLibre supplies drag-pan and scroll-zoom, the
+# layers panel toggles and removes each layer (App.tsx toggleLayer/removeLayerById), and the
+# deck.gl overlay is wired with getTooltip and onClick over pickable vector layers
+# (components/AgentMap.tsx). Heatmap and raster layers are deliberately NOT pickable, hence
+# "vector" — do not widen this line past what the client does, since its whole purpose is to be
+# a span the auditor can trust.
+#
+# This is the SECOND half of the fix, not a replacement for the first: _is_map_claim still drops
+# the issue deterministically. The audit prompt's own history in evidence_quality.py records
+# four prose formulations that were measured and did not hold, so prose alone is not the
+# guarantee — it just stops the auditor from being asked an unanswerable question.
+_MAP_CLIENT_AFFORDANCES = (
+    "- the map these layers are on is a live client the user drives directly: they pan and zoom "
+    "it, show/hide or remove any layer from the layers panel, and click a vector feature to see "
+    "its attributes. This is a fact about the environment, not a claim needing evidence."
+)
+
+
+def _map_environment_lines(delivered: bool) -> List[str]:
+    """The client-affordance line for the auditor's record, when a layer is actually there."""
+    return [_MAP_CLIENT_AFFORDANCES] if delivered else []
+
+
 def _prior_actions_note(rows: List[Dict[str, Any]]) -> Optional[str]:
     """The ledger as a line-per-action note for the ANSWERING model.
 
@@ -1145,6 +1175,63 @@ _MAP_CLAIM_MARKERS = (
 )
 
 
+# An AFFORDANCE claim — what the user can DO with the map a layer just landed on — is the
+# residue left after the markers above. Pan, zoom, layer toggle and click-for-attributes are
+# properties of the CLIENT (deck.gl's getTooltip/onClick over MapLibre, plus the layer panel's
+# show/hide), not of the data, so NO tool result can ever carry a span evidencing one. The
+# auditor therefore marks the row "absent" every single time the synthesizer describes the map
+# it was just told to describe — and SYNTHESIS_PROMPT rule 7 and VISUALIZATION_ROUTES_RULE both
+# tell it to, because the alternative (answers claiming no map exists, or pointing the user at
+# QGIS to view their own result) is the bug those rules were written to fix.
+#
+# Observed: "Show hospitals near Chicago on the map" delivered one layer with 49 features, the
+# auditor accepted the count, the location and the OpenStreetMap source, and flagged only
+# "You can pan, zoom, and click the hospital markers for details" — high severity, so the user
+# got a hallucination caveat stapled to a wholly correct answer.
+#
+# Matched with WORD BOUNDARIES and in one of two shapes, never as a bare substring: "pan" as a
+# substring hits "expand"/"Japan"/"company", and "click" hits the "[popularity: 42 clicks]" that
+# real evidence carries — which would turn a fabricated click-count into an amnestied claim.
+#   1. a capability frame aimed at the user ("you can …", "lets you …") + any affordance verb
+#   2. a GESTURE verb applied to a map noun ("click the hospital markers for details"), with no
+#      frame needed because the sentence often has none.
+#
+# The two verb sets differ on purpose. "select" and "inspect" describe analysis as readily as
+# interaction, so tier 2 would read "the model selected 4096 features" as a map affordance and
+# amnesty an invented figure; they are admitted only under tier 1's explicit frame. Tier 2 is
+# restricted to verbs that mean nothing else here — no analysis step pans or zooms.
+_MAP_AFFORDANCE_VERBS = (r"pan(?:s|ned|ning)?|zoom(?:s|ed|ing)?|toggl(?:e|es|ed|ing)|"
+                         r"click(?:s|ed|ing)?|tap(?:s|ped|ping)?|hover(?:s|ed|ing)?|"
+                         r"select(?:s|ed|ing)?|inspect(?:s|ed|ing)?|explor(?:e|es|ed|ing)|"
+                         r"drag(?:s|ged|ging)?|show/hide|hide")
+_MAP_GESTURE_VERBS = (r"pan(?:s|ned|ning)?|zoom(?:s|ed|ing)?|toggl(?:e|es|ed|ing)|"
+                      r"click(?:s|ed|ing)?|tap(?:s|ped|ping)?|hover(?:s|ed|ing)?|"
+                      r"explor(?:e|es|ed|ing)|show/hide")
+_MAP_AFFORDANCE_NOUNS = (r"map|layers?|markers?|features?|points?|polygons?|shapes?|"
+                         r"attributes?|details?|popup|pop-up|tooltip|legend")
+_MAP_AFFORDANCE_RE = re.compile(
+    rf"\b(?:you|users?|they)\s+(?:can|could|may|are\s+able\s+to|will\s+be\s+able\s+to)\b"
+    rf"[^.;]{{0,120}}?\b(?:{_MAP_AFFORDANCE_VERBS})\b"
+    rf"|\b(?:allows?|lets?|enables?)\s+(?:you|users?|them)\b[^.;]{{0,120}}?"
+    rf"\b(?:{_MAP_AFFORDANCE_VERBS})\b"
+    rf"|\b(?:{_MAP_GESTURE_VERBS})\b[^.;]{{0,40}}?\b(?:{_MAP_AFFORDANCE_NOUNS})\b",
+    re.I,
+)
+
+
+def _is_map_claim(claim: str) -> bool:
+    """A claim about the user's map: that a layer is on it, or what they can do with it there.
+
+    Only consulted when a layer really was delivered (this turn or an earlier one) — with no
+    delivery every one of these still gets flagged, which is what keeps a FAILED
+    ``admin_boundary`` from claiming a layer it never produced.
+    """
+    text = str(claim or "")
+    low = text.lower()
+    return (any(m in low for m in _MAP_CLAIM_MARKERS)
+            or bool(_MAP_AFFORDANCE_RE.search(text)))
+
+
 # A tool result usually arrives as a JSON STRING, not a parsed dict, so a structural walk
 # alone misses the delivery: the spatial toolkit (buffer_layer, aggregate_to_grid,
 # cluster_points, …) reports on_map/map_layer inside that string and is not named
@@ -1259,7 +1346,7 @@ def _reconcile_audit_with_artifacts(audit: Optional[Dict[str, Any]],
             claim, reason = str(it or "").lower(), ""
         if artifacts and any(m in claim for m in _ARTIFACT_CLAIM_MARKERS):
             continue  # (1) artifact dispute, but an artifact was produced
-        if map_delivered and any(m in claim for m in _MAP_CLAIM_MARKERS):
+        if map_delivered and _is_map_claim(claim):
             continue  # (4) a map claim, and a layer really did reach the map
         if any(g in reason for g in _GROUNDED_REASON_MARKERS) and not any(c in reason for c in _CONTRADICTION_MARKERS):
             continue  # (3) the auditor's own reason concedes grounding
@@ -3635,6 +3722,14 @@ def build_supervisor_graph(
             # layer is on your map" is precisely the claim it used to flag as unsupported,
             # because nothing in its evidence said a layer from an earlier turn still exists.
             _ledger_text = "\n".join([*_ledger_lines(_rows), *_visible_state_lines(_rows)])
+            # What the CLIENT does, stated only when a layer really is on it — see
+            # _map_environment_lines. It travels as its own exec_ctx key rather than inside
+            # prior_actions, whose heading says "from EARLIER TURNS": an environment fact filed
+            # under that heading would read as a stale artifact of some previous turn. The
+            # answerer's note deliberately does NOT get this line — SYNTHESIS_PROMPT already
+            # covers the map, and the gap being closed here is the auditor's alone.
+            _map_env = _map_environment_lines(_map_layer_was_delivered(
+                {"analysis_results": ar, "code_result": cr, "artifacts": artifacts}, _rows))
             _note = _prior_actions_note(_rows)
             answer = do_synthesize(q, evidence, ar, cr, _history, _note)
             # The auditor must be given the SAME earlier-turn tool records the answerer was
@@ -3642,7 +3737,7 @@ def build_supervisor_graph(
             # 64 dims at 7.645 m/px", read off turn 2's ledger) is audited against this turn's
             # execution only and flagged as unsupported.
             exec_ctx = {"analysis_results": ar, "code_result": cr, "artifacts": artifacts,
-                        "prior_actions": _ledger_text}
+                        "prior_actions": _ledger_text, "environment": _map_env}
             # Audit only when there's actual retrieval/execution grounding to check against.
             # A purely conversational answer (composed from chat_history with no evidence or
             # artifacts) has nothing for the grounding auditor to compare to and would be
