@@ -223,12 +223,20 @@ def test_the_counter_is_the_approximate_one_not_the_model_one():
 
 
 def test_it_is_wired_into_every_agent():
+    """Assert on the real stack, not on source text.
+
+    This used to grep build_agent_executor for the factory call, which would pass just as
+    happily on a stack that was assembled and then never handed to create_agent.
+    """
     import inspect
 
-    src = inspect.getsource(ef.build_agent_executor)
-    assert "_make_context_budget_middleware()" in src
-    # repair must run FIRST so the budgeter sees a coherent list
-    assert src.index("_make_history_repair_middleware") < src.index("_make_context_budget_middleware")
+    names = [m.name for m in ef._default_middleware()]
+    assert "budget_context" in names
+    # Repair must run FIRST so the budgeter always sees a coherent tool-call list. First
+    # handler is the outermost wrapper, so list order is wrapping order.
+    assert names.index("repair_history") < names.index("budget_context")
+    # ...and the stack the executor actually passes is that one.
+    assert "middleware=_default_middleware()" in inspect.getsource(ef.build_agent_executor)
 
 
 def test_counting_failures_never_break_the_call(monkeypatch):

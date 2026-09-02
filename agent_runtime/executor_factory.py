@@ -1142,6 +1142,63 @@ def _context_budget() -> int:
         return 0
 
 
+# Rendering every bound tool schema to JSON is not free: the analyze peer binds ~30 tools and
+# the unified peer ~86, and the budgeter needs the number on EVERY model call. Cache it by the
+# tool-name fingerprint — a peer's bound set is stable across a turn, so this renders once per
+# distinct set per process instead of once per call.
+_SCHEMA_COST_CACHE: Dict[str, Tuple[int, Dict[str, int]]] = {}
+
+
+def _tool_names(tools: List[Any]) -> List[str]:
+    names: List[str] = []
+    for t in tools:
+        name = getattr(t, "name", None)
+        if not isinstance(name, str) and isinstance(t, dict):
+            name = (t.get("function") or {}).get("name") or t.get("name")
+        names.append(str(name or "?"))
+    return names
+
+
+def _toolset_fingerprint(names: List[str]) -> str:
+    import hashlib
+
+    return hashlib.sha1("\n".join(sorted(names)).encode()).hexdigest()[:12]
+
+
+def _schema_cost(tools: List[Any]) -> Tuple[int, Dict[str, int]]:
+    """(total tokens for all tool schemas, per-tool tokens). Cached by fingerprint.
+
+    The per-tool breakdown is what makes a decision about pruning the bound set possible: the
+    total says the schemas are expensive, only the breakdown says which ones are worth cutting.
+    """
+    from langchain_core.messages.utils import count_tokens_approximately
+
+    if not tools:
+        return 0, {}
+    names = _tool_names(tools)
+    key = _toolset_fingerprint(names)
+    hit = _SCHEMA_COST_CACHE.get(key)
+    if hit is not None:
+        return hit
+    per: Dict[str, int] = {}
+    total = 0
+    try:
+        from langchain_core.utils.function_calling import convert_to_openai_tool
+
+        for name, tool in zip(names, tools):
+            try:
+                rendered = json.dumps(convert_to_openai_tool(tool), default=str)
+            except Exception:  # noqa: BLE001 - a tool that will not render is not worth a crash
+                continue
+            cost = count_tokens_approximately([("user", rendered)])
+            per[name] = cost
+            total += cost
+    except Exception:  # noqa: BLE001
+        return 0, {}
+    _SCHEMA_COST_CACHE[key] = (total, per)
+    return total, per
+
+
 def _overhead_tokens(request: Any) -> int:
     """The parts of the payload the old accounting could not see.
 
@@ -1159,15 +1216,7 @@ def _overhead_tokens(request: Any) -> int:
             total += count_tokens_approximately([system])
         except Exception:      # noqa: BLE001
             pass
-    tools = list(getattr(request, "tools", None) or [])
-    if tools:
-        try:
-            from langchain_core.utils.function_calling import convert_to_openai_tool
-
-            rendered = json.dumps([convert_to_openai_tool(t) for t in tools], default=str)
-            total += count_tokens_approximately([("user", rendered)])
-        except Exception:      # noqa: BLE001 - a tool that will not render is not worth a crash
-            pass
+    total += _schema_cost(list(getattr(request, "tools", None) or []))[0]
     return total
 
 
@@ -1292,6 +1341,168 @@ def _make_context_budget_middleware() -> Any:
     return budget_context
 
 
+# --- per-turn instrumentation --------------------------------------------------------------
+#
+# Nothing measured a normal turn before. `_message_diagnostics` counts tool calls per name but
+# is only reached on a GraphRecursionError, and TraceStore is in-memory and capped at 100 — so
+# every claim about whether tool BREADTH costs selection accuracy, and every claim about how
+# badly the token estimator undercounts, rested on offline arithmetic instead of production
+# data. This closes that gap with one structured line per model call.
+#
+# The measurement obtainable no other way is `usage_metadata.input_tokens` — the provider's OWN
+# count of what it received. Against our estimate it yields the real undercount ratio, for real
+# payloads, per model, replacing the 1.72-2.25x measured offline on synthetic GeoJSON.
+#
+# Deliberately NOT a failure label. Sorting "absent" from "present-not-chosen" is a judgement
+# about intent that this layer cannot make without guessing. What it records instead are the
+# facts needed to assign one later: which tools were BOUND (the catalog line) and which were
+# CALLED (each call line).
+INSTRUMENTATION_ENV = "AGENT_TURN_INSTRUMENTATION"
+
+# Fingerprints whose per-tool schema costs have already been logged this process. The catalog
+# is emitted once per distinct bound set rather than on every call: 86 tool names and costs is
+# ~2 KB, which is worth logging once and pure noise logged per request.
+_TOOLSET_LOGGED: set = set()
+
+
+def _instrumentation_enabled() -> bool:
+    """On by default — the cost is one log line per model call, the alternative is guessing."""
+    return (os.getenv(INSTRUMENTATION_ENV) or "").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _active_thread_id() -> Optional[str]:
+    """The thread id for the call in flight, read from langchain's active-config contextvar.
+
+    ModelRequest carries `state` and `runtime` but no config, and Runtime exposes only
+    (context, store, stream_writer, previous) — so this contextvar is the only route to the
+    thread id from inside a wrap_model_call handler. Verified to hold `{thread}::{label}` for
+    peer threads, which is what makes per-turn grouping and peer attribution possible.
+    """
+    try:
+        from langchain_core.runnables.config import var_child_runnable_config
+
+        cfg = var_child_runnable_config.get()
+        tid = ((cfg or {}).get("configurable") or {}).get("thread_id")
+        return str(tid) if tid else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _usage_and_calls(response: Any) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+    """Pull provider usage and tool calls out of a ModelResponse.
+
+    The handler returns a ModelResponse whose only field is `result` — a LIST of messages.
+    Reading `response.usage_metadata` (or treating `result` as a message) yields None on every
+    call, which would make this instrumentation silently report nothing forever.
+    """
+    usage: Optional[Dict[str, Any]] = None
+    called: List[str] = []
+    messages = getattr(response, "result", None)
+    if not isinstance(messages, list):
+        messages = [messages] if messages is not None else []
+    for msg in messages:
+        um = getattr(msg, "usage_metadata", None)
+        if isinstance(um, dict) and usage is None:
+            usage = um
+        for call in getattr(msg, "tool_calls", None) or []:
+            name = call.get("name") if isinstance(call, dict) else getattr(call, "name", None)
+            if name:
+                called.append(str(name))
+    return usage, called
+
+
+def _make_instrumentation_middleware() -> Any:
+    """Record what each model call actually cost and which tools it actually used.
+
+    Placed LAST in the middleware list, which makes it INNERMOST: the first handler is the
+    outermost wrapper, so only the last one sees the request as it finally goes to the provider
+    — after repair and after the budget trim. Measuring any earlier would report a payload that
+    was never sent.
+    """
+    from langchain.agents.middleware import wrap_model_call
+    from langchain_core.messages.utils import count_tokens_approximately
+
+    @wrap_model_call
+    def instrument(request: Any, handler: Any) -> Any:
+        if not _instrumentation_enabled():
+            return handler(request)
+
+        record: Dict[str, Any] = {}
+        try:
+            messages = list(getattr(request, "messages", None) or [])
+            tools = list(getattr(request, "tools", None) or [])
+            names = _tool_names(tools)
+            fingerprint = _toolset_fingerprint(names) if names else "none"
+            schema_tokens, per_tool = _schema_cost(tools)
+            thread = _active_thread_id() or ""
+            # Peer threads are checkpointed under "{thread_id}::{label}", so the suffix is the
+            # peer name and the prefix groups every line belonging to one turn.
+            turn, _, label = thread.partition("::")
+            model = getattr(request, "model", None)
+            record = {
+                "turn": turn,
+                "peer": label or "supervisor",
+                "model": next((getattr(model, a) for a in ("model_name", "model", "model_id")
+                               if isinstance(getattr(model, a, None), str)), "unknown"),
+                "toolset": fingerprint,
+                "tools_bound": len(tools),
+                "messages": len(messages),
+                "est_message_tokens": count_tokens_approximately(messages) if messages else 0,
+                "schema_tokens": schema_tokens,
+                "ceiling": _derive_budget(request),
+            }
+            if fingerprint not in _TOOLSET_LOGGED and per_tool:
+                _TOOLSET_LOGGED.add(fingerprint)
+                logger.info("turn_instrumentation_toolset %s", json.dumps(
+                    {"toolset": fingerprint, "peer": label or "supervisor",
+                     "tools_bound": len(tools), "schema_tokens": schema_tokens,
+                     "per_tool": per_tool}, default=str))
+        except Exception:  # noqa: BLE001 - instrumentation must never break a turn
+            record = {}
+
+        response = handler(request)
+
+        try:
+            usage, called = _usage_and_calls(response)
+            record["tools_called"] = called
+            if usage:
+                real_in = usage.get("input_tokens")
+                record["real_input_tokens"] = real_in
+                record["output_tokens"] = usage.get("output_tokens")
+                est = (record.get("est_message_tokens") or 0) + (record.get("schema_tokens") or 0)
+                if isinstance(real_in, int) and est > 0:
+                    # >1 means the estimator UNDERCOUNTED, the direction that causes a 400.
+                    record["undercount_ratio"] = round(real_in / est, 3)
+            else:
+                # Distinguishes "the provider reported nothing" from "we failed to read it" —
+                # the third failure label the research asked to be able to assign.
+                record["usage"] = "absent"
+        except Exception:  # noqa: BLE001
+            pass
+
+        if record:
+            try:
+                logger.info("turn_instrumentation %s", json.dumps(record, default=str))
+            except Exception:  # noqa: BLE001
+                pass
+        return response
+
+    return instrument
+
+
+def _default_middleware() -> List[Any]:
+    """The middleware stack, in order. The FIRST handler is the OUTERMOST wrapper.
+
+    Repair first, so the budgeter always sees a coherent tool-call list; budget next; and
+    instrumentation LAST so it is innermost and measures the request exactly as it goes to the
+    provider — after both have rewritten it. This order is load-bearing, hence a named function
+    with a test on it rather than a literal inside build_agent_executor.
+    """
+    return [_make_history_repair_middleware(),
+            _make_context_budget_middleware(),
+            _make_instrumentation_middleware()]
+
+
 def build_agent_executor(
     *,
     llm: Optional[Any] = None,
@@ -1361,8 +1572,7 @@ def build_agent_executor(
         tools=tools,
         system_prompt=system_prompt,
         checkpointer=checkpointer,
-        # Order matters: repair first so the budgeter sees a coherent list, then budget.
-        middleware=[_make_history_repair_middleware(), _make_context_budget_middleware()],
+        middleware=_default_middleware(),
         debug=verbose,
         name=agent_name,
     )
