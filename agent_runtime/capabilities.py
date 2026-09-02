@@ -11,7 +11,13 @@ This module answers those questions WITHOUT hardcoded capability prose:
    description, plus deployment flags (code execution, skills, MCP) — so a tool added, removed,
    or gated anywhere in the codebase changes this answer with no edit here.
 2. ``describe_capabilities`` hands that inventory to the LLM (``CAPABILITY_SUMMARY_PROMPT``),
-   which writes it up in plain language. No capability sentence is authored here.
+   which answers the user's ACTUAL question over it.
+
+``describe_capabilities`` is a ReAct loop, not a one-shot composer: the agent introspects its
+own surface by topic (``list_my_capabilities``), can look again with a different word, and can
+call the real listing tools to name actual models. A fixed prompt could only ever answer the
+question it was written for — the previous version received no query at all and returned the
+same grouped catalogue however specific the question was.
 
 The only non-LLM path is a mechanical fallback that lists the inventory verbatim when no model
 is reachable — still derived from the registries, nothing to maintain by hand.
@@ -20,8 +26,11 @@ is reachable — still derived from the registries, nothing to maintain by hand.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 # Meta/self-descriptive phrasings only. Deliberately requires the question to be about the
 # ASSISTANT (you/your, or a bare anchored "list/show tools") so domain questions like
@@ -238,43 +247,167 @@ def _mechanical_summary(inventory: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def describe_capabilities(*, llm: Optional[Any] = None, **config: Any) -> str:
-    """Answer a capability question in plain language, composed by the LLM from the live
-    inventory. Falls back to a mechanical listing of that same inventory if no model answers.
+def make_capability_tools(**config: Any) -> List[Any]:
+    """Tools that let the agent inspect its OWN tool surface.
 
-    ``config`` is forwarded to :func:`collect_capability_inventory`.
+    Filterable ON PURPOSE. The previous design dumped the whole inventory into a prompt and cut
+    it at 12,000 chars — 56% of a 27,397-char blob for this deployment, always the registries
+    added last, and sliced mid-object so the model got malformed JSON. A tool the agent can
+    query by topic removes the budget problem instead of tuning it, and lets the agent look
+    again with a different word when the first look finds nothing.
     """
-    inventory = collect_capability_inventory(**config)
     try:
-        from agent_runtime.prompts import CAPABILITY_SUMMARY_PROMPT
+        from langchain_core.tools import StructuredTool
+    except Exception:
+        return []
 
-        active = llm
-        if active is None:
-            from agent_runtime.executor_factory import build_default_llm
+    def list_my_capabilities(topic: str = "") -> str:
+        """List the tools THIS deployment actually has, to ground an answer about what you can do.
 
-            active = build_default_llm()
-        prompt = CAPABILITY_SUMMARY_PROMPT.format(
-            inventory=json.dumps(inventory, ensure_ascii=True, indent=1)[:12000]
-        )
-        if hasattr(active, "invoke"):
-            raw = active.invoke(prompt)
-            content = getattr(raw, "content", raw)
-            if isinstance(content, list):
-                text = "".join(
-                    str(p.get("text") or p.get("content") or "") if isinstance(p, dict)
-                    else str(getattr(p, "text", p)) for p in content
-                )
-            else:
-                text = str(content or "")
-        elif callable(active):
-            text = str(active(prompt))
-        else:
-            text = ""
-        if text.strip():
-            return text.strip()
+        Pass a `topic` to filter — a domain word ("satellite imagery", "flood", "census"), a
+        format ("geojson", "csv"), or an action ("cluster", "buffer", "predict"). Matching is
+        LITERAL against the tool name and description, so the user's wording may miss: the full
+        list of tool names always comes back too, and you should scan it and call again with a
+        better word rather than answering from a weak match. Omit `topic` for everything.
+        """
+        inv = collect_capability_inventory(**config)
+        tools = list(inv.get("tools") or [])
+        needle = (topic or "").strip().lower()
+        if needle:
+            words = [w for w in re.split(r"[^a-z0-9]+", needle) if len(w) > 2]
+            def hit(e: Dict[str, Any]) -> bool:
+                blob = f"{e.get('name','')} {e.get('description','')}".lower()
+                return any(w in blob for w in words) if words else False
+            tools = [e for e in tools if hit(e)]
+        every = list(inv.get("tools") or [])
+        out: Dict[str, Any] = {
+            "topic": topic or "(everything)",
+            "matched": len(tools),
+            "total_available": len(every),
+            "tools": [{"name": e.get("name"),
+                       "description": str(e.get("description") or "")[:_INVENTORY_DESC_CHARS]}
+                      for e in tools[:40]],
+            # ALWAYS the full name list — it is under a thousand characters and it is what
+            # stops a weak topic match from reading as the whole answer. Substring matching
+            # cannot bridge the user's words and the developer's: "satellite imagery" hit only
+            # 2 of the 8 embedding tools because their descriptions say "remote-sensing
+            # foundation model". With every name visible the agent can spot the right ones and
+            # ask again, instead of confidently answering from a third of the surface.
+            "all_tool_names": [str(e.get("name")) for e in every],
+            "code_execution": inv.get("code_execution"),
+            "skills": inv.get("skills"),
+        }
+        out["descriptions_shown"] = len(out["tools"])
+        if needle:
+            out["hint"] = ("a topic filter is a STARTING POINT, not the whole answer: matching "
+                           "is literal, so the user's words may not be the developer's. Scan "
+                           "all_tool_names and call again with a better word before concluding "
+                           "anything is unsupported.")
+        elif len(out["tools"]) < len(every):
+            # The same "always the last registries" cut, in miniature: descriptions are capped
+            # at 40 of 66, and the embedding tools are last. Say so, so the agent filters for
+            # the rest instead of treating the first 40 as the whole surface.
+            out["hint"] = (f"descriptions shown for {len(out['tools'])} of {len(every)} tools; "
+                           "all_tool_names lists them all — call again with a `topic` to get "
+                           "descriptions for the rest.")
+        return json.dumps(out, ensure_ascii=True, separators=(",", ":"))
+
+    return [StructuredTool.from_function(list_my_capabilities)]
+
+
+# The prompt's inventory budget. The old code did json.dumps(..., indent=1)[:12000] on a blob
+# that is 27,397 chars for this deployment — so 56% of the tool surface was cut, ALWAYS the
+# registries appended last, and the model received JSON truncated mid-object. That is why the
+# capability answer never mentioned satellite embeddings even after those registries were added:
+# they were at the end of the list and never arrived.
+_INVENTORY_PROMPT_CHARS = 24000
+_INVENTORY_DESC_CHARS = 220
+
+
+def _inventory_for_prompt(inventory: Any, *, max_chars: int = _INVENTORY_PROMPT_CHARS) -> str:
+    """The inventory as compact JSON that FITS, dropping whole tools rather than mid-object.
+
+    Descriptions are trimmed first (they average ~340 chars and lead with the punchy summary),
+    then whole entries are dropped from the end with a count the model can see — so a squeeze is
+    visible to the reader and to the log instead of producing malformed JSON.
+    """
+    payload = dict(inventory) if isinstance(inventory, dict) else {"tools": list(inventory or [])}
+    tools = list(payload.get("tools") or [])
+    trimmed = []
+    for t in tools:
+        entry = dict(t) if isinstance(t, dict) else {"name": str(t)}
+        desc = str(entry.get("description") or "")
+        if len(desc) > _INVENTORY_DESC_CHARS:
+            entry["description"] = desc[:_INVENTORY_DESC_CHARS].rstrip() + "…"
+        trimmed.append(entry)
+
+    dropped = 0
+    while True:
+        payload["tools"] = trimmed
+        if dropped:
+            payload["tools_omitted_for_length"] = dropped
+        text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+        if len(text) <= max_chars or len(trimmed) <= 1:
+            if dropped:
+                logger.warning(
+                    "capability inventory too large for the prompt: %d of %d tools omitted",
+                    dropped, len(tools))
+            return text
+        trimmed = trimmed[:-1]
+        dropped += 1
+
+
+def describe_capabilities(*, llm: Optional[Any] = None, query: Optional[str] = None,
+                          **config: Any) -> str:
+    """Answer a capability question by REASONING over live self-introspection.
+
+    A ReAct loop rather than a one-shot composer, because a fixed prompt can only answer the
+    question it was written for. The old version took the inventory and no query at all, was
+    told to "cover everything", and returned the same grouped catalogue however specific the
+    question — "what can you do with satellite imagery?" got five generic headings and never
+    mentioned embeddings, though the inventory carried eight tools for exactly that.
+
+    With a loop the agent can look up its own surface by topic, look again with a different
+    word, call the real listing tools to name actual models, and answer a question nobody
+    anticipated. Falls back to the mechanical listing when no model is reachable.
+    """
+    tools = make_capability_tools(**config)
+    # The genuinely cheap read-only listers, so "which models can you use?" gets the REAL names
+    # from the service rather than a guess. Guarded: if rs-embed is unreachable the tool returns
+    # an error and the agent can say so instead of inventing a list.
+    try:
+        from agent_runtime.rs_embed_tools import make_rs_embed_tools
+
+        tools += [t for t in make_rs_embed_tools(default_input_file_ids=None)
+                  if str(getattr(t, "name", "")) in
+                  {"list_embedding_models", "list_prediction_heads"}]
     except Exception:
         pass
-    return _mechanical_summary(inventory)
+
+    try:
+        from agent_runtime.executor_factory import (
+            build_agent_executor,
+            build_default_llm,
+            invoke_agent_with_payload_fallback,
+        )
+        from agent_runtime.prompts import CAPABILITY_AGENT_PROMPT
+        from agent_runtime.runtime_utils import extract_final_answer
+
+        active = llm or build_default_llm()
+        executor = build_agent_executor(
+            llm=active, preloaded_tools=tools,
+            system_prompt_override=CAPABILITY_AGENT_PROMPT,
+        )
+        resp = invoke_agent_with_payload_fallback(
+            executor, query=(query or "What can you do?").strip(), chat_history=None)
+        answer = extract_final_answer(resp) or ""
+        if answer.strip():
+            return answer.strip()
+    except Exception:
+        logger.warning("capability agent unavailable; falling back to a mechanical listing",
+                       exc_info=True)
+    return _mechanical_summary(collect_capability_inventory(**config))
 
 
-__all__ = ["is_capability_query", "collect_capability_inventory", "describe_capabilities"]
+__all__ = ["is_capability_query", "collect_capability_inventory",
+           "make_capability_tools", "describe_capabilities"]

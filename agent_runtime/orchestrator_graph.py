@@ -162,6 +162,8 @@ def build_orchestrator_graph(
         )
         answer = describe_capabilities(
             llm=llm or build_default_llm(),
+            # Without this the model never saw the question and answered the generic one.
+            query=state.get("query") or "",
             enabled_search_methods=enabled_search_methods,
             include_mcp_tools=include_mcp_tools,
             mcp_modules=mcp_modules,
