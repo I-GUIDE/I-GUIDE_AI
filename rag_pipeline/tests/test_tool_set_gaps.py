@@ -132,12 +132,67 @@ def test_the_capability_inventory_covers_the_embedding_surface():
         assert want in names, f"{want} is bound by every peer but invisible to the user"
 
 
-def test_a_broken_registry_does_not_take_the_inventory_down():
-    """Each registry gets its own try/except, matching the existing pattern."""
-    import inspect
+def test_a_broken_registry_does_not_take_the_inventory_down(monkeypatch):
+    """Behaviour, not source shape: one unconstructible registry must not lose the others.
 
-    from agent_runtime import capabilities
+    This used to count `except Exception:` blocks in collect_capability_inventory — one per
+    hand-written registry. Those are gone: registries are discovered by convention, so a hand
+    list can no longer be wrong (it was wrong twice, and an audit right after fixing it found
+    two more factories still missing). Isolation now lives in the discovery loop.
+    """
+    import agent_runtime.capabilities as cap
 
-    src = inspect.getsource(capabilities.collect_capability_inventory)
-    # one try/except per registry, not one wrapping them all
-    assert src.count("except Exception:") >= 10
+    def _boom(**kwargs):
+        raise RuntimeError("this registry cannot be built")
+
+    real = cap._discover_registry_factories
+    monkeypatch.setattr(cap, "_discover_registry_factories",
+                        lambda: [("make_broken_tools", _boom), *real()])
+
+    inv = cap.collect_capability_inventory(include_mcp_tools=False)
+    names = {t["name"] for t in inv["tools"]}
+    assert len(names) > 40, "a broken registry must not empty the inventory"
+    assert "embed_zones" in names
+
+
+def test_a_new_registry_needs_no_edit_to_this_module():
+    """The point of discovery: adding a make_*tools factory is enough."""
+    from agent_runtime.capabilities import _discover_registry_factories
+
+    found = {n for n, _ in _discover_registry_factories()}
+    # the ones a hand-written list had missed, in two separate rounds
+    for want in ("make_rs_embed_tools", "make_rs_embed_zonal_tools",
+                 "make_langchain_file_tools", "make_quality_tools"):
+        assert want in found, f"{want} must be discovered, not listed"
+
+
+def test_only_read_only_listers_are_handed_to_the_capability_agent():
+    """Generic by prefix, so a new list_* tool is offered without an edit — and nothing that
+    could act is included."""
+    import agent_runtime.capabilities as cap
+    import agent_runtime.executor_factory as ef
+
+    captured = {}
+
+    def _build(**kw):
+        captured["tools"] = [str(getattr(t, "name", ""))
+                             for t in (kw.get("preloaded_tools") or [])]
+        return object()
+
+    orig_build, orig_invoke, orig_llm = (ef.build_agent_executor,
+                                         ef.invoke_agent_with_payload_fallback,
+                                         ef.build_default_llm)
+    ef.build_agent_executor = _build
+    ef.invoke_agent_with_payload_fallback = lambda *a, **k: {"messages": []}
+    ef.build_default_llm = lambda: object()
+    try:
+        cap.describe_capabilities(query="which models do you have?", include_mcp_tools=False)
+    finally:
+        (ef.build_agent_executor, ef.invoke_agent_with_payload_fallback,
+         ef.build_default_llm) = orig_build, orig_invoke, orig_llm
+
+    names = captured["tools"]
+    assert "list_my_capabilities" in names
+    assert "list_embedding_models" in names, "the real model names must be reachable"
+    non_listers = [n for n in names if not n.startswith("list_")]
+    assert non_listers == [], f"only read-only listers belong here, got {non_listers}"

@@ -66,6 +66,57 @@ def _tool_entries(factory, **kwargs) -> List[Dict[str, str]]:
     return out
 
 
+# Modules that hold tool registries, by convention plus two known outliers. Scoped rather than
+# importing all of agent_runtime: most modules here are not registries and some are expensive.
+_REGISTRY_MODULE_GLOB = "*_tools.py"
+_REGISTRY_EXTRA_MODULES = ("agent_runtime.skills", "extractors.geo_handles")
+_REGISTRY_FACTORY_RE = re.compile(r"^make_.*tools$")
+
+
+def _discover_registry_factories() -> List[tuple]:
+    """(name, callable) for every tool-registry factory this deployment has."""
+    import importlib
+    from pathlib import Path
+
+    found: Dict[str, Any] = {}
+    module_names: List[str] = []
+    try:
+        import agent_runtime
+
+        pkg_dir = Path(list(agent_runtime.__path__)[0])
+        module_names += [f"agent_runtime.{p.stem}"
+                         for p in sorted(pkg_dir.glob(_REGISTRY_MODULE_GLOB))]
+    except Exception:
+        pass
+    module_names += list(_REGISTRY_EXTRA_MODULES)
+
+    for mod_name in module_names:
+        try:
+            module = importlib.import_module(mod_name)
+        except Exception:      # an optional backend that is not installed simply has no tools
+            continue
+        for attr in dir(module):
+            if not _REGISTRY_FACTORY_RE.match(attr):
+                continue
+            fn = getattr(module, attr, None)
+            if callable(fn):
+                found.setdefault(attr, fn)
+    return sorted(found.items())
+
+
+def _factory_kwargs(factory: Any, **available: Any) -> Dict[str, Any]:
+    """Only the kwargs *factory* actually accepts — the factories differ in signature."""
+    try:
+        import inspect
+
+        params = inspect.signature(factory).parameters
+    except (TypeError, ValueError):
+        return {}
+    if any(p.kind is p.VAR_KEYWORD for p in params.values()):
+        return dict(available)
+    return {k: v for k, v in available.items() if k in params}
+
+
 def collect_capability_inventory(
     *,
     enabled_search_methods: Optional[List[str]] = None,
@@ -83,93 +134,26 @@ def collect_capability_inventory(
     degrade to omission — this never raises.
     """
     tools: List[Dict[str, str]] = []
-    try:
-        from agent_runtime.langchain_granular_tools import (
-            make_langchain_geocode_tools,
-            make_langchain_granular_tools,
+    # DISCOVERED, not listed. This function used to carry one hand-written try/except per
+    # registry — 20 of them — and a hand-written list is wrong the moment someone adds a module
+    # and forgets this file. It was wrong twice over: the satellite-embedding registries were
+    # absent for weeks (so "what can you do" never mentioned embeddings while every peer could
+    # run them), and an audit right after adding them found make_langchain_file_tools and
+    # make_quality_tools still missing.
+    #
+    # Convention: a `make_*tools` callable in an `agent_runtime/*_tools.py` module (plus the two
+    # known outliers) is a registry. Add one and it appears here with no edit.
+    for label, factory in _discover_registry_factories():
+        if label == "make_langchain_mcp_tools":
+            continue                       # gated below on the MCP flag
+        tools += _tool_entries(
+            factory,
+            **_factory_kwargs(factory,
+                              default_input_file_ids=None,
+                              enabled_search_methods=None,
+                              skill_roots=skill_roots,
+                              session_id=None),
         )
-
-        tools += _tool_entries(make_langchain_granular_tools,
-                               enabled_search_methods=None, include_file_tools=True)
-        tools += _tool_entries(make_langchain_geocode_tools)
-    except Exception:
-        pass
-    try:
-        from agent_runtime.langchain_geo_tools import make_langchain_geo_tools
-
-        tools += _tool_entries(make_langchain_geo_tools, default_input_file_ids=None)
-    except Exception:
-        pass
-    # Overlay / aggregation / temporal analysis registries. Probed unfiltered like the
-    # rest: the analyze and code peers only load these once files are attached, but
-    # "can you clip a layer?" is true of the deployment regardless of what is attached
-    # right now, so the inventory must report them.
-    try:
-        from agent_runtime.analysis_overlay_tools import make_overlay_tools
-
-        tools += _tool_entries(make_overlay_tools, default_input_file_ids=None)
-    except Exception:
-        pass
-    try:
-        from agent_runtime.analysis_aggregate_tools import make_aggregate_tools
-
-        tools += _tool_entries(make_aggregate_tools, default_input_file_ids=None)
-    except Exception:
-        pass
-    try:
-        from agent_runtime.analysis_temporal_tools import make_temporal_tools
-
-        tools += _tool_entries(make_temporal_tools, default_input_file_ids=None)
-    except Exception:
-        pass
-    try:
-        from agent_runtime.analysis_spatial_stats_tools import make_spatial_stats_tools
-
-        tools += _tool_entries(make_spatial_stats_tools, default_input_file_ids=None)
-    except Exception:
-        pass
-    try:
-        from extractors.geo_handles import make_geo_analysis_tools
-
-        tools += _tool_entries(make_geo_analysis_tools)
-    except Exception:
-        pass
-    # These five are bound by EVERY peer and were invisible to "what can you do" — so the
-    # capability answer omitted the entire satellite-embedding surface (embed_region,
-    # embed_zones, fit_zone_model, predict_for_region, segment_region), the named-area
-    # boundary lookup every no-upload map workflow runs through, QGIS, and code execution.
-    # Each in its own try/except, matching the per-registry pattern above: a registry that
-    # cannot be constructed must leave the others intact.
-    try:
-        from agent_runtime.rs_embed_tools import make_rs_embed_tools
-
-        tools += _tool_entries(make_rs_embed_tools, default_input_file_ids=None)
-    except Exception:
-        pass
-    try:
-        from agent_runtime.rs_embed_tools import make_rs_embed_zonal_tools
-
-        tools += _tool_entries(make_rs_embed_zonal_tools, default_input_file_ids=None)
-    except Exception:
-        pass
-    try:
-        from agent_runtime.admin_boundary_tools import make_admin_boundary_tools
-
-        tools += _tool_entries(make_admin_boundary_tools)
-    except Exception:
-        pass
-    try:
-        from agent_runtime.langchain_qgis_tools import make_langchain_qgis_tools
-
-        tools += _tool_entries(make_langchain_qgis_tools)
-    except Exception:
-        pass
-    try:
-        from agent_runtime.langchain_exec_tools import make_code_execution_tools
-
-        tools += _tool_entries(make_code_execution_tools)
-    except Exception:
-        pass
 
     mcp_on = include_mcp_tools
     if mcp_on is None:
@@ -183,8 +167,7 @@ def collect_capability_inventory(
         try:
             from agent_runtime.langchain_mcp_tools import make_langchain_mcp_tools
 
-            tools += _tool_entries(make_langchain_mcp_tools,
-                                   include_modules=mcp_modules or ["spatial_analysis_tools"])
+            tools += _tool_entries(make_langchain_mcp_tools, modules=mcp_modules)
         except Exception:
             pass
 
@@ -372,17 +355,23 @@ def describe_capabilities(*, llm: Optional[Any] = None, query: Optional[str] = N
     anticipated. Falls back to the mechanical listing when no model is reachable.
     """
     tools = make_capability_tools(**config)
-    # The genuinely cheap read-only listers, so "which models can you use?" gets the REAL names
-    # from the service rather than a guess. Guarded: if rs-embed is unreachable the tool returns
-    # an error and the agent can say so instead of inventing a list.
-    try:
-        from agent_runtime.rs_embed_tools import make_rs_embed_tools
-
-        tools += [t for t in make_rs_embed_tools(default_input_file_ids=None)
-                  if str(getattr(t, "name", "")) in
-                  {"list_embedding_models", "list_prediction_heads"}]
-    except Exception:
-        pass
+    # Every read-only LISTER the deployment has, found by the same discovery as the inventory —
+    # not two hardcoded names. A `list_*` tool enumerates options and takes no destructive
+    # action, so it is safe and cheap to hand the agent, and it is what lets "which models can
+    # you use?" be answered with the REAL names instead of a guess. Add a new list_* tool
+    # anywhere and this picks it up. Guarded per registry: if rs-embed is unreachable its tool
+    # returns an error and the agent can say so rather than inventing a list.
+    for name, factory in _discover_registry_factories():
+        if name == "make_langchain_mcp_tools":
+            continue                       # remote, and not a cheap local enumeration
+        try:
+            built = factory(**_factory_kwargs(factory, default_input_file_ids=None,
+                                              skill_roots=None, session_id=None))
+        except Exception:
+            continue
+        tools += [t for t in (built or [])
+                  if str(getattr(t, "name", "")).startswith("list_")
+                  and str(getattr(t, "name", "")) != "list_my_capabilities"]
 
     try:
         from agent_runtime.executor_factory import (
