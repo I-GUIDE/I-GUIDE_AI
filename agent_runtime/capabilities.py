@@ -62,6 +62,11 @@ def _tool_entries(factory, **kwargs) -> List[Dict[str, str]]:
             desc = " ".join(str(getattr(tool, "description", "") or "").split())
             out.append({"name": name, "description": desc[:400]})
     except Exception:
+        # NOT silent. A wrong kwarg here (`modules=` against a keyword-only `include_modules=`)
+        # read as "this registry has no tools" and hid 12 MCP tools from the very map built to
+        # stop tools being invisible — the same swallowed-failure mechanism, one level up.
+        logger.warning("capability registry %s could not be listed",
+                       getattr(factory, "__name__", factory), exc_info=True)
         return out
     return out
 
@@ -167,7 +172,7 @@ def collect_capability_inventory(
         try:
             from agent_runtime.langchain_mcp_tools import make_langchain_mcp_tools
 
-            tools += _tool_entries(make_langchain_mcp_tools, modules=mcp_modules)
+            tools += _tool_entries(make_langchain_mcp_tools, include_modules=mcp_modules)
         except Exception:
             pass
 
@@ -262,7 +267,7 @@ def _registry_areas(**config: Any) -> List[Dict[str, Any]]:
     areas: List[Dict[str, Any]] = []
     for factory_name, factory in _discover_registry_factories():
         if factory_name == "make_langchain_mcp_tools":
-            entries = (_tool_entries(factory, modules=config.get("mcp_modules"))
+            entries = (_tool_entries(factory, include_modules=config.get("mcp_modules"))
                        if config.get("include_mcp_tools") else [])
         else:
             entries = _tool_entries(

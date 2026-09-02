@@ -33,13 +33,59 @@ def _send(messages, budget, monkeypatch):
     return seen["out"]
 
 
-def _fat_thread(pairs=40, chars=4000):
+def _geojson_blob(tracts=12):
+    """A tool result shaped like what this agent actually moves around.
+
+    The fixture used to be "x" * 4000, which is the single most FAVOURABLE content possible for
+    a chars/4 estimator: measured, count_tokens_approximately OVERcounts it 2.01x. Real payloads
+    go the other way — GeoJSON boundaries undercount 1.72x and per-zone embedding vectors 2.25x
+    (o200k_base) — so the budget believes it is under while the provider sees up to 2.25x more.
+    A test built on "x" * n can never exercise that, which is why it passed while the estimator
+    was the actual overflow cause.
+    """
+    import json
+    import random
+
+    random.seed(7)
+    return json.dumps({"type": "FeatureCollection", "features": [
+        {"type": "Feature",
+         "properties": {"GEOID": f"170190{i:04d}", "NAME": f"Census Tract {i}"},
+         "geometry": {"type": "Polygon", "coordinates": [[
+             [-88.3 + random.random() / 100, 40.1 + random.random() / 100]
+             for _ in range(40)]]}}
+        for i in range(tracts)]})
+
+
+def _fat_thread(pairs=40, chars=4000, realistic=True):
+    body = _geojson_blob() if realistic else "x" * chars
     msgs = [SystemMessage("you are an agent"), HumanMessage("the original question")]
     for i in range(pairs):
         msgs.append(AIMessage(content="", tool_calls=[{"name": "t", "id": f"c{i}", "args": {}}]))
-        msgs.append(ToolMessage(content="x" * chars, name="t", tool_call_id=f"c{i}"))
+        msgs.append(ToolMessage(content=body, name="t", tool_call_id=f"c{i}"))
     msgs.append(HumanMessage("what resolution was that?"))
     return msgs
+
+
+def test_the_estimator_undercounts_the_payloads_this_agent_actually_moves():
+    """Pins the mechanism, so the budget's headroom is never mistaken for real headroom.
+
+    Not a hypothesis: geospatial tool results tokenize far worse than chars/4 predicts, and the
+    budget middleware is built on that estimator. Skipped where tiktoken is unavailable, since
+    the point is the comparison against a real tokenizer.
+    """
+    tiktoken = pytest.importorskip("tiktoken")
+    enc = tiktoken.get_encoding("o200k_base")
+
+    blob = _geojson_blob(30)
+    approx = count_tokens_approximately([("user", blob)])
+    real = len(enc.encode(blob))
+    assert approx < real, "GeoJSON must undercount; if this flips, revisit the budget maths"
+    assert real / approx > 1.5, f"undercount only {real / approx:.2f}x — recheck the fixture"
+
+    # and the reason the old fixture hid it
+    filler = "x" * 4000
+    assert count_tokens_approximately([("user", filler)]) > len(enc.encode(filler)), \
+        "a filler string OVERcounts, so a thread built from it cannot exercise the undercount"
 
 
 def test_an_oversized_thread_is_brought_under_budget(monkeypatch):
