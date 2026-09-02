@@ -1796,3 +1796,200 @@ def test_analyze_peer_routes_around_a_dead_end_tool(monkeypatch):
     assert "failed repeatedly" in seen[1]
     assert out["tool_failures"] == {"regionalize": "AttributeError: no attribute 'to_list'"}
     assert "execute_code" in out["summary"]
+
+
+# --- the audit as a gate, not an annotation -------------------------------------------------
+#
+# Reproduced on the deployed agent with "Which counties border Champaign County, Illinois?":
+# admin_boundary succeeded, then an EXPLORATORY execute_code downloaded a Census gazetteer and
+# printed its filename list — computing no adjacency, and from a gazetteer it could not — and
+# the peer then answered with six county names out of the model's own memory. The audit caught
+# it exactly right. But `synthesize` had an unconditional edge to END, so the finding could only
+# be stapled on as a caveat while the unfinished work stayed unfinished.
+
+_UNGROUNDED = {"verdict": "partially_supported", "severity": "high",
+               "issues": [{"claim": "Champaign County borders Ford, Vermilion, Edgar, Douglas, "
+                                    "Piatt and McLean counties",
+                           "reason": "absent - no tool result lists neighbouring counties"}]}
+_GROUNDED = {"verdict": "supported", "severity": "none", "summary": "grounded", "issues": []}
+
+
+def _run_with_audits(monkeypatch, verdicts, analyze_fn=None, **kw):
+    """Drive the real graph with a scripted sequence of audit verdicts."""
+    from agent_runtime.supervisor import graph as g
+
+    seen = {"n": 0}
+
+    def fake_audit(*a, **k):
+        i = seen["n"]
+        seen["n"] += 1
+        return verdicts[i] if i < len(verdicts) else verdicts[-1]
+
+    monkeypatch.setattr(g, "audit_answer_grounding", fake_audit)
+    tasks = []
+
+    def default_analyze(q, ev, st):
+        tasks.append(q)
+        return {"summary": "ran workflow", "tool_results": [{"name": "execute_code",
+                                                             "content": '{"ok": true}'}]}
+
+    state = run_supervisor(
+        "Which counties border Champaign County, Illinois?", llm=_fake_llm,
+        decide_fn=kw.pop("decide_fn", _scripted(["analyze", "done", "done", "done"])),
+        search_fn=lambda q, s: list(DOCS),
+        analyze_fn=analyze_fn or default_analyze,
+        synthesize_fn=lambda q, ev, ar, cr, ch, pa=None: "Champaign County borders six counties: "
+                                                         "Ford, Vermilion, Edgar, Douglas, Piatt, McLean.",
+        do_rerank=False, **kw)
+    return state, tasks, seen["n"]
+
+
+def test_an_ungrounded_answer_is_sent_back_to_be_computed(monkeypatch):
+    """The gate: a surviving high-severity flag re-runs the analysis instead of shipping."""
+    state, tasks, audits = _run_with_audits(monkeypatch, [_UNGROUNDED, _GROUNDED])
+    assert state["actions"].count("analyze") == 2, state["actions"]
+    assert audits == 2
+    assert state.get("grounding_retries") == 1
+    # the answer ships clean once the second pass is grounded
+    assert "may not be fully supported" not in state["final_answer"]
+
+
+def test_the_gate_hands_the_peer_the_claims_to_establish(monkeypatch):
+    """The state the second analyze pass runs against must carry the gaps.
+
+    Asserted on state rather than on the task string because the directive is appended inside
+    default_analyze_fn, and this harness injects its own analyze_fn.
+    """
+    seen = {}
+
+    def analyze_fn(q, ev, st):
+        seen.setdefault("gaps_on_second_pass", None)
+        if "gaps" in seen:
+            seen["gaps_on_second_pass"] = list(st.get("grounding_gaps") or [])
+        seen["gaps"] = list(st.get("grounding_gaps") or [])
+        return {"summary": "ran workflow"}
+
+    _run_with_audits(monkeypatch, [_UNGROUNDED, _GROUNDED], analyze_fn=analyze_fn)
+    assert seen["gaps_on_second_pass"] == [
+        "Champaign County borders Ford, Vermilion, Edgar, Douglas, Piatt and McLean counties"]
+
+
+def test_the_directive_names_the_claims_and_permits_an_honest_failure():
+    """Re-running blind would just repeat the same unsupported answer — and a directive that
+    only demanded an answer would push the model straight back into inventing one."""
+    from agent_runtime.supervisor import graph as g
+    note = g._reground_note({"grounding_gaps": ["Champaign borders six counties", "  "]})
+    assert "were NOT present in any tool result" in note
+    assert "  - Champaign borders six counties" in note
+    assert "Do NOT restate them from your own knowledge" in note
+    assert "which parts you could not establish" in note
+    # the specific failure observed: an exploratory download mistaken for the computation
+    assert "downloading or inspecting a file is not the same as computing" in note
+    assert g._reground_note({}) is None
+    assert g._reground_note({"grounding_gaps": ["", "   "]}) is None
+
+
+def test_the_directive_never_contaminates_the_query_itself():
+    """query is regexed by the QGIS/map/model heuristics and recorded in searched_queries;
+    the directive belongs on the task text alone."""
+    import inspect
+    from agent_runtime.supervisor import graph as g
+    src = inspect.getsource(g.default_analyze_fn)
+    assert "_reground_note(state)" in src
+    # the augmented variable is the task (q), never the query the heuristics read
+    assert "query = f\"{query}" not in src
+
+
+def test_the_gate_spends_at_most_one_pass(monkeypatch):
+    """The audit has a false-positive history, so an unbounded gate would burn every step."""
+    state, tasks, audits = _run_with_audits(monkeypatch, [_UNGROUNDED])   # always flags
+    assert state["actions"].count("analyze") == 2, state["actions"]
+    assert state.get("grounding_retries") == 1
+    # second pass still ungrounded -> ship WITH the caveat rather than loop
+    assert "may not be fully supported" in state["final_answer"]
+
+
+def test_a_grounded_answer_never_triggers_a_pass(monkeypatch):
+    state, tasks, audits = _run_with_audits(monkeypatch, [_GROUNDED])
+    assert state["actions"].count("analyze") == 1
+    assert not state.get("grounding_retries")
+    assert audits == 1
+
+
+def test_an_empty_issue_list_is_cleared_before_the_gate_is_reached(monkeypatch):
+    """Documents where this is handled: _reconcile_audit_with_artifacts drops the verdict when
+    no substantive issue remains, so the gate never even sees it."""
+    empty = {"verdict": "partially_supported", "severity": "high", "issues": []}
+    state, _, _ = _run_with_audits(monkeypatch, [empty])
+    assert state["actions"].count("analyze") == 1
+    assert not state.get("grounding_retries")
+
+
+def test_a_flag_with_no_quotable_claims_does_not_trigger_a_pass(monkeypatch):
+    """Nothing to tell the peer means nothing to gain from re-running.
+
+    Uses an issue that SURVIVES reconciliation but carries no text — reconcile only clears a
+    verdict whose issue list is empty, so a blank-claim issue reaches the gate still flagged.
+    """
+    blank = {"verdict": "partially_supported", "severity": "high",
+             "issues": [{"claim": "   ", "reason": ""}]}
+    state, _, _ = _run_with_audits(monkeypatch, [blank])
+    assert state["actions"].count("analyze") == 1, "nothing to name means nothing to re-run for"
+    assert not state.get("grounding_retries")
+
+
+def test_the_gate_does_not_leak_into_the_client_payload(monkeypatch):
+    state, _, _ = _run_with_audits(monkeypatch, [_UNGROUNDED, _GROUNDED])
+    assert state.get("reground") is False
+    assert state.get("grounding_gaps") == []
+
+
+_COMPUTED = {"step": 1, "max_steps": 8, "actions": ["analyze"],
+             "analysis_results": {"summary": "ran"}}
+_RETRIEVED = {"step": 1, "max_steps": 8, "actions": ["search"], "evidence": [{"doc_id": "a"}]}
+
+
+def test_a_computed_answer_is_sent_back_to_analyze_and_a_retrieved_one_to_search():
+    """The corrective depends on how the answer was produced. A computed answer went ungrounded
+    because the computation was unfinished; a retrieved one because nothing supported it, and
+    re-running the analysis peer would do nothing for that."""
+    from agent_runtime.supervisor import graph as g
+    assert g._reground_target(_COMPUTED) == "analyze"
+    assert g._reground_target(_RETRIEVED) == "search"
+
+
+def test_regrounding_respects_the_step_budget():
+    """It must not route a pass it cannot afford: synthesize + peer is 2 steps."""
+    from agent_runtime.supervisor import graph as g
+    assert g._reground_target({**_COMPUTED, "step": 2}) == "analyze"
+    assert g._reground_target({**_COMPUTED, "step": 7}) is None
+    assert g._reground_target({**_RETRIEVED, "step": 7}) is None
+
+
+def test_regrounding_respects_the_per_peer_cap():
+    """The same cap `_dead` applies to a queued need — otherwise we burn a step routing to a
+    peer whose need the supervisor is about to discard."""
+    from agent_runtime.supervisor import graph as g
+    maxed = ["analyze"] * g._max_peer_runs()
+    assert g._reground_target({**_COMPUTED, "actions": maxed}) is None
+    assert g._reground_target({**_COMPUTED, "actions": maxed[:-1]}) == "analyze"
+
+
+def test_regrounding_does_not_re_search_an_exhausted_search():
+    """A retrieval turn with nothing left to find has no corrective available."""
+    from agent_runtime.supervisor import graph as g
+    exhausted = {**_RETRIEVED, "search_attempts": 99, "search_empty_streak": 99}
+    assert g._reground_target(exhausted) is None
+
+
+def test_regrounding_is_capped_by_the_retry_counter():
+    from agent_runtime.supervisor import graph as g
+    assert not g._can_reground({"step": 1, "max_steps": 8, "actions": [],
+                                "grounding_retries": g._MAX_GROUNDING_RETRIES})
+
+
+def test_unsupported_claims_reads_both_issue_shapes():
+    from agent_runtime.supervisor import graph as g
+    assert g._unsupported_claims({"issues": [{"claim": "a"}, "b", {"claim": "  "}]}) == ["a", "b"]
+    assert g._unsupported_claims({}) == []
+    assert len(g._unsupported_claims({"issues": [{"claim": f"c{i}"} for i in range(20)]})) == 6

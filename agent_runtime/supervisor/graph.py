@@ -123,6 +123,9 @@ class SupervisorState(TypedDict, total=False):
                                        # _record_actions); cleared by synthesize so the
                                        # client payload never carries them
     unified_peer: Optional[bool]   # per-request override of AGENT_UNIFIED_PEER
+    grounding_gaps: List[str]      # claims the audit could not ground, for a re-grounding pass
+    grounding_retries: int         # how many re-grounding passes this turn has spent (cap 1)
+    reground: bool                 # synthesize -> supervisor instead of END, for that one pass
 
 
 def is_supervisor_enabled() -> bool:
@@ -787,6 +790,104 @@ _MAP_CLIENT_AFFORDANCES = (
 def _map_environment_lines(delivered: bool) -> List[str]:
     """The client-affordance line for the auditor's record, when a layer is actually there."""
     return [_MAP_CLIENT_AFFORDANCES] if delivered else []
+
+
+# --- re-grounding: make the audit a gate, not just an annotation -------------------------
+#
+# Observed on "Which counties border Champaign County, Illinois?": the peer called
+# admin_boundary, then ran an EXPLORATORY execute_code that downloaded a Census gazetteer and
+# printed its filename list — computing no adjacency, and from a gazetteer it could not (those
+# carry centroids, not geometry) — and then answered with six county names out of the model's
+# own memory. The audit caught it exactly right: "the listed bordering counties and directions
+# are not supported by the supplied evidence or execution record."
+#
+# The detection worked; there was nowhere for it to go. `synthesize` had an unconditional edge
+# to END, so a correct finding of ungroundedness could only be stapled to the answer as a
+# caveat, and the unfinished work stayed unfinished. This routes that finding back into the
+# loop ONCE, telling the peer what was not grounded and that finishing the computation or
+# admitting it cannot are both acceptable — inventing is not.
+#
+# Bounded deliberately: ONE pass per turn (_MAX_GROUNDING_RETRIES). The audit has a documented
+# false-positive history, so an unbounded gate would let a wrong verdict spend the whole step
+# budget. It also runs only AFTER _reconcile_audit_with_artifacts, whose four deterministic
+# drops remove the affordance/artifact/number classes — so what reaches here is substantive by
+# construction.
+_MAX_GROUNDING_RETRIES = 1
+
+_REGROUND_DIRECTIVE = (
+    "IMPORTANT — a previous attempt at this same question produced an answer whose key claims "
+    "were NOT present in any tool result, so it was rejected. The claims that could not be "
+    "grounded were:\n{gaps}\n\n"
+    "Do NOT restate them from your own knowledge. Either (a) actually compute or retrieve them "
+    "now with the tools you have, so the values appear in a tool result, or (b) say plainly "
+    "which parts you could not establish. A partial answer that is fully grounded is better "
+    "than a complete one that is not. Note that downloading or inspecting a file is not the "
+    "same as computing the answer: finish the computation and print the result."
+)
+
+
+def _reground_note(state: SupervisorState) -> Optional[str]:
+    """The re-grounding directive for the peer's TASK text, or None when not re-grounding.
+
+    Appended to the task only — never merged into ``query`` — because ``query`` is regexed by
+    _detect_qgis_map_request, _WANTS_MAP_RE and _models_named_in, and by `analysis_node` into
+    `searched_queries`. Folding a paragraph of quoted claims into it would corrupt all four.
+    """
+    gaps = [str(g).strip() for g in (state.get("grounding_gaps") or []) if str(g).strip()]
+    if not gaps:
+        return None
+    return _REGROUND_DIRECTIVE.format(gaps="\n".join(f"  - {g}" for g in gaps))
+
+
+def _unsupported_claims(audit: Optional[Dict[str, Any]], limit: int = 6) -> List[str]:
+    """The claims a flagged audit could not ground, as plain strings."""
+    out: List[str] = []
+    for item in ((audit or {}).get("issues") or []):
+        if isinstance(item, dict):
+            claim = str(item.get("claim") or "").strip()
+        else:
+            claim = str(item or "").strip()
+        if claim:
+            out.append(claim)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _reground_target(state: SupervisorState) -> Optional[str]:
+    """Which peer should try again — or None when no pass is available or useful.
+
+    The corrective depends on what kind of answer went ungrounded. A COMPUTED answer failed
+    because the computation was not finished, so analyze (which owns execute_code and the
+    spatial toolkit) is the peer that can finish it. A RETRIEVED answer failed because nothing
+    was found to support it, and there the corrective is another search, not an analysis run —
+    routing every case to analyze would push a retrieval-only turn into the analysis peer for
+    no reason.
+
+    Every bound here is load-bearing: the retry counter caps the feature at one pass, the step
+    budget is shared with every other route, and the per-peer cap is the same one `_dead`
+    applies to a queued need — without it we would route to a peer whose need the supervisor is
+    about to discard, spending a step to arrive back at the same answer.
+    """
+    if state.get("grounding_retries", 0) >= _MAX_GROUNDING_RETRIES:
+        return None
+    # synthesize -> supervisor -> peer is two steps before an answer can be composed again.
+    if state.get("step", 0) + 2 > state.get("max_steps", DEFAULT_MAX_STEPS):
+        return None
+    actions = state.get("actions") or []
+    computed = (state.get("analysis_results") is not None
+                or state.get("code_result") is not None)
+    if computed and actions.count("analyze") < _max_peer_runs():
+        return "analyze"
+    if (not computed and actions.count("search") < _max_peer_runs()
+            and not _search_exhausted(state)):
+        return "search"
+    return None
+
+
+def _can_reground(state: SupervisorState) -> bool:
+    """Kept as the boolean form of :func:`_reground_target` for readability at the call site."""
+    return _reground_target(state) is not None
 
 
 def _prior_actions_note(rows: List[Dict[str, Any]]) -> Optional[str]:
@@ -2966,6 +3067,12 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
         _ledger_note = _prior_actions_note(_prior_actions(state))
         if _ledger_note:
             q = f"{q}\n\n{_ledger_note}"
+        # A re-grounding pass has to say WHAT was ungrounded, or the peer re-runs blind and
+        # most likely repeats the same unsupported answer. Appended to the task text like the
+        # ledger note above, which is the channel this peer already reads.
+        _reground = _reground_note(state)
+        if _reground:
+            q = f"{q}\n\n{_reground}"
         # Cross-turn continuity comes from this peer's own checkpointed child
         # thread (and the supervisor's chat_history drives routing/synthesis), so
         # we do NOT re-feed chat_history here — that would replay prior turns twice
@@ -3752,6 +3859,34 @@ def build_supervisor_graph(
             # map/file or a number/method it actually computed.
             audit = _reconcile_audit_with_artifacts(audit, artifacts, execution_context=exec_ctx,
                                                     prior_rows=_rows)
+            # THE GATE. A surviving flag means the audit still cannot find these claims in the
+            # record after all four deterministic drops — the shape of "answered from memory".
+            # Send the work back once instead of shipping a caveat over unfinished work.
+            _reground_to = _reground_target(state) if _audit_flagged(audit) else None
+            if _reground_to:
+                gaps = _unsupported_claims(audit)
+                if gaps:
+                    emit_trace_event(
+                        "node_completed",
+                        {"stage": "synthesize",
+                         "message": f"answer not grounded — re-running {_reground_to} to "
+                                    f"establish: {'; '.join(g[:80] for g in gaps[:2])}"},
+                        node="synthesize",
+                    )
+                    _LEDGER_LOG.info("re-grounding pass: %d unsupported claim(s): %s",
+                                     len(gaps), gaps[:3])
+                    return {
+                        # Routed through the needs FIFO on purpose: the supervisor fulfils a
+                        # need BEFORE consulting the decider, and the decider is what already
+                        # said "done" on this state. A plain edge back would just be told done
+                        # again.
+                        "needs": [*(state.get("needs") or []),
+                                  {"capability": _reground_to, "by": "synthesize",
+                                   "reason": "answer was not grounded in the execution record"}],
+                        "grounding_gaps": gaps,
+                        "grounding_retries": state.get("grounding_retries", 0) + 1,
+                        "reground": True,
+                    }
             # Act on the verdict: a flagged audit appends a user-visible caveat to the answer.
             final = _apply_grounding_caveat(answer, audit)
             # Embed produced image artifacts (maps/plots) inline so they render in markdown.
@@ -3813,6 +3948,9 @@ def build_supervisor_graph(
         # state ships to the client verbatim, and an empty list makes double-recording
         # impossible if synthesize is ever re-entered.
         return {"answer": final, "final_answer": final, "audit": audit, "action_rows": [],
+                # Cleared so a second synthesize cannot re-route, and so the gaps do not leak
+                # into the client payload or a later turn's state.
+                "reground": False, "grounding_gaps": [],
                 "distilled": {**_distill(merged), "answer": final}}
 
     builder = StateGraph(SupervisorState)
@@ -3832,7 +3970,13 @@ def build_supervisor_graph(
     builder.add_edge("search", "supervisor")
     builder.add_edge("analyze", "supervisor")
     builder.add_edge("code", "supervisor")
-    builder.add_edge("synthesize", END)
+    # synthesize is no longer unconditionally terminal: the grounding gate can send one pass
+    # back through the supervisor, which fulfils the queued `analyze` need before deciding.
+    builder.add_conditional_edges(
+        "synthesize",
+        lambda s: "supervisor" if s.get("reground") else "done",
+        {"supervisor": "supervisor", "done": END},
+    )
     return builder.compile()
 
 
