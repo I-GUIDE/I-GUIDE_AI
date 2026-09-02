@@ -99,10 +99,26 @@ def test_undercount_ratio_exposes_the_estimator_gap(caplog):
         "input_tokens": 8000, "output_tokens": 1, "total_tokens": 8001})
     _run(caplog, reply, tools=[alpha, beta])
     line = _lines(caplog)[0]
-    est = line["est_message_tokens"] + line["schema_tokens"]
+    est = line["est_message_tokens"] + line["schema_tokens"] + line["system_tokens"]
     assert est > 0
     assert line["undercount_ratio"] == pytest.approx(round(8000 / est, 3))
     assert line["undercount_ratio"] > 1  # the fake reports far more than the estimate
+
+
+def test_ratio_denominator_includes_the_system_prompt(caplog):
+    """The provider counts the system prompt; a denominator that omits it reports a phantom
+    overcount. Measured live: at messages=1 the estimate was essentially schemas alone (4,397)
+    against a real 3,255, purely because ~1,000 tokens of system prompt were missing from the
+    comparison rather than from the payload."""
+    reply = AIMessage(content="ok", usage_metadata={
+        "input_tokens": 500, "output_tokens": 1, "total_tokens": 501})
+    _run(caplog, reply, tools=[alpha])
+    line = _lines(caplog)[0]
+    assert line["system_tokens"] > 0, "the system prompt must be counted, not assumed absent"
+    naive = line["est_message_tokens"] + line["schema_tokens"]
+    honest = naive + line["system_tokens"]
+    assert line["undercount_ratio"] == pytest.approx(round(500 / honest, 3))
+    assert line["undercount_ratio"] != pytest.approx(round(500 / naive, 3))
 
 
 def test_absent_usage_is_labelled_not_silently_dropped(caplog):

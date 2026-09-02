@@ -1434,6 +1434,8 @@ def _make_instrumentation_middleware() -> Any:
             names = _tool_names(tools)
             fingerprint = _toolset_fingerprint(names) if names else "none"
             schema_tokens, per_tool = _schema_cost(tools)
+            system = getattr(request, "system_message", None)
+            system_tokens = count_tokens_approximately([system]) if system is not None else 0
             thread = _active_thread_id() or ""
             # Peer threads are checkpointed under "{thread_id}::{label}", so the suffix is the
             # peer name and the prefix groups every line belonging to one turn.
@@ -1449,6 +1451,10 @@ def _make_instrumentation_middleware() -> Any:
                 "messages": len(messages),
                 "est_message_tokens": count_tokens_approximately(messages) if messages else 0,
                 "schema_tokens": schema_tokens,
+                # Counted separately because the provider's input_tokens includes it: a ratio
+                # against messages+schemas alone silently omits ~1,000 tokens and reports an
+                # overcount that is really a mis-comparison.
+                "system_tokens": system_tokens,
                 "ceiling": _derive_budget(request),
             }
             if fingerprint not in _TOOLSET_LOGGED and per_tool:
@@ -1469,7 +1475,11 @@ def _make_instrumentation_middleware() -> Any:
                 real_in = usage.get("input_tokens")
                 record["real_input_tokens"] = real_in
                 record["output_tokens"] = usage.get("output_tokens")
-                est = (record.get("est_message_tokens") or 0) + (record.get("schema_tokens") or 0)
+                # Must mirror exactly what the provider counted: messages + tool schemas +
+                # the system prompt. Omitting any part makes the ratio meaningless.
+                est = ((record.get("est_message_tokens") or 0)
+                       + (record.get("schema_tokens") or 0)
+                       + (record.get("system_tokens") or 0))
                 if isinstance(real_in, int) and est > 0:
                     # >1 means the estimator UNDERCOUNTED, the direction that causes a 400.
                     record["undercount_ratio"] = round(real_in / est, 3)
