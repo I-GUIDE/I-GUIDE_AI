@@ -655,3 +655,95 @@ def test_an_internal_knob_is_not_amnesty_for_an_invented_figure():
                                 {"ok": True, "results": {}}))
     blob = json.dumps(rows)
     assert "999" not in blob, "a 3-digit knob in the record excuses a fabricated 999"
+
+
+# --- the search peer leaves a trace too ----------------------------------------------------
+#
+# search_node returned only evidence/attempts/streak/queries and discarded the peer's tool
+# calls, and _record_actions was passed only analysis_results/code_result. So every retrieval
+# method left NO trace: the ledger could not answer "what did we search for?", the single most
+# common follow-up. Three producers are involved and only one leaves an artifact to extract —
+# the deterministic sweep, the open-web fallback and the short-circuits all call the backends
+# directly, so they need rows built for them.
+
+def _decides(seq):
+    """decide_fn(state, distilled) -> action string; 'done' once the script runs out."""
+    box = {"i": 0}
+
+    def decide(state, distilled):
+        i = box["i"]
+        box["i"] += 1
+        return seq[i] if i < len(seq) else "done"
+
+    return decide
+
+
+def test_the_search_node_carries_its_rows_to_the_ledger():
+    """End to end: search_fn -> action_rows -> state -> _record_actions -> the ledger."""
+    row = g._search_row("keyword_search", "flood risk", "keyword", 2)
+    graph = g.build_supervisor_graph(
+        search_fn=lambda q, s: {"documents": [{"doc_id": "d1", "title": "t", "contents": "c"}],
+                                "action_rows": [row]},
+        synthesize_fn=lambda *a: "ans",
+        decide_fn=_decides(["search", "done"]), do_rerank=False, do_audit=False)
+    graph.invoke({"query": "flood risk", "thread_id": "t-search", "evidence": [], "actions": []})
+
+    rows = sm.get_session_actions("t-search")
+    assert any(r["tool"] == "keyword_search" for r in rows), rows
+    note = g._prior_actions_note(rows)
+    assert "retrieval method: keyword" in note and "documents returned: 2" in note
+
+
+def test_a_list_returning_search_fn_still_works():
+    """~30 existing doubles return a plain list; that must keep working."""
+    graph = g.build_supervisor_graph(
+        search_fn=lambda q, s: [{"doc_id": "d1", "title": "t", "contents": "c"}],
+        synthesize_fn=lambda *a: "ans",
+        decide_fn=_decides(["search", "done"]), do_rerank=False, do_audit=False)
+    out = graph.invoke({"query": "q", "thread_id": "t-list", "evidence": [], "actions": []})
+    assert out["final_answer"] == "ans"
+
+
+def test_the_client_payload_is_not_burdened_with_the_turn_rows():
+    """The state ships to the client verbatim, and the rows are already in the ledger."""
+    graph = g.build_supervisor_graph(
+        search_fn=lambda q, s: {"documents": [{"doc_id": "d1", "title": "t", "contents": "c"}],
+                                "action_rows": [g._search_row("keyword_search", "q", "keyword", 1)]},
+        synthesize_fn=lambda *a: "ans",
+        decide_fn=_decides(["search", "done"]), do_rerank=False, do_audit=False)
+    out = graph.invoke({"query": "q", "thread_id": "t-clean", "evidence": [], "actions": []})
+    assert not out.get("action_rows"), "synthesize must clear them on the way out"
+
+
+def test_rows_from_several_search_steps_accumulate():
+    """SupervisorState has no reducers, so a plain overwrite would lose the earlier step."""
+    calls = {"n": 0}
+
+    def _search(q, s):
+        calls["n"] += 1
+        return {"documents": [{"doc_id": f"d{calls['n']}", "title": "t", "contents": "c"}],
+                "action_rows": [g._search_row(f"search_{calls['n']}", q, "keyword", 1)]}
+
+    graph = g.build_supervisor_graph(
+        search_fn=_search, synthesize_fn=lambda *a: "ans",
+        decide_fn=_decides(["search", "search", "done"]), do_rerank=False, do_audit=False)
+    graph.invoke({"query": "q", "thread_id": "t-accum", "evidence": [], "actions": []})
+
+    tools = {r["tool"] for r in sm.get_session_actions("t-accum")}
+    assert {"search_1", "search_2"} <= tools, tools
+
+
+def test_a_search_row_records_the_method_and_count_but_not_the_documents():
+    """Titles and doc_ids are the payload bloat this module exists to avoid."""
+    row = g._search_row("baseline_sweep", "flood risk in illinois", "keyword+semantic", 8)
+    blob = json.dumps(row)
+    assert row["facts"] == {"search_method": "keyword+semantic", "results_returned": 8}
+    assert "title" not in blob and "contents" not in blob
+    assert row["args"]["query"] == "flood risk in illinois"
+
+
+def test_every_retrieval_producer_is_in_the_rename_set():
+    """Otherwise its `source`/`count` render as imagery provenance again."""
+    for tool in ("baseline_sweep", "web_fallback", "related_elements", "element_lookup",
+                 "popularity_ranking", "keyword_search", "overpass_search"):
+        assert tool in g._LEDGER_SEARCH_TOOLS, tool

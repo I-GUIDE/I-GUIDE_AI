@@ -985,7 +985,7 @@ def test_default_search_fn_short_circuits_id_lookup(monkeypatch):
         raise AssertionError("must NOT build the LLM SearchAgent for an id-lookup query")
     monkeypatch.setattr(ef, "build_search_agent_executor", boom)
 
-    docs = default_search_fn()(f"Explain {UUID}", {"thread_id": "t"})
+    docs = default_search_fn()(f"Explain {UUID}", {"thread_id": "t"})["documents"]
     assert len(docs) == 1 and docs[0]["title"] == "NID"   # served deterministically, no LLM
 
 
@@ -1043,7 +1043,7 @@ def test_default_search_fn_recalls_id_for_subjectless_followup(monkeypatch):
     monkeypatch.setattr(ef, "build_search_agent_executor", boom)
 
     state = {"thread_id": "t", "chat_history": [{"userQuery": f"Explain {UUID}", "answer": "NID ..."}]}
-    docs = default_search_fn()("What are the related elements", state)
+    docs = default_search_fn()("What are the related elements", state)["documents"]
     assert seen.get("eid") == UUID                                   # recalled the id from memory
     assert any(d.get("provenance") == "curated" for d in docs)
 
@@ -1110,7 +1110,7 @@ def test_default_search_fn_short_circuits_popularity(monkeypatch):
         raise AssertionError("must NOT build the LLM SearchAgent for a popularity query")
     monkeypatch.setattr(ef, "build_search_agent_executor", boom)
 
-    docs = default_search_fn()("What are the most popular knowledge elements", {"thread_id": "t"})
+    docs = default_search_fn()("What are the most popular knowledge elements", {"thread_id": "t"})["documents"]
     assert [d["doc_id"] for d in docs] == ["e1", "e2"]
     assert docs[0]["click_count"] == 42                      # real usage counts carried
     assert "[popularity: 42 clicks]" in docs[0]["contents"]  # visible to the synthesizer
@@ -1177,7 +1177,7 @@ def test_search_fn_unions_sweep_with_llm_harvest(monkeypatch):
     monkeypatch.setattr(kw, "get_keyword_search_results", lambda q, size=8: [_kw_hit("k1", "KW")])
     monkeypatch.setattr(sem, "semantic_search", lambda q, size=8: [_kw_hit("k1", "KW"), _kw_hit("s1", "Sem")])
 
-    docs = default_search_fn()("datasets about floods", {"thread_id": "t"})
+    docs = default_search_fn()("datasets about floods", {"thread_id": "t"})["documents"]
     assert [d["doc_id"] for d in docs] == ["k1", "s1"]          # merged + deduped on k1
 
 

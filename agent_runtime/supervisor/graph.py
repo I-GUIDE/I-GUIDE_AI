@@ -119,6 +119,9 @@ class SupervisorState(TypedDict, total=False):
     search_attempts: int           # how many times the search peer has run
     search_empty_streak: int       # consecutive searches that added NO new evidence
     searched_queries: List[str]    # every query string actually searched (incl. refinements)
+    action_rows: List[Dict[str, Any]]  # ledger rows the peers produced THIS turn (see
+                                       # _record_actions); cleared by synthesize so the
+                                       # client payload never carries them
     unified_peer: Optional[bool]   # per-request override of AGENT_UNIFIED_PEER
 
 
@@ -298,7 +301,7 @@ _LEDGER_ARGS = (
     # execute_code produced no row at all. `code` stays OUT on purpose: 80 chars of a program
     # is noise, and label/entrypoint already name it.
     "language", "label", "entrypoint", "dependencies",
-    "limit", "element_id",
+    "limit", "element_id", "url", "doc_id",
     # DELIBERATELY EXCLUDED: permutations (999), tile_px (200), timeout_seconds (120/300).
     # _reconcile_audit_with_artifacts drops any audit issue whose 3+ digit numbers all appear
     # in the json-dumped execution record, so curating an internal knob converts it into
@@ -328,6 +331,7 @@ _LEDGER_SEARCH_TOOLS = frozenset({
     "keyword_search", "semantic_search", "neo4j_search", "neo4j_get_element_by_id",
     "neo4j_explore_related_nodes", "spatial_search", "opengeodata_search", "agent_kb_search",
     "get_kb_block", "overpass_search", "web_search", "web_fetch", "baseline_sweep",
+    "web_fallback", "related_elements", "element_lookup", "popularity_ranking",
 })
 _LEDGER_SEARCH_RENAMES = {"source": "search_method", "count": "results_returned"}
 _LEDGER_VALUE_CHARS = 80
@@ -393,6 +397,24 @@ def _pick(source: Any, keys) -> Dict[str, Any]:
 
 def _row_has_result(row: Dict[str, Any]) -> bool:
     return any(k in row for k in ("facts", "file_id", "map_layer", "failed"))
+
+
+def _search_row(tool: str, query: str, method: str, returned: int,
+                **extra: Any) -> Dict[str, Any]:
+    """A ledger row for a retrieval step that leaves no tool artifact to extract.
+
+    The deterministic sweep, the open-web fallback and the three short-circuits are all real
+    searches made with direct backend calls, so nothing reaches ``extract_search_artifacts``.
+    A ledger that omits them says the conversation never looked — which is exactly the answer
+    the feature exists to prevent ("the available evidence does not specify…" over work already
+    done). Facts are deliberately only the METHOD and the COUNT: titles and doc_ids are the
+    payload bloat this module exists to avoid, and the documents themselves are in `evidence`
+    for this turn and in the answer text thereafter.
+    """
+    args = {"query": _ledger_value(query, "query")}
+    args.update({k: _ledger_value(v, k) for k, v in extra.items() if v not in (None, "", [], {})})
+    return {"tool": tool, "args": args,
+            "facts": {"search_method": method, "results_returned": int(returned)}}
 
 
 def _delivers_layer(tool_name: str, payload: Any) -> bool:
@@ -690,12 +712,18 @@ def _prior_actions(state: SupervisorState) -> List[Dict[str, Any]]:
         return []
 
 
-def _record_actions(state: SupervisorState, *contexts: Any) -> None:
-    """Append this turn's rows to the thread's ledger."""
+def _record_actions(state: SupervisorState, *contexts: Any,
+                    extra_rows: Optional[List[Dict[str, Any]]] = None) -> None:
+    """Append this turn's rows to the thread's ledger.
+
+    *extra_rows* carries rows a peer built itself because its work left no tool artifact to
+    extract — the search node's deterministic sweep, the open-web fallback and the
+    short-circuits.
+    """
     thread_id = state.get("thread_id")
     if not thread_id:
         return
-    rows = _ledger_rows(*contexts)
+    rows = [*_ledger_rows(*contexts), *(extra_rows or [])]
     if not rows:
         # A ledger that silently records nothing is indistinguishable from one that is
         # working, which is exactly how this shipped inert the first time.
@@ -2126,7 +2154,10 @@ def default_search_fn(*, llm: Optional[Any] = None, tool_strategy: str = "granul
                 {"stage": "search", "message": f"Related-element lookup for {related_id}"},
                 node="search",
             )
-            return _related_elements_evidence(related_id)
+            _docs = _related_elements_evidence(related_id)
+            return {"documents": _docs,
+                    "action_rows": [_search_row("related_elements", query, "knowledge graph",
+                                                len(_docs or []), element_id=related_id)]}
         lookup_id = _detect_element_lookup_request(query)
         if not lookup_id and _EXPLAIN_FOLLOWUP_RE.match(query or ""):
             lookup_id = _recall_recent_element_id(chat_history)
@@ -2136,7 +2167,10 @@ def default_search_fn(*, llm: Optional[Any] = None, tool_strategy: str = "granul
                 {"stage": "search", "message": f"Element lookup for {lookup_id}"},
                 node="search",
             )
-            return _element_lookup_evidence(lookup_id)
+            _docs = _element_lookup_evidence(lookup_id)
+            return {"documents": _docs,
+                    "action_rows": [_search_row("element_lookup", query, "by id",
+                                                len(_docs or []), element_id=lookup_id)]}
         # "most popular / most viewed / trending ..." -> the graph's click_count ranking, not a
         # semantic search whose topical hits would be misrepresented as popularity.
         if _detect_popularity_request(query):
@@ -2147,7 +2181,9 @@ def default_search_fn(*, llm: Optional[Any] = None, tool_strategy: str = "granul
             )
             pop_docs = _popularity_evidence(query)
             if pop_docs:
-                return pop_docs
+                return {"documents": pop_docs,
+                        "action_rows": [_search_row("popularity_ranking", query,
+                                                    "click_count ranking", len(pop_docs))]}
             # graph empty/unreachable -> fall through to the normal search agent
 
         executor = build_search_agent_executor(
@@ -2171,9 +2207,17 @@ def default_search_fn(*, llm: Optional[Any] = None, tool_strategy: str = "granul
         _run = _session.run(_retrieval_q)
         harvested = extract_documents_from_search_evidence(
             {"search_agent_tool_results": _run.artifacts.get("tool_results") or []})
+        # The peer's OWN tool calls become rows the same way the analyze/code peers' do, so a
+        # follow-up can be answered with "we already searched X and got N" instead of searching
+        # again. Curated by the same allowlists; the retrieval renames in _LEDGER_SEARCH_TOOLS
+        # stop `source`/`count` reading as imagery provenance.
+        rows = _ledger_rows(_run.artifacts)
         # Completeness sweep: union in direct keyword+semantic hits so one search turn always
         # carries multi-method coverage, even when the LLM peer called a single tool.
-        return _merge_dedup(harvested, _direct_search_sweep(query, enabled_search_methods))
+        sweep = _direct_search_sweep(query, enabled_search_methods)
+        if sweep:
+            rows.append(_search_row("baseline_sweep", query, "keyword+semantic", len(sweep)))
+        return {"documents": _merge_dedup(harvested, sweep), "action_rows": rows}
 
     return fn
 
@@ -3256,9 +3300,14 @@ def build_supervisor_graph(
         q = state.get("query", "")
         emit_trace_event("node_started", {"stage": "search", "message": "Searching"}, node="search")
         raw = do_search(q, state) or []
+        # A search_fn may return a plain list (every test double does, and so may a custom one)
+        # or a dict carrying documents + the ledger rows for what it actually did. Both stay
+        # supported; only the dict form contributes rows.
+        new_rows: List[Dict[str, Any]] = []
         if isinstance(raw, dict):
             docs = raw.get("documents") or []
             _, needs = _extract_needs(raw)
+            new_rows.extend(raw.get("action_rows") or [])
         else:
             docs, needs = raw, []
 
@@ -3286,6 +3335,7 @@ def build_supervisor_graph(
                     more_docs = more.get("documents") or []
                     _, more_needs = _extract_needs(more)
                     needs = [*(needs or []), *(more_needs or [])]
+                    new_rows.extend(more.get("action_rows") or [])
                 else:
                     more_docs = more
                 if more_docs:
@@ -3301,6 +3351,10 @@ def build_supervisor_graph(
         if _platform_evidence_is_unhelpful(_merge_dedup(state.get("evidence") or [], docs), q):
             web_docs = _web_fallback_evidence(q, enabled_search_methods)
             if web_docs:
+                # Direct backend calls, so no artifact to extract — but leaving the open web out
+                # of the ledger is how a follow-up gets told the information is unavailable
+                # right after the agent went and found it.
+                new_rows.append(_search_row("web_fallback", q, "open web", len(web_docs)))
                 emit_trace_event(
                     "node_started",
                     {"stage": "search",
@@ -3327,6 +3381,11 @@ def build_supervisor_graph(
             "search_attempts": state.get("search_attempts", 0) + 1,
             "search_empty_streak": 0 if added > 0 else prev_streak + 1,
             "searched_queries": tried,
+            # Accumulate: SupervisorState has no reducers, so a plain overwrite would lose the
+            # rows from an earlier search step in the same turn. Rows, not raw artifacts — the
+            # search tool_results ARE the whole document payload, and this state is both
+            # checkpointed and shipped to the client.
+            "action_rows": [*(state.get("action_rows") or []), *new_rows],
         }
         enq = _enqueue_needs(state.get("needs"), needs, "search")
         if enq is not None:
@@ -3497,9 +3556,13 @@ def build_supervisor_graph(
         final = _correct_artifact_claims(final, ar, cr, prior_rows=_rows)
         # Record what this turn DID before the state is discarded — the next turn's routing
         # decision is the only thing standing between a follow-up and a redundant search.
-        _record_actions(state, ar, cr)
+        _record_actions(state, ar, cr, extra_rows=state.get("action_rows"))
         merged = {**state, "answer": final, "audit": audit}
-        return {"answer": final, "final_answer": final, "audit": audit, "distilled": {**_distill(merged), "answer": final}}
+        # Clear the turn's rows on the way out. They are already in the thread ledger, this
+        # state ships to the client verbatim, and an empty list makes double-recording
+        # impossible if synthesize is ever re-entered.
+        return {"answer": final, "final_answer": final, "audit": audit, "action_rows": [],
+                "distilled": {**_distill(merged), "answer": final}}
 
     builder = StateGraph(SupervisorState)
     builder.add_node("supervisor", supervisor_node)
