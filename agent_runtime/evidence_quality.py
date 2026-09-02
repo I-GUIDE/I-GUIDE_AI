@@ -379,6 +379,13 @@ def _format_evidence(evidence: Any, *, limit: int = AUDIT_DOC_LIMIT,
     return "\n\n".join(lines) if lines else "(no evidence supplied)"
 
 
+# The ledger arrives ALREADY budgeted by its producer (_LEDGER_MAX_CHARS in
+# supervisor/graph.py). Re-truncating it here at the generic 2200 is what made the answerer
+# and the auditor disagree: the answerer was told to answer from a line the auditor could not
+# see, and the auditor then flagged the result as high-severity hallucination.
+_PRIOR_ACTIONS_MAX_CHARS = 8000
+
+
 def _format_execution_context(execution_context: Any, *, max_chars: int = 2200) -> str:
     """Render the agent's execution outcomes (tool calls/results, produced artifacts) so
     the auditor can treat genuinely-produced outputs as grounding."""
@@ -403,7 +410,7 @@ def _format_execution_context(execution_context: Any, *, max_chars: int = 2200) 
             parts.append("tool calls and results from EARLIER TURNS of this same conversation "
                          "(the agent legitimately answers follow-up questions from these — treat "
                          "them as grounding exactly like this turn's tool output):\n"
-                         + rendered[:max_chars])
+                         + rendered[:max(max_chars, _PRIOR_ACTIONS_MAX_CHARS)])
     else:
         parts.append(json.dumps(execution_context, default=str)[:max_chars])
     return "\n".join(parts) if parts else "(no tools were executed)"

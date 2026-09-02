@@ -241,8 +241,12 @@ def test_every_peer_and_the_router_see_the_ledger():
     src = inspect.getsource(graph)
     assert "_budgeted(_prior_actions(state))" in src
     syn = inspect.getsource(graph.build_supervisor_graph)
-    assert "_prior_actions_note(_rows)" in syn
-    assert '"prior_actions": _ledger_lines(_rows)' in syn
+    # Synthesis and the auditor share ONE rendering. Delivery itself is asserted behaviourally
+    # by test_the_note_reaches_the_answerer_* — a grep cannot tell "wired" from "wired to a
+    # channel that discards it", which is exactly how the chat_history route shipped broken.
+    assert "_ledger_text = " in syn
+    assert '"prior_actions": _ledger_text' in syn
+    assert "do_synthesize(q, evidence, ar, cr, _history, _note)" in syn
 
 
 # --- the ledger must reach the grounding auditor, not just the answering model -------------
@@ -297,3 +301,92 @@ def test_a_genuinely_invented_number_is_still_flagged():
     kept = g._reconcile_audit_with_artifacts(
         dict(audit), [], execution_context={"prior_actions": lines})
     assert g._audit_flagged(kept), "an invented figure must survive reconciliation"
+
+
+# --- the note must actually ARRIVE at the answering model ---------------------------------
+#
+# It used to be prepended as chat_history item 0, and _format_chat_history renders `[-8:]` then
+# tail-truncates at 4000 chars — both trims cut exactly where it sat. Measured: present at 2-7
+# history items, ABSENT at 8+, and absent with 5 large items. The auditor still received it, so
+# the two consumers that _prior_actions_note's own docstring says must agree disagreed on every
+# conversation longer than seven exchanges. The browser check that passed had 2 history items.
+#
+# These tests assert DELIVERY, not source text. The previous grep-style assertion could not
+# distinguish "wired" from "wired to a channel that discards it".
+
+def _long_history(n, filler=60):
+    return [{"role": "user" if i % 2 == 0 else "assistant",
+             "content": f"turn {i} " + "x" * filler} for i in range(n)]
+
+
+def _run_with_history(history, rows_turn):
+    """Run a full supervisor turn on a thread that already has ledger rows, capturing synthesis."""
+    captured = {}
+
+    def _synth(q, ev, ar, cr, ch=None, pa=None):
+        captured["chat_history"], captured["note"] = ch, pa
+        return "answer"
+
+    g._record_actions({"thread_id": "t-deliver"}, rows_turn)
+    graph = g.build_supervisor_graph(
+        search_fn=lambda q, s: [], analyze_fn=lambda *a: {"summary": "s"},
+        synthesize_fn=_synth, decide_fn=lambda *a, **k: ("done", "why"),
+        do_rerank=False, do_audit=False)
+    graph.invoke({"query": "what resolution was that?", "thread_id": "t-deliver",
+                  "chat_history": history, "evidence": [], "actions": []})
+    return captured
+
+
+@pytest.mark.parametrize("n_items", [2, 7, 8, 12, 20])
+def test_the_note_reaches_the_answerer_however_long_the_conversation(n_items):
+    """The regression that shipped: this fails at n_items >= 8 before the fix."""
+    cap = _run_with_history(_long_history(n_items), CLAY_TURN)
+    assert cap["note"], f"no ledger note delivered at {n_items} history items"
+    assert "clay" in cap["note"], cap["note"]
+
+
+def test_a_large_note_is_not_truncated_away_by_the_history_budget():
+    cap = _run_with_history([{"role": "user", "content": "y" * 900} for _ in range(5)], CLAY_TURN)
+    assert cap["note"] and "clay" in cap["note"]
+
+
+def test_the_note_is_not_smuggled_through_chat_history():
+    """It must travel as its own argument, so no history trim can reach it."""
+    cap = _run_with_history(_long_history(4), CLAY_TURN)
+    hist = cap["chat_history"] or []
+    assert not any(g._LEDGER_HEADING in str(i.get("content", "")) for i in hist if isinstance(i, dict))
+
+
+def test_the_answerer_and_the_auditor_see_the_same_lines():
+    """One rendering, two consumers — the property the whole feature rests on."""
+    from agent_runtime.evidence_quality import _format_execution_context
+
+    rows = g._ledger_rows(CLAY_TURN) * 12          # past the auditor's old 2200-char cut
+    text = "\n".join(g._ledger_lines(rows))
+    assert len(text) > 2200, "make the fixture bigger; this must exceed the old cap"
+    assert text in g._prior_actions_note(rows)
+    assert text in _format_execution_context({"prior_actions": text})
+
+
+def test_the_synthesizer_prompt_carries_the_note_and_names_the_section():
+    calls = []
+
+    class _Rec:
+        def invoke(self, prompt):
+            calls.append(prompt)
+            return "ok"
+
+    note = g._prior_actions_note(g._ledger_rows(CLAY_TURN))
+    g.default_synthesize_fn(llm=_Rec())("q", [], None, None, None, note)
+    assert g._LEDGER_HEADING in calls[0]
+    assert "8. EARLIER-TURN TOOL RECORDS" in calls[0], "rule 8 missing from SYNTHESIS_PROMPT"
+
+
+def test_a_custom_five_argument_synthesize_fn_still_works():
+    """`lambda *a` doubles are the common shape; a 6th POSITIONAL arg keeps them working."""
+    graph = g.build_supervisor_graph(
+        search_fn=lambda q, s: [], synthesize_fn=lambda *a: "ans",
+        decide_fn=lambda *a, **k: ("done", "why"), do_rerank=False, do_audit=False)
+    out = graph.invoke({"query": "q", "thread_id": "t-arity", "actions": [],
+                        "evidence": [{"doc_id": "d1", "title": "t", "contents": "c"}]})
+    assert out["final_answer"] == "ans"

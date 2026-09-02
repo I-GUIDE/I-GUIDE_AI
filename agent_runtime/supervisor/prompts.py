@@ -60,7 +60,17 @@ SYNTHESIS_PROMPT = (
     "7. INTERACTIVE MAP: the user has a live map beside this chat, and any geometry produced this "
     "turn (geo-tool features, or a GeoJSON artifact) is already plotted on it. Describe or list "
     "those features as results the user can see and click; a statement that no map could be "
-    "produced would simply be false. A static map image is a separate, optional export."
+    "produced would simply be false. A static map image is a separate, optional export.\n"
+    # Worded conditionally on purpose: evidence_subgraph.default_compose_fn reuses this same
+    # prompt with no such section, so the rule must be a no-op when the section is absent.
+    "8. EARLIER-TURN TOOL RECORDS: if a section headed \"What this conversation already did\" is "
+    "present, it lists tool calls from PREVIOUS turns with their arguments and results. Treat "
+    "those as first-class grounding, exactly like this turn's evidence: when the user asks about "
+    "work listed there, answer from it and say you already did it, rather than that the "
+    "information is unavailable. Do not present it as work done this turn, do not embed an image "
+    "or link that appears only there, and if a record contradicts this turn's results, this turn "
+    "wins. A line marked FAILED means the tool did not work — that result does not exist and must "
+    "never be reported as produced."
 )
 
 # The two DISTINCT visualization outcomes. Geographic data belongs on the user's live map

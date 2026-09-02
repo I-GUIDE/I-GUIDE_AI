@@ -51,7 +51,7 @@ def test_supervisor_loops_search_then_analyze_then_synthesize():
         decide_fn=_scripted(["search", "analyze", "done"]),
         search_fn=lambda q, s: list(DOCS),
         analyze_fn=lambda q, ev, st: {"summary": "ran workflow"},   # workflow output, not prose
-        synthesize_fn=lambda q, ev, ar, cr, ch: "the answer",       # answer composed separately
+        synthesize_fn=lambda q, ev, ar, cr, ch, pa=None: "the answer",       # answer composed separately
         do_rerank=False,
     )
     assert state["actions"] == ["search", "analyze", "done"]
@@ -204,7 +204,7 @@ def test_code_peer_feeds_synthesis():
         decide_fn=_scripted(["code", "done"]),
         search_fn=lambda q, s: [],
         code_fn=lambda q, ev, st: {"answer": "code-answer", "code_result": {"x": 1}},
-        synthesize_fn=lambda q, ev, ar, cr, ch: f"final:{(cr or {}).get('answer', '')}",
+        synthesize_fn=lambda q, ev, ar, cr, ch, pa=None: f"final:{(cr or {}).get('answer', '')}",
         do_audit=False,
     )
     assert state["code_result"]["answer"] == "code-answer"
@@ -262,7 +262,7 @@ def test_code_request_routes_then_reruns():
     state = run_supervisor(
         "write code", llm=_fake_llm, decide_fn=decide,
         search_fn=lambda q, s: list(DOCS), code_fn=code_fn,
-        synthesize_fn=lambda q, ev, ar, cr, ch: f"final:{(cr or {}).get('answer', '')}",
+        synthesize_fn=lambda q, ev, ar, cr, ch, pa=None: f"final:{(cr or {}).get('answer', '')}",
         do_rerank=False, do_audit=False,
     )
     assert calls["code"] == 2
@@ -801,7 +801,7 @@ def test_conversational_request_answered_from_history_not_refused():
         "summarize our discussion", llm=_fake_llm,
         decide_fn=lambda s, d: "done",            # straight to synthesize, nothing retrieved
         search_fn=lambda q, s: [],
-        synthesize_fn=lambda q, ev, ar, cr, ch: "Here is a summary of our chat.",
+        synthesize_fn=lambda q, ev, ar, cr, ch, pa=None: "Here is a summary of our chat.",
         chat_history=[{"role": "user", "content": "what's the risk of aging dams?"}],
         do_rerank=False, do_audit=False,
     )

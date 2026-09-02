@@ -92,7 +92,10 @@ SearchFn = Callable[[str, "SupervisorState"], List[Any]]          # (query, stat
 AnalyzeFn = Callable[[str, List[Any], "SupervisorState"], Any]    # (query, evidence, state) -> analysis_results
 CodeFn = Callable[[str, List[Any], "SupervisorState"], Any]       # (query, evidence, state) -> code_result
 # (query, evidence, analysis_results, code_result, chat_history) -> answer
-SynthesizeFn = Callable[[str, List[Any], Any, Any, Optional[List[Any]]], str]
+# (query, evidence, analysis_results, code_result, chat_history, prior_actions_note) -> answer
+# The 6th argument is POSITIONAL-with-default on purpose: custom synthesize_fn doubles are
+# overwhelmingly `lambda *a: ...`, which accepts an extra positional but not a keyword.
+SynthesizeFn = Callable[[str, List[Any], Any, Any, Optional[List[Any]], Optional[str]], str]
 
 from agent_runtime.supervisor.prompts import ANALYSIS_WORKFLOW_PROMPT, CODE_PEER_PROMPT, NO_GROUNDING_FALLBACK
 
@@ -476,6 +479,10 @@ def _ledger_lines(rows: List[Dict[str, Any]]) -> List[str]:
     return lines
 
 
+# The section header the synthesizer prompt names, so the two cannot drift apart.
+_LEDGER_HEADING = "What this conversation already did (tool records from EARLIER turns)"
+
+
 def _prior_actions_note(rows: List[Dict[str, Any]]) -> Optional[str]:
     """The ledger as a line-per-action note for the ANSWERING model.
 
@@ -487,9 +494,12 @@ def _prior_actions_note(rows: List[Dict[str, Any]]) -> Optional[str]:
     lines = _ledger_lines(rows)
     if not lines:
         return None
-    return ("Earlier in THIS conversation you already ran these tools. These are facts about "
-            "work already done — if the user is asking about it, answer from here rather than "
-            "saying the information is unavailable, and do not re-derive it:\n" + "\n".join(lines))
+    return (f"{_LEDGER_HEADING}:\n"
+            "These are facts about work already done — if the user is asking about it, answer "
+            "from here rather than saying the information is unavailable, and do not re-derive "
+            "it. A line marked FAILED records a tool that did NOT work: that work was never "
+            "done, its result does not exist, and re-running it may be the right move — never "
+            "describe it as completed.\n" + "\n".join(lines))
 
 
 def _prior_actions(state: SupervisorState) -> List[Dict[str, Any]]:
@@ -2843,7 +2853,8 @@ def default_synthesize_fn(llm: Optional[Any] = None) -> SynthesizeFn:
     """Compose the final grounded answer in the original AnalysisAgent format."""
 
     def fn(query: str, evidence: List[Any], analysis_results: Any, code_result: Any,
-           chat_history: Optional[List[Any]] = None) -> str:
+           chat_history: Optional[List[Any]] = None,
+           prior_actions_note: Optional[str] = None) -> str:
         from agent_runtime.supervisor.prompts import SYNTHESIS_PROMPT
 
         active = llm
@@ -2855,6 +2866,12 @@ def default_synthesize_fn(llm: Optional[Any] = None) -> SynthesizeFn:
         history = _format_chat_history(chat_history)
         if history:
             parts.append(f"Conversation so far:\n{history}")
+        # Its OWN section, not an item inside chat_history. Smuggled through the history it was
+        # item 0 of a list rendered as `[-8:]` and then tail-truncated at 4000 chars — both trims
+        # cut exactly where it sat, so it vanished at 8+ history items while the auditor still
+        # received it, and the two consumers that must agree systematically disagreed.
+        if prior_actions_note:
+            parts.append(prior_actions_note)
         parts.append(f"Question:\n{query}")
         parts.append(f"Evidence:\n{_format_documents(evidence)}")
         if analysis_results:
@@ -3140,16 +3157,15 @@ def build_supervisor_graph(
             # decides whether to search, while THIS is what decides whether the answer is right.
             _history = list(state.get("chat_history") or [])
             _rows = _prior_actions(state)
+            _ledger_text = "\n".join(_ledger_lines(_rows))   # THE single rendering
             _note = _prior_actions_note(_rows)
-            if _note:
-                _history = [{"role": "system", "content": _note}, *_history]
-            answer = do_synthesize(q, evidence, ar, cr, _history)
+            answer = do_synthesize(q, evidence, ar, cr, _history, _note)
             # The auditor must be given the SAME earlier-turn tool records the answerer was
             # told to answer from. Without them a correct cross-turn answer ("the gse run used
             # 64 dims at 7.645 m/px", read off turn 2's ledger) is audited against this turn's
             # execution only and flagged as unsupported.
             exec_ctx = {"analysis_results": ar, "code_result": cr, "artifacts": artifacts,
-                        "prior_actions": _ledger_lines(_rows)}
+                        "prior_actions": _ledger_text}
             # Audit only when there's actual retrieval/execution grounding to check against.
             # A purely conversational answer (composed from chat_history with no evidence or
             # artifacts) has nothing for the grounding auditor to compare to and would be
