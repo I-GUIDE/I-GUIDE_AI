@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from collections import Counter, OrderedDict
@@ -909,6 +910,115 @@ def invoke_agent_with_payload_fallback(
                 diagnostics=diagnostics,
             ) from exc
         raise
+
+
+# --- per-turn scoping of a peer's own work -------------------------------------------------
+#
+# A peer thread OUTLIVES the turn. The supervisor graph is compiled without a checkpointer, so
+# its state is per-turn, but each peer's create_agent graph shares the process-global
+# DEFAULT_CHECKPOINTER under a stable child id (f"{thread_id}::{label}"), and the map UI sends a
+# required thread_id. So `extract_search_artifacts(resp)` walks EVERY prior turn's messages, and
+# four verifiers that ask "what happened THIS turn?" get the whole conversation:
+#
+#   * _has_execution_record -> last turn's execute_code makes this turn's bare code fence read as
+#     executed=True, and the corrective retry is skipped;
+#   * _repeatedly_failed_tools -> one failure per turn crosses the repeat threshold on turn 2,
+#     costing a round trip and reporting a tool as a dead end;
+#   * _models_used -> a model from turn 1 is subtracted from this turn's mismatch check;
+#   * the search peer's evidence harvest -> turn 1's documents are returned as turn 2's evidence.
+#
+# Scoping is PER INVOCATION, not per turn: default_analyze_fn invokes the same thread up to three
+# times in one turn (main, map retry, mismatch retry) and CONCATENATES the extracted slices, so a
+# per-turn watermark would re-yield the first invocation each time — two failures of one tool
+# would render as four and trip the threshold on their own.
+#
+# Cross-turn continuity is deliberate and stays: it is documented at both peer call sites, and
+# the intra-turn retries send bare follow-up observations that are meaningless without it. What
+# changes is only which slice the verifiers are shown.
+
+
+def peer_thread_messages(executor: Any, config: Optional[Dict[str, Any]]) -> List[Any]:
+    """The messages already checkpointed on this peer thread, or [] when unknowable."""
+    try:
+        get_state = getattr(executor, "get_state", None)
+        if not callable(get_state) or not config:
+            return []
+        values = getattr(get_state(config), "values", None)
+        messages = values.get("messages") if isinstance(values, dict) else None
+        return list(messages) if isinstance(messages, list) else []
+    except Exception:      # a missing or half-evicted thread simply has no watermark
+        return []
+
+
+def _prefix_is_intact(messages: List[Any], prev_ids: List[Any]) -> bool:
+    """Whether *messages* still begins with the ids we saw before this invocation.
+
+    The guard that makes slicing safe. Ids are present and stable across the checkpointer's
+    serialize round trip (object identity is not), so a real thread slices. Anything that
+    REWROTE the history — a future summarizing middleware — changes them, and we fall back to
+    today's whole-thread behaviour rather than risk cutting away this turn's own records.
+
+    It also keeps the existing peer test doubles working: they fake a non-cumulative thread with
+    hand-built messages whose ``id`` is None, so the guard fails and nothing is sliced. That is
+    worth stating plainly — those doubles therefore give this mechanism ZERO coverage, which is
+    why it is tested against a real create_agent graph instead.
+    """
+    if not prev_ids:
+        return False
+    if len(messages) < len(prev_ids):
+        return False
+    for msg, prev in zip(messages[:len(prev_ids)], prev_ids):
+        got = getattr(msg, "id", None)
+        if got is None or got != prev:
+            return False
+    return True
+
+
+@dataclass
+class PeerRun:
+    """One invocation's own response, artifacts and answer."""
+
+    resp: Any
+    artifacts: Dict[str, List[Dict[str, Any]]]
+    answer: str
+
+
+class PeerSession:
+    """One peer thread, for the duration of one turn.
+
+    Colocates the invoke with the extraction so the two cannot drift: every call returns only
+    what THAT invocation produced, while ``turn_artifacts`` accumulates the turn.
+    """
+
+    def __init__(self, executor: Any, config: Optional[Dict[str, Any]]) -> None:
+        self._executor = executor
+        self._config = config
+        existing = peer_thread_messages(executor, config)
+        self._seen = len(existing)
+        self._ids = [getattr(m, "id", None) for m in existing]
+        self.turn_artifacts: Dict[str, List[Dict[str, Any]]] = {"tool_calls": [], "tool_results": []}
+
+    def run(self, query: str, *, chat_history: Optional[List[Any]] = None) -> PeerRun:
+        from agent_runtime.runtime_utils import extract_final_answer, extract_search_artifacts
+
+        resp = invoke_agent_with_payload_fallback(
+            self._executor, query=query, chat_history=chat_history, config=self._config)
+        messages = (resp or {}).get("messages") if isinstance(resp, dict) else None
+        scoped: Any = resp
+        if isinstance(messages, list) and self._seen and _prefix_is_intact(messages, self._ids):
+            scoped = {**resp, "messages": messages[self._seen:]}
+        if isinstance(messages, list):
+            self._seen = len(messages)
+            self._ids = [getattr(m, "id", None) for m in messages]
+        artifacts = extract_search_artifacts(scoped)
+        for key in ("tool_calls", "tool_results"):
+            self.turn_artifacts[key].extend(artifacts.get(key) or [])
+        return PeerRun(resp=resp, artifacts=artifacts, answer=extract_final_answer(scoped) or "")
+
+
+def open_peer_session(executor: Any, config: Optional[Dict[str, Any]]) -> PeerSession:
+    """Take the watermark BEFORE the first invocation of this turn."""
+    return PeerSession(executor, config)
 
 
 def is_empty_model_response_error(exc: Exception) -> bool:

@@ -259,8 +259,13 @@ needed downstream, so every peer boundary is a place for that value to be droppe
 Measured consequences, all from one exchange:
 
 * The answer to "what resolution was that" (`scale_m: 10`) sat in the analyze peer's thread.
-  The router sent the follow-up to the SEARCH peer, which starts fresh every turn
-  ("started with 2 message(s)") and was structurally unable to know. It searched for 49 steps —
+  The router sent the follow-up to the SEARCH peer, which has its own separate thread and had
+  never seen it. (This bullet used to say the search peer "starts fresh every turn — started
+  with 2 message(s)". That is wrong: each peer's thread is checkpointed on a stable child id
+  and accumulates. The observation was real but came from a probe that sent no stable
+  `thread_id`, so every turn minted `auto-thread-<uuid4>`. The fragmentation argument does not
+  depend on it — state split across peers is the point, and separate threads are exactly that
+  split.) It searched for 49 steps —
   drifting into SoilGrids *soil* clay — until the payload hit 66,275 tokens against a 65,536
   window and the turn died with a 400. One clay turn reached 199,605.
 * `admin_boundary` must be registered in three peers under three different gating rules

@@ -335,6 +335,16 @@ def _pick(source: Any, keys) -> Dict[str, Any]:
     return out
 
 
+def _delivers_layer(tool_name: str, payload: Any) -> bool:
+    """Same authority the supervisor uses, so ledger and predicate cannot disagree."""
+    try:
+        from agent_runtime.map_layers import delivers_map_layer
+
+        return delivers_map_layer(str(tool_name or ""), payload)
+    except Exception:
+        return False
+
+
 def _ledger_rows(*contexts: Any) -> List[Dict[str, Any]]:
     """One row per tool INVOCATION: what ran, on what, and what came back.
 
@@ -390,9 +400,15 @@ def _ledger_rows(*contexts: Any) -> List[Dict[str, Any]]:
                 part["facts"] = facts
             if payload.get("file_id"):
                 part["file_id"] = _ledger_value(payload["file_id"])
+            # The ledger is now the ONLY cross-turn map signal (_map_delivered_earlier reads
+            # this field), so a real delivery that carries no label must still land a row —
+            # otherwise a layer from turn 2 stops counting in turn 4 and the auditor staples a
+            # hallucination caveat onto a layer that is on the user's screen.
             ml = payload.get("map_layer")
             if isinstance(ml, dict) and ml.get("label"):
                 part["map_layer"] = _ledger_value(ml["label"])
+            elif _delivers_layer(name, payload):
+                part["map_layer"] = _ledger_value(name or "map layer")
         if not part:
             return
         if name not in order:
@@ -1930,6 +1946,7 @@ def default_search_fn(*, llm: Optional[Any] = None, tool_strategy: str = "granul
             build_search_agent_executor,
             child_thread_id,
             invoke_agent_with_payload_fallback,
+            open_peer_session,
         )
         from agent_runtime.runtime_utils import build_search_evidence_payload
 
@@ -1979,19 +1996,22 @@ def default_search_fn(*, llm: Optional[Any] = None, tool_strategy: str = "granul
             mcp_modules=mcp_modules, enabled_search_methods=enabled_search_methods,
             skill_roots=skill_roots,
         )
-        # The search peer starts on a fresh thread every turn ("started with 2 message(s)"),
-        # so without this it is the one peer structurally incapable of knowing the answer is
-        # already in hand. That is how "what resolution was that" became a KB sweep for
+        # The search peer has its OWN checkpointed thread that accumulates across turns — it is
+        # NOT fresh each turn, whatever this comment used to say. What it lacks is any view of
+        # the OTHER peers' work, so the answer can sit in the analyze peer's thread while the
+        # router sends the follow-up here. That is how "what resolution was that" became a sweep for
         # SoilGrids soil clay while scale_m sat in the previous turn's tool result.
         _retrieval_q = _as_retrieval_request(query)
         _search_note = _prior_actions_note(_prior_actions(state))
         if _search_note:
             _retrieval_q = f"{_retrieval_q}\n\n{_search_note}"
-        resp = invoke_agent_with_payload_fallback(
-            executor, query=_retrieval_q, chat_history=None,
-            config=agent_config(child_thread_id(state.get("thread_id"), "sup_search")),
-        )
-        harvested = extract_documents_from_search_evidence(build_search_evidence_payload(query, resp, None))
+        # One session per turn: the peer thread is checkpointed under a stable child id, so
+        # without this the harvest returns an earlier turn's documents as this turn's evidence.
+        _session = open_peer_session(
+            executor, agent_config(child_thread_id(state.get("thread_id"), "sup_search")))
+        _run = _session.run(_retrieval_q)
+        harvested = extract_documents_from_search_evidence(
+            {"search_agent_tool_results": _run.artifacts.get("tool_results") or []})
         # Completeness sweep: union in direct keyword+semantic hits so one search turn always
         # carries multi-method coverage, even when the LLM peer called a single tool.
         return _merge_dedup(harvested, _direct_search_sweep(query, enabled_search_methods))
@@ -2297,9 +2317,12 @@ def _tool_stuck_observation(failures: Dict[str, str]) -> str:
 #
 # Why: the peers never ran concurrently (decide() returns one action per step), and every hard
 # failure came from state split across them — the answer to "what resolution was that" sat in
-# the analyse peer's thread while the router sent the follow-up to the search peer, which
-# starts fresh each turn and could not know. See AGENTS.md, "Why this workload is a poor fit
-# for multiple agents".
+# the analyse peer's thread while the router sent the follow-up to the SEARCH peer, whose own
+# thread holds its own history and never saw it. (An earlier version of this comment said the
+# search peer "starts fresh each turn". It does not: the checkpointer is passed on a stable
+# child id. That claim is intermittently true only under multiple workers, because the
+# checkpointer is process-global — which is how it came to be written down.) See AGENTS.md,
+# "Why this workload is a poor fit for multiple agents".
 UNIFIED_PEER_ENV = "AGENT_UNIFIED_PEER"
 
 # Tools whose output is EVIDENCE. This allowlist is the whole reason the merge is safe:
@@ -2379,6 +2402,7 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
             build_agent_executor,
             child_thread_id,
             invoke_agent_with_payload_fallback,
+            open_peer_session,
         )
         from agent_runtime.langchain_granular_tools import make_langchain_qgis_tools
 
@@ -2532,11 +2556,14 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
         # thread (and the supervisor's chat_history drives routing/synthesis), so
         # we do NOT re-feed chat_history here — that would replay prior turns twice
         # on re-runs. Mirrors the search peer.
-        resp = invoke_agent_with_payload_fallback(
-            executor, query=q, chat_history=None,
-            config=agent_config(child_thread_id(thread_id, "analysis")),
-        )
-        artifacts = extract_search_artifacts(resp)
+        # One session for the whole turn. Every invoke below reports only ITS OWN calls, while
+        # _session.turn_artifacts accumulates the turn — the retries used to concatenate slices
+        # that each already contained the previous invocation.
+        _session = open_peer_session(executor,
+                                    agent_config(child_thread_id(thread_id, "analysis")))
+        _run = _session.run(q)
+        resp = _run.resp
+        artifacts = _run.artifacts
         result: Dict[str, Any] = {
             "summary": extract_final_answer(resp) or "",
             "tool_calls": artifacts.get("tool_calls") or [],
@@ -2556,14 +2583,13 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
                             "handing the peer the observation and an alternative route"},
                 node="analyze",
             )
-            resp_alt = invoke_agent_with_payload_fallback(
-                executor, query=_tool_stuck_observation(stuck), chat_history=None,
-                config=agent_config(child_thread_id(thread_id, "analysis")),
-            )
-            alt = extract_search_artifacts(resp_alt)
+            _alt_run = _session.run(_tool_stuck_observation(stuck))
+            resp_alt, alt = _alt_run.resp, _alt_run.artifacts
             result["summary"] = extract_final_answer(resp_alt) or result["summary"]
-            result["tool_calls"] = [*result["tool_calls"], *(alt.get("tool_calls") or [])]
-            result["tool_results"] = [*result["tool_results"], *(alt.get("tool_results") or [])]
+            # The session owns the turn's total; hand-appending slices is what double-counted
+            # invocation 1 on every retry.
+            result["tool_calls"] = list(_session.turn_artifacts["tool_calls"])
+            result["tool_results"] = list(_session.turn_artifacts["tool_results"])
             artifacts = {"tool_calls": result["tool_calls"], "tool_results": result["tool_results"]}
         # Carried downstream so synthesis cannot describe a failed tool as a success.
         if stuck:
@@ -2588,15 +2614,12 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
                  "message": "map requested but no add_map_layer record; retrying once"},
                 node="analyze",
             )
-            resp_retry = invoke_agent_with_payload_fallback(
-                executor, query=_MAP_NOT_DELIVERED_OBSERVATION, chat_history=None,
-                config=agent_config(child_thread_id(thread_id, "analysis")),
-            )
-            retry_artifacts = extract_search_artifacts(resp_retry)
+            _retry_run = _session.run(_MAP_NOT_DELIVERED_OBSERVATION)
+            resp_retry, retry_artifacts = _retry_run.resp, _retry_run.artifacts
             on_map = _map_delivered_this_turn(retry_artifacts)
             result["summary"] = extract_final_answer(resp_retry) or result["summary"]
-            result["tool_calls"] = [*result["tool_calls"], *(retry_artifacts.get("tool_calls") or [])]
-            result["tool_results"] = [*result["tool_results"], *(retry_artifacts.get("tool_results") or [])]
+            result["tool_calls"] = list(_session.turn_artifacts["tool_calls"])
+            result["tool_results"] = list(_session.turn_artifacts["tool_results"])
         # The user named a model and a different one ran. Fixing it here rather than only
         # correcting the wording later is the point: the user asked for that model's
         # embedding, and a caveat on the wrong raster is not what they asked for.
@@ -2610,16 +2633,12 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
                  "message": f"asked for {asked}, ran {used}; retrying once"},
                 node="analyze",
             )
-            resp_retry = invoke_agent_with_payload_fallback(
-                executor,
-                query=_MODEL_MISMATCH_OBSERVATION.format(wanted=asked, used=used),
-                chat_history=None,
-                config=agent_config(child_thread_id(thread_id, "analysis")),
-            )
-            retry_artifacts = extract_search_artifacts(resp_retry)
+            _retry_run = _session.run(
+                _MODEL_MISMATCH_OBSERVATION.format(wanted=asked, used=used))
+            resp_retry, retry_artifacts = _retry_run.resp, _retry_run.artifacts
             result["summary"] = extract_final_answer(resp_retry) or result["summary"]
-            result["tool_calls"] = [*result["tool_calls"], *(retry_artifacts.get("tool_calls") or [])]
-            result["tool_results"] = [*result["tool_results"], *(retry_artifacts.get("tool_results") or [])]
+            result["tool_calls"] = list(_session.turn_artifacts["tool_calls"])
+            result["tool_results"] = list(_session.turn_artifacts["tool_results"])
             on_map = on_map or _map_delivered_this_turn(retry_artifacts)
         # Carried downstream so synthesis can describe the map honestly either way.
         result["on_map"] = bool(on_map)
@@ -2694,6 +2713,7 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
             build_agent_executor,
             child_thread_id,
             invoke_agent_with_payload_fallback,
+            open_peer_session,
         )
         from agent_runtime.runtime_utils import extract_final_answer, extract_search_artifacts
         from agent_runtime.skills import make_skill_tools
@@ -2827,16 +2847,16 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
             parts.append(_code_note)
         # See analyze peer: continuity is owned by this peer's checkpointed thread,
         # so chat_history is not re-fed here (avoids double-replay on re-runs).
-        resp = invoke_agent_with_payload_fallback(
-            executor, query="\n\n".join(parts), chat_history=None,
-            config=agent_config(child_thread_id(state.get("thread_id"), "code")),
-        )
+        _session = open_peer_session(
+            executor, agent_config(child_thread_id(state.get("thread_id"), "code")))
+        _run = _session.run("\n\n".join(parts))
+        resp = _run.resp
         # Flat result: the human-readable answer + a compact artifacts extract.
         # Do NOT nest the whole raw response object (it would crowd out / truncate
         # the real code+output when synthesis serializes code_result).
-        artifacts = extract_search_artifacts(resp)
+        artifacts = _run.artifacts
         result: Dict[str, Any] = {
-            "answer": extract_final_answer(resp) or "",
+            "answer": _run.answer,
             "tool_calls": artifacts.get("tool_calls") or [],
             "tool_results": artifacts.get("tool_results") or [],
         }
@@ -2853,15 +2873,12 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
                 {"stage": "code", "message": "code returned without an execute_code record; retrying once"},
                 node="code",
             )
-            resp_retry = invoke_agent_with_payload_fallback(
-                executor, query=_CODE_NOT_RUN_OBSERVATION, chat_history=None,
-                config=agent_config(child_thread_id(state.get("thread_id"), "code")),
-            )
-            retry_artifacts = extract_search_artifacts(resp_retry)
+            _retry_run = _session.run(_CODE_NOT_RUN_OBSERVATION)
+            resp_retry, retry_artifacts = _retry_run.resp, _retry_run.artifacts
             executed = _has_execution_record(retry_artifacts)
             result["answer"] = extract_final_answer(resp_retry) or result["answer"]
-            result["tool_calls"] = [*result["tool_calls"], *(retry_artifacts.get("tool_calls") or [])]
-            result["tool_results"] = [*result["tool_results"], *(retry_artifacts.get("tool_results") or [])]
+            result["tool_calls"] = list(_session.turn_artifacts["tool_calls"])
+            result["tool_results"] = list(_session.turn_artifacts["tool_results"])
             caps = list(dict.fromkeys(r["capability"] for r in requests))
         # Carry the fact downstream so synthesis can describe the code honestly.
         result["executed"] = bool(executed)
