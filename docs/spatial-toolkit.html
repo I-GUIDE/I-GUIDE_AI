@@ -137,7 +137,7 @@
   <header>
     <div class="eyebrow">I-GUIDE agent · deployed capability inventory</div>
     <h1>What this agent can analyse, and what it hands back</h1>
-    <p class="standfirst">Forty-six spatial, statistical and temporal tools, plus a sandboxed Python runtime. Every tool returns
+    <p class="standfirst">Fifty-one spatial, statistical and temporal tools, plus a sandboxed Python runtime. Every tool returns
       <em>both</em> an interactive map layer and downloadable files where the operation produces geometry — the map is the
       deliverable, not a screenshot of one. Enumerated from the running container, not from documentation.</p>
   </header>
@@ -148,7 +148,8 @@
     <div class="count"><b>7</b><span>spatial stats</span></div>
     <div class="count"><b>5</b><span>temporal</span></div>
     <div class="count"><b>9</b><span>embeddings</span></div>
-    <div class="count"><b>7</b><span>vector + map</span></div>
+    <div class="count"><b>8</b><span>vector + map</span></div>
+    <div class="count"><b>4</b><span>KB + renders</span></div>
     <div class="count"><b>5</b><span>QGIS</span></div>
     <div class="count"><b>20</b><span>RS models</span></div>
   </div>
@@ -266,8 +267,8 @@
 
   <section>
     <div class="fam-head">
-      <h2>Reading data &amp; delivering maps</h2><span class="n">7 tools</span>
-      <span class="src">langchain_geo_tools · admin_boundary_tools</span>
+      <h2>Reading data &amp; delivering maps</h2><span class="n">8 tools</span>
+      <span class="src">langchain_geo_tools · admin_boundary_tools · langchain_geocode_tools</span>
     </div>
     <p class="fam-note">Inputs: GeoJSON, shapefile (<code>.shp</code> with sidecars auto-found, or a <code>.zip</code>),
       GeoPackage, GeoParquet, and CSV/TSV with latitude–longitude columns including degrees-minutes-seconds.</p>
@@ -279,6 +280,25 @@
       <div class="tool"><code>vector_spatial_join</code><p>Join two datasets spatially, aligning CRS automatically — assign points to the polygon they fall in.</p><div class="out"><span class="chip file">File</span></div></div>
       <div class="tool"><code>vector_to_geojson</code><p>Convert any supported vector format to GeoJSON, reprojected to WGS84 for web mapping.</p><div class="out"><span class="chip file">File</span></div></div>
       <div class="tool"><code>reproject_vector</code><p>Reproject to a target CRS — for example EPSG:5070 for equal-area analysis across the US.</p><div class="out"><span class="chip file">File</span></div></div>
+      <div class="tool"><code>geocode_places</code><p>Turn a list of place or institution <em>names</em> into coordinates via Nominatim &mdash; the way a CSV of universities becomes a bubble map. Reports <code>found=false</code> per name rather than inventing a point, caps at 40 names a call, and exists because sandboxed code has no network and cannot geocode for itself.</p><div class="out"><span class="chip file">File</span></div></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="fam-head">
+      <h2>Knowledge-base functions &amp; static renders</h2><span class="n">4 tools</span>
+      <span class="src">geo_analysis_tools</span>
+    </div>
+    <p class="fam-note">A second route into analysis: instead of a curated tool, run a spatial
+      function that was <em>extracted from a knowledge-base notebook</em>, chaining steps by
+      passing one step&rsquo;s <code>file_id</code> into the next. The two renderers here are
+      deliberate fallbacks &mdash; a robust plot for when an extracted notebook&rsquo;s own
+      plotting code fails on the installed matplotlib.</p>
+    <div class="tools">
+      <div class="tool"><code>kb_run_geofunction</code><p>Execute a named spatial function from a knowledge-base block by <code>doc_id</code> + <code>function_name</code>, passing (Geo)DataFrames as file ids. Returns a file id, so steps chain: load data &rarr; join and count &rarr; render.</p><div class="out"><span class="chip file">File</span></div></div>
+      <div class="tool"><code>kb_select_rows</code><p>Filter a (Geo)DataFrame file to rows whose column matches a value set &mdash; violent crime types out of all crime types &mdash; returning a new file id for the next step.</p><div class="out"><span class="chip file">File</span></div></div>
+      <div class="tool"><code>heatmap_image</code><p>A hexbin point-density PNG from a points file. This is the &ldquo;heat map&rdquo; render, distinct from a choropleth &mdash; and distinct from <code>add_map_layer</code>&rsquo;s live density surface, which is what you want if the result should be explorable.</p><div class="out"><span class="chip file">File</span></div></div>
+      <div class="tool"><code>choropleth_image</code><p>A shaded-polygon PNG coloured by a column, with NaturalBreaks (Jenks) or Quantile classing. Static: for a document or a printout.</p><div class="out"><span class="chip file">File</span></div></div>
     </div>
   </section>
 
@@ -316,7 +336,11 @@
         <code>list_prediction_heads</code> report none available until the demo head cache is built; embedding,
         segmentation, change and comparison are unaffected.</li>
       <li><strong>Prerequisites are real, but a region no longer has to be drawn.</strong> The analysis tools still
-        load only once files are attached to the conversation. The embedding tools need a geometry, and there are now
+        load only once files are attached to the conversation &mdash; and if every attached file is a
+        spreadsheet (<code>.csv</code>, <code>.tsv</code>, <code>.xlsx</code>), the four tools that need a
+        <em>vector</em> file (<code>inspect_vector</code>, <code>vector_to_geojson</code>,
+        <code>reproject_vector</code>, <code>vector_spatial_join</code>) are withheld rather than offered
+        and left to fail. Everything else, including buffering and gridding a point CSV, stays available. The embedding tools need a geometry, and there are now
         two ways to give them one: right-drag the map to draw a region, or name a US state, county or city and let
         <code>admin_boundary</code> fetch the official boundary.</li>
       <li><strong>Verified unevenly.</strong> The heatmap, grid aggregation, attribute selection, buffer and satellite
@@ -328,8 +352,8 @@
   </div>
 
   <footer>
-    <span>Enumerated from the running <code>agent-api</code> container</span>
+    <span>Enumerated from the running <code>agent-api</code> container, 2026-09-03</span>
     <span>Branch <code>prototype</code></span>
-    <span>46 tools in seven families, plus <code>execute_code</code> and four file tools</span>
+    <span>51 tools in eight families, plus <code>execute_code</code> and four file tools</span>
   </footer>
 </div>
