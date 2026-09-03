@@ -1,6 +1,8 @@
 import { IGuideMark } from './IGuideMark';
+import { TopNavPlatform } from './TopNav.platform';
+import { isPlatformVariant } from '../uiVariant';
 
-interface Props {
+export interface TopNavProps {
   onToggleSettings: () => void;
   onToggleHistory: () => void;
   sessionCount: number;
@@ -14,7 +16,7 @@ interface Props {
 // The MARK is the link back to the platform, so there is no separate text link. Only History
 // and the settings gear remain on the right: the jpy badge and the account avatar were platform
 // placeholders that did nothing here.
-export function TopNav(p: Props) {
+function TopNavRsEmbed(p: TopNavProps) {
   return (
     <header className="bar">
       <div className="bar-inner">
@@ -34,4 +36,10 @@ export function TopNav(p: Props) {
       </div>
     </header>
   );
+}
+
+// The original prototype page is kept verbatim in TopNav.platform.tsx and selected here, so
+// switching back is a build flag rather than a revert. See src/uiVariant.ts.
+export function TopNav(p: TopNavProps) {
+  return isPlatformVariant ? <TopNavPlatform {...p} /> : <TopNavRsEmbed {...p} />;
 }

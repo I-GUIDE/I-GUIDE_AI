@@ -3,6 +3,7 @@
 // the single swap point: replace parseIntent()+the executor with either the real
 // I-GUIDE agent endpoint or an LLM tool-router. See README "Where the real
 // system plugs in".
+import { isPlatformVariant } from './uiVariant';
 import { OVERPASS_PRESETS, type OverpassPreset } from './overpass';
 
 export type Intent =
@@ -97,9 +98,22 @@ export function parseIntent(text: string): Intent {
 //      seconds, where an on-the-fly model would make the first click look like a hang
 //   4. overpass_search -> a clickable map layer, which shows the delivery contract (the map IS
 //      the deliverable) without needing an upload
-export const SUGGESTIONS = [
+export const SUGGESTIONS_RSEMBED = [
   'What can you do?',
   'Which satellite embedding models can I use?',
   'Embed Urbana, Illinois with the GSE model',
   'Show the popular restaurants in St. Louis',
 ];
+
+// The ORIGINAL prototype prompts, kept verbatim from commit 76dab0b so the pre-#20 page can be
+// switched back to whole — chrome AND prompts together, which is the only way the switch is
+// actually a switch. Their own principle was different: the first two need nothing set up, the
+// rest name their prerequisite.
+export const SUGGESTIONS_PLATFORM = [
+  'Find flood risk datasets on I-GUIDE',
+  'Show hospitals near Chicago on the map',
+  'Aggregate my uploaded points into a 1 km grid',
+  'Embed the selected region with the GSE model',
+];
+
+export const SUGGESTIONS = isPlatformVariant ? SUGGESTIONS_PLATFORM : SUGGESTIONS_RSEMBED;

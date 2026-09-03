@@ -63,8 +63,11 @@ function Sources({ response }: { response: any }) {
     <div className="srcs">
       <h4>Sources used</h4>
       {order.filter((k) => groups[k].length).map((k) => (
-        <div key={k} className="grp">
-          <div className="hd">{GROUP_LABEL[k]}<span className="n">{groups[k].length} item{groups[k].length === 1 ? '' : 's'}</span></div>
+        // Collapsed by default: three groups expanded pushed the answer far up the panel, and
+        // sources are a thing you consult, not a thing you read. <details> matches the Reasoning
+        // block above and gives keyboard + screen-reader behaviour for free.
+        <details key={k} className="grp">
+          <summary className="hd">{GROUP_LABEL[k]}<span className="n">{groups[k].length} item{groups[k].length === 1 ? '' : 's'}</span><span className="chev">▾</span></summary>
           {groups[k].slice(0, 12).map((s, i) => {
             const title = String(s.title || s.doc_id || '(untitled)');
             const url = String(s.url || '');
@@ -77,7 +80,7 @@ function Sources({ response }: { response: any }) {
             );
           })}
           {groups[k].length > 12 && <div className="sn">+{groups[k].length - 12} more not shown</div>}
-        </div>
+        </details>
       ))}
     </div>
   );
