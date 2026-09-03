@@ -14,7 +14,7 @@ location is a throwaway work dir whose files are persisted as output artifacts.
 A ``local`` subprocess backend exists for development only — it is **NOT a
 sandbox** (it runs on the host) and must be opted into explicitly.
 
-Gated by ``AGENT_CODE_EXEC`` (off by default). Treat all executed code as
+Gated by ``AGENT_CODE_EXEC``, which defaults to ON. Treat all executed code as
 untrusted.
 """
 

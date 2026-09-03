@@ -2477,6 +2477,13 @@ def default_search_fn(*, llm: Optional[Any] = None, tool_strategy: str = "granul
         _search_note = _prior_actions_note(_prior_actions(state))
         if _search_note:
             _retrieval_q = f"{_retrieval_q}\n\n{_search_note}"
+        # `_reground_target` routes a RETRIEVED answer back here, so this peer needs the
+        # directive as much as analyze does — without it a retrieval-side re-grounding pass
+        # re-runs blind and most likely reproduces the same unsupported answer. Appended to the
+        # retrieval task, never to `query`, which the short-circuit detectors above regex.
+        _search_reground = _reground_note(state)
+        if _search_reground:
+            _retrieval_q = f"{_retrieval_q}\n\n{_search_reground}"
         # One session per turn: the peer thread is checkpointed under a stable child id, so
         # without this the harvest returns an earlier turn's documents as this turn's evidence.
         _session = open_peer_session(

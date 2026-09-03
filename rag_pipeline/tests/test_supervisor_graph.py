@@ -1889,6 +1889,24 @@ def test_the_directive_names_the_claims_and_permits_an_honest_failure():
     assert g._reground_note({"grounding_gaps": ["", "   "]}) is None
 
 
+def test_every_peer_the_gate_can_route_to_reads_the_directive():
+    """`_reground_target` routes to analyze OR search, so BOTH must append the directive.
+
+    Search was missed when the gate shipped, and the repo's own note called that "latent
+    because the gate routes to analyze/search" — which is exactly the case that is NOT latent.
+    A retrieval-side pass without the directive re-runs blind.
+    """
+    import inspect
+    from agent_runtime.supervisor import graph as g
+
+    for fn in (g.default_analyze_fn, g.default_search_fn):
+        assert "_reground_note(state)" in inspect.getsource(fn), \
+            f"{fn.__name__} can be a re-grounding target but never reads the directive"
+    # the code peer is NOT a target today; if that changes, this is the reminder
+    assert g._reground_target({"step": 1, "max_steps": 8, "actions": [],
+                               "code_result": {"x": 1}}) == "analyze"
+
+
 def test_the_directive_never_contaminates_the_query_itself():
     """query is regexed by the QGIS/map/model heuristics and recorded in searched_queries;
     the directive belongs on the task text alone."""

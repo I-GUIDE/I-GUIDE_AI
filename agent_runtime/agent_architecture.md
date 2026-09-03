@@ -295,8 +295,8 @@ Four services on `iguide-network` (`docker-compose.yml:13-160`): `embedding-serv
 
 Recorded so the next reader does not have to rediscover them:
 
-1. **`code_execution.py:17` says code execution is "off by default"; `is_code_exec_enabled()`
-   defaults it ON** (`:288-291`). The docstring is wrong.
+1. ~~`code_execution.py:17` docstring~~ — **fixed 2026-09-03**; it now says "defaults to ON",
+   matching `is_code_exec_enabled()` (`:288-291`).
 2. **Filesystem skills are enabled by default but discover nothing in the deployed image** —
    `skills/` and `.agents/` are not in the `COPY` list, and `.dockerignore` excludes `*.md`.
    Works in a dev checkout, silently absent in production.
@@ -305,8 +305,11 @@ Recorded so the next reader does not have to rediscover them:
    exec container with no semaphore anywhere.
 5. **`graph_state.py:26-47` name sets are stale** relative to the live tool surface; they feed
    only the inert `select_allowed_tools`.
-6. **The re-grounding directive reaches only `default_analyze_fn`.** Latent today because the
-   gate routes to `analyze`/`search`, but a future route to `code` would re-run blind.
+6. ~~The re-grounding directive reaches only `default_analyze_fn`~~ — **fixed 2026-09-03**.
+   This was mis-filed as latent: `_reground_target` routes to `search` whenever the answer was
+   retrieved rather than computed, so the retrieval-side pass really was running blind. Both
+   peers now read `_reground_note`, pinned by a test. The CODE peer still does not, and is not
+   a target today.
 7. **`requirements.txt` pins nothing exactly** — two builds of one commit can differ.
 8. **The overhead estimate overstates tool schemas ~1.35×** (measured), so the derived ceiling
    is slightly tighter than necessary. Deliberately not "fixed": the decomposition rests on two

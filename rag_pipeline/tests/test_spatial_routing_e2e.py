@@ -57,6 +57,15 @@ def make_state(query: str) -> MutableMapping[str, Any]:
 
 
 
+_LIVE_VARS = ("OPENSEARCH_NODE", "GOOGLE_MAPS_API_KEY", "ANVILGPT_URL", "ANVILGPT_KEY")
+_MISSING = [v for v in _LIVE_VARS if not (os.getenv(v) or "").strip()]
+
+
+# Runs the whole pipeline against live APIs (OpenSearch, Google Maps geocoding, AnvilGPT
+# generation), so with none of them configured it used to fail on an empty result set rather
+# than say why. Its own docstring already listed these as requirements.
+@pytest.mark.skipif(bool(_MISSING),
+                    reason="live backend not configured: " + ", ".join(_MISSING) + " unset")
 def test_spatial_routing_to_generation_e2e(monkeypatch):
     """
     Validate that spatial routing flows correctly through retrieval and generation.
