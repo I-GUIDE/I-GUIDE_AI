@@ -739,6 +739,32 @@ def test_element_url_builds_platform_and_external_links(monkeypatch):
     assert _element_url({"element_type": "notebook", "doc_id": "n"}) == "https://dev.example/notebooks/n"
 
 
+def test_a_document_with_its_own_url_is_never_given_a_platform_path(monkeypatch):
+    """Reported from the deployed UI: "Show the popular restaurants in St. Louis" cited each
+    restaurant as platform.i-guide.io/osm_features/osm:node:767555934 — a 404. overpass_search
+    sets element_type "osm_feature" AND a correct openstreetmap.org url; the old code matched an
+    exception LIST of external types ({opengeodata, web}), so a type not on the list had its url
+    ignored and its type pluralised into a platform page that does not exist.
+
+    The rule is now url-first, which also covers the NEXT external source rather than waiting
+    for it to ship a broken link.
+    """
+    monkeypatch.setenv("FRONTEND_DOMAIN", "https://platform.i-guide.io")
+    from agent_runtime.supervisor.evidence_subgraph import _element_url
+
+    osm = {"element_type": "osm_feature", "doc_id": "osm:node/767555934",
+           "url": "https://www.openstreetmap.org/node/767555934"}
+    assert _element_url(osm) == "https://www.openstreetmap.org/node/767555934"
+    assert "platform.i-guide.io" not in _element_url(osm)
+
+    # an external type nobody has added an exception for yet
+    assert _element_url({"element_type": "sentinel_scene", "doc_id": "s2:123",
+                         "url": "https://scihub.example/s2/123"}) == "https://scihub.example/s2/123"
+    # ...while internal elements, which never carry a url, still get the platform path
+    assert _element_url({"element_type": "dataset", "doc_id": "abc"}) == \
+        "https://platform.i-guide.io/datasets/abc"
+
+
 def test_format_documents_emits_url_line(monkeypatch):
     monkeypatch.setenv("FRONTEND_DOMAIN", "https://platform.i-guide.io")
     from agent_runtime.supervisor.evidence_subgraph import _format_documents
