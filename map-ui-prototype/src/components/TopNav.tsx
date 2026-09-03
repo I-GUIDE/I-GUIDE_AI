@@ -4,8 +4,13 @@ interface Props {
   sessionCount: number;
 }
 
-// The reference I-GUIDE platform chrome. Nav items / search / account are PLACEHOLDERS
-// (non-functional) so the chat matches the platform look when the map isn't shown.
+// The header for the rs-embed deployment (issue #20). This used to mirror the I-GUIDE platform
+// chrome with non-functional placeholders — Collections / Apps / Support / a search box — which
+// made the page look like the platform without behaving like it: every one of them was dead on
+// click. They are gone, and the one link that DOES go somewhere replaces them.
+//
+// History / gear / jpy / account are kept: the first two are wired, and the last two still carry
+// the platform look. The account avatar remains a placeholder.
 export function TopNav(p: Props) {
   return (
     <header className="bar">
@@ -15,15 +20,15 @@ export function TopNav(p: Props) {
             <polygon points="50,6 89,28 89,72 50,94 11,72 11,28" fill="none" stroke="#1aa37a" strokeWidth="9" strokeLinejoin="round" />
             <polygon points="50,26 71,38 71,62 50,74 29,62 29,38" fill="#a8b400" opacity="0.85" />
           </svg>
-          <span className="brand-name">Knowledge Elements <span className="caret">▾</span></span>
+          <span className="brand-name">Remote Sensing (rs-embed)</span>
         </div>
         <nav className="top">
-          <span>Collections</span>
-          <span>Apps <span className="caret">▾</span></span>
-          <span>Support <span className="caret">▾</span></span>
+          <a className="platform-link" href="https://platform.i-guide.io"
+             target="_blank" rel="noopener noreferrer">
+            &larr; I-GUIDE Platform
+          </a>
         </nav>
         <div className="grow" />
-        <div className="navsearch"><span className="mag">⌕</span><input placeholder="Search…" aria-label="Search (placeholder)" /></div>
         <button className="navbtn" title="Past conversations" onClick={p.onToggleHistory}>
           History{p.sessionCount ? ` (${p.sessionCount})` : ''}
         </button>
