@@ -21,6 +21,12 @@ a { color: var(--link); }
 .bar { padding: 12px 16px 6px; }
 .bar-inner { max-width: 1400px; margin: 0 auto; background: #fff; border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); display: flex; align-items: center; gap: 18px; padding: 8px 16px; }
 .brand { display: flex; align-items: center; gap: 9px; font-weight: 700; }
+/* The mark is the link home, so it gets a real affordance. Sized by HEIGHT: the official
+   asset is 208x240, so fixing width would squash it. */
+.brand .marklink { display: inline-flex; align-items: center; border-radius: 6px; }
+.brand .marklink:focus-visible { outline: 2px solid #1aa37a; outline-offset: 2px; }
+.brand .marklink:hover { opacity: .82; }
+img.iglogo { height: 26px; width: auto; display: block; }
 .brand .caret { color: #9aa0a6; font-size: 11px; }
 .top { display: flex; gap: 20px; font-weight: 600; color: #2b2f36; font-size: 14px; }
 .top span { cursor: default; white-space: nowrap; }
@@ -31,8 +37,6 @@ a { color: var(--link); }
 .grow { flex: 1; }
 .navbtn { font-size: 12px; padding: 5px 11px; }
 .navbtn.gear { border: 0; box-shadow: none; background: none; font-size: 16px; color: var(--muted); }
-.jpy { width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--line); display: grid; place-items: center; font-size: 11px; color: #f37726; font-weight: 700; }
-.avatar { width: 34px; height: 34px; border-radius: 50%; background: linear-gradient(135deg, #7a8b3a, #c9b15a); border: 2px solid #fff; box-shadow: 0 0 0 1px var(--line); }
 /* .top now holds the platform back-link, so it stays visible when narrow. */
 
 /* left panel: layer manager + feature inspector — floats over the map so it never
