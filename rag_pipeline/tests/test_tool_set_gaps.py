@@ -275,3 +275,50 @@ def test_both_peers_apply_the_refinement():
 
     for fn in (g.default_analyze_fn, g.default_code_fn):
         assert "_uploads_are_tabular_only(input_file_ids)" in inspect.getsource(fn), fn.__name__
+
+
+# --- MCP web tools are deliberately not bound ---------------------------------------------
+
+def test_the_dominated_mcp_web_tools_are_not_bound(monkeypatch):
+    """Both are DuckDuckGo searches like web_search, but with a canned query, NO fetch
+    counterpart, no per-turn web budget, and they raise instead of returning an error envelope.
+    Observed live: the agent chose mcp_search_external_resources over web_search/web_fetch for a
+    "find datasets about X" phrasing — the weaker path, and one that structurally cannot read a
+    page (SEARCH_AGENT_PROMPT rule 10).
+    """
+    monkeypatch.delenv("AGENT_MCP_UNBIND", raising=False)
+    from agent_runtime import langchain_mcp_tools as m
+
+    assert m._is_unbound_mcp_tool("search_external_resources")
+    assert m._is_unbound_mcp_tool("web_search_geo_links")
+    # everything else still binds
+    for keep in ("describe_image", "run_notebook_workflow", "load_chicago_crime_data"):
+        assert not m._is_unbound_mcp_tool(keep)
+
+
+def test_the_unbind_list_is_overridable(monkeypatch):
+    from agent_runtime import langchain_mcp_tools as m
+
+    monkeypatch.setenv("AGENT_MCP_UNBIND", "none")
+    assert not m._is_unbound_mcp_tool("search_external_resources"), "operators can bind them back"
+
+    monkeypatch.setenv("AGENT_MCP_UNBIND", "describe_image")
+    assert m._is_unbound_mcp_tool("describe_image")
+    assert not m._is_unbound_mcp_tool("search_external_resources")
+
+    # the mcp_ prefix is tolerated, since that is the name the agent sees
+    monkeypatch.setenv("AGENT_MCP_UNBIND", "mcp_describe_image")
+    assert m._is_unbound_mcp_tool("describe_image")
+
+
+def test_both_build_paths_apply_the_filter():
+    """The remote path and the local-import fallback each build tools; filtering only the
+    remote one would quietly re-bind them whenever the MCP server is unreachable."""
+    import inspect
+    from agent_runtime import langchain_mcp_tools as m
+
+    remote = inspect.getsource(m._make_remote_mcp_tools)
+    factory = inspect.getsource(m.make_langchain_mcp_tools)
+    assert "_is_unbound_mcp_tool(remote_name)" in remote
+    assert "_is_unbound_mcp_tool(func.__name__)" in factory
+

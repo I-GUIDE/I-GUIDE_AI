@@ -366,6 +366,41 @@ async def _remote_mcp_call_tool_async(url: str, tool_name: str, arguments: Dict[
                 raise
 
 
+# --- tools the agent deliberately does NOT bind ------------------------------------------
+#
+# These stay published on the MCP server — other clients may call them — but the agent should
+# not be offered them, because for the agent they are strictly dominated by tools it already
+# has. Both are DuckDuckGo searches via `ddgs`, exactly like `web_search`, but they:
+#   * rewrite the query into a canned template ("geospatial open data {topic}",
+#     "jupyter notebook {topic} github", "research paper {topic} pdf") rather than asking what
+#     the user asked;
+#   * have NO fetch counterpart, so the agent gets snippets and cannot read the page — which is
+#     the precise failure SEARCH_AGENT_PROMPT rule 10 records ("searched the web, got results,
+#     never fetched, and concluded the version is not explicitly mentioned");
+#   * run in the MCP process, so they bypass AGENT_WEB_MAX_SEARCHES_PER_TURN entirely; and
+#   * raise on provider failure instead of returning an {"error": ...} the turn can survive.
+#
+# `web_search_geo_links` says as much in its own docstring: "web_search/web_fetch cover the open
+# web more capably". Removing the wrong choice is more reliable than describing it away.
+#
+# Override with AGENT_MCP_UNBIND (comma-separated names, or "none" to bind everything).
+_DEFAULT_UNBOUND_MCP_TOOLS = ("search_external_resources", "web_search_geo_links")
+
+
+def _unbound_mcp_tool_names() -> frozenset:
+    raw = (os.getenv("AGENT_MCP_UNBIND") or "").strip()
+    if not raw:
+        return frozenset(_DEFAULT_UNBOUND_MCP_TOOLS)
+    if raw.lower() in {"none", "0", "false", "off"}:
+        return frozenset()
+    return frozenset(n.strip().lstrip("mcp_") for n in raw.split(",") if n.strip())
+
+
+def _is_unbound_mcp_tool(bare_name: str) -> bool:
+    """Match on the BARE server-side name, so it works before and after the mcp_ prefix."""
+    return str(bare_name or "").strip() in _unbound_mcp_tool_names()
+
+
 def _make_remote_mcp_tools(url: str) -> List[Any]:
     try:
         from langchain_core.tools import StructuredTool
@@ -387,6 +422,9 @@ def _make_remote_mcp_tools(url: str) -> List[Any]:
     for remote_tool in remote_tools:
         remote_name = getattr(remote_tool, "name", "")
         if not remote_name:
+            continue
+        if _is_unbound_mcp_tool(remote_name):
+            logger.debug("not binding MCP tool %s (dominated by web_search/web_fetch)", remote_name)
             continue
 
         args_schema = _args_schema_from_remote_tool(remote_tool)
@@ -585,6 +623,10 @@ def make_langchain_mcp_tools(
             candidates = list(_iter_mcp_functions(module))
 
         for func in candidates:
+            if _is_unbound_mcp_tool(func.__name__):
+                logger.debug("not binding MCP tool %s (dominated by web_search/web_fetch)",
+                             func.__name__)
+                continue
             tool_name = f"mcp_{func.__name__}"
             try:
                 tools.append(
