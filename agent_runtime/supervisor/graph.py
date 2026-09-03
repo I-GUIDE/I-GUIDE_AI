@@ -323,9 +323,9 @@ _LEDGER_FACTS = (
     # Spatial statistics were lost entirely. `verdict` is the tool's own plain sentence and
     # carries the statistic with its expectation, which is what an answer needs.
     "verdict", "features_analyzed", "column", "crs", "filename",
-    # Coverage. embed_zones' default max_tiles covers a few per cent of a county and
-    # `truncated` is the tool SAYING so — losing it is how "the whole county was embedded"
-    # gets asserted over 24 of 1140 tiles.
+    # Coverage. embed_zones is uncapped by default, but a caller-set max_tiles can still cut
+    # a sweep short, and `truncated` is the tool SAYING so — losing it is how "the whole county
+    # was embedded" gets asserted over a fraction of the tiles.
     "zones_total", "zones_with_pixels", "tiles_planned", "truncated", "row_count", "cells",
     # search, after the rename at capture
     "search_method", "results_returned",

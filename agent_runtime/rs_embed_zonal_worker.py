@@ -243,7 +243,10 @@ def run(req: dict) -> dict:
 
     model = str(req.get("model") or "gse")
     tile_px = int(req.get("tile_px") or 200)
-    max_tiles = int(req.get("max_tiles") or 24)
+    # None means uncapped, matching embed_zones. `or 24` would have turned an explicit
+    # "no cap" back into 24, and an explicit 0 into 24 as well.
+    _mt = req.get("max_tiles")
+    max_tiles = None if _mt is None else int(_mt)
     year = int(req.get("year") or 2022)
 
     gdf = gpd.read_file(req["polygons_path"])
@@ -310,9 +313,11 @@ def run(req: dict) -> dict:
     pixel_size_warnings: list[str] = []
     zone_index = {i + 1: i for i in range(len(gdf))}
 
+    capped = False
     for ty in range(ny):
         for tx in range(nx):
-            if tiles_done >= max_tiles:
+            if max_tiles is not None and tiles_done >= max_tiles:
+                capped = True
                 break
             x0, y0 = ox + tx * step, oy + ty * step
             x1, y1 = x0 + step, y0 + step
@@ -360,7 +365,8 @@ def run(req: dict) -> dict:
                         row0 = (ny - 1 - ty) * tile_px   # canvas rows run north -> south
                         proj_pixels.append((row0, tx * tile_px, arr.copy(), inside))
             tiles_done += 1
-        if tiles_done >= max_tiles:
+        if max_tiles is not None and tiles_done >= max_tiles:
+            capped = True
             break
 
     zones = []
@@ -446,7 +452,10 @@ def run(req: dict) -> dict:
         "pixel_ground_m": round(scale * math.cos(math.radians(_to_lonlat(0, (miny + maxy) / 2)[1])), 3),
         "zone_id_field": id_field,
         "tiles_planned": planned, "tiles_fetched": tiles_done,
-        "tiles_capped": planned > max_tiles,
+        # Set where the sweep ACTUALLY stopped early, not `planned > max_tiles` -- that
+        # compared the cap against the whole bounding grid, most of whose cells are empty and
+        # skipped for free, so it reported truncation on sweeps that lost nothing.
+        "tiles_capped": capped,
         "tile_px": tile_px,
         "zones_total": len(zones), "zones_with_pixels": covered,
         "zones": zones,

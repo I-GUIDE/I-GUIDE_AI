@@ -367,9 +367,10 @@ gate would have hidden the tool that consumes what `admin_boundary` produces —
 fetch a county and have nothing to embed it with.
 
 Measured, and worth knowing before pairing them: Champaign County's 48 tracts planned **1140**
-tiles, so `embed_zones`' default `max_tiles=24` covers a few per cent and most zones come back
-with no pixels. It reports that in `truncated`, but only after the sweep is spent, so
-`admin_boundary` says it up front in `coverage_hint`.
+tiles. `embed_zones` is **uncapped by default**, so that sweep runs in full — 1140 requests to
+the imagery provider — rather than returning a few per cent. Pass `max_tiles` for a bounded look
+or `zone_ids` for a few zones; either way `admin_boundary` says it up front in `coverage_hint`,
+while the budget can still be chosen.
 
 ## Code execution
 

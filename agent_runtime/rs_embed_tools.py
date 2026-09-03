@@ -738,7 +738,10 @@ def run_zonal_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         "image": bool(payload.get("image", True)),
     }
     body.update(_zonal_service_body(payload))
-    if payload.get("max_tiles"):
+    # `is not None`, not truthiness. max_tiles=0 is falsy, so it used to be dropped from the
+    # body entirely, the service default of None applied, and the sweep ran COMPLETELY
+    # UNCAPPED -- the exact opposite of what 0 asks for.
+    if payload.get("max_tiles") is not None:
         body["max_tiles"] = int(payload["max_tiles"])
     res = _svc("/api/zones", body, timeout=_ZONAL_TIMEOUT_S)
     if res.get("error") or not res.get("ok"):
@@ -785,8 +788,13 @@ def run_zonal_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         # scale_m is EPSG:3857 metres; pixel_ground_m is what a pixel actually covers.
         "scale_m": meta.get("scale_m"),
         "pixel_ground_m": meta.get("pixel_ground_m"),
+        # tiles_planned counts every cell of the bounding grid, most of which are empty;
+        # tiles_needed counts only the cells a zone actually touches, which is the number a
+        # cap should be read against.
         "tiles_planned": meta.get("tiles_planned"),
+        "tiles_needed": meta.get("tiles_needed"),
         "tiles_fetched": meta.get("tiles_fetched"),
+        "tiles_skipped_by_cap": int(meta.get("tiles_skipped_by_cap") or 0),
         "tiles_capped": bool(meta.get("tiles_capped")),
         "tile_errors": list(meta.get("tile_errors") or []),
         "pixel_size_warnings": list(meta.get("pixel_size_warnings") or []),
@@ -805,8 +813,8 @@ def run_zonal_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         out["zone_ids_not_found"] = payload["_missing_zone_ids"]
     if not covered:
         out["hint"] = ("Check that the polygons are where you think they are, that the model "
-                       "has coverage for this year, and that max_tiles is not cutting the "
-                       "sweep short before it reaches them.")
+                       "has coverage for this year, and -- if you passed max_tiles -- that "
+                       "it is not cutting the sweep short before it reaches them.")
     return out
 
 
@@ -818,7 +826,7 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
 
     def embed_zones(file_id: str, zone_id_field: Optional[str] = None, model: str = "gse",
                     year: int = 2022, clusters: int = 5, tile_px: int = 200,
-                    max_tiles: int = 24, name: Optional[str] = None,
+                    max_tiles: Optional[int] = None, name: Optional[str] = None,
                     zone_ids: Optional[List[str]] = None,
                     sibling_file_ids: Optional[List[str]] = None,
                     start: Optional[str] = None, end: Optional[str] = None) -> str:
@@ -847,6 +855,13 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
         `start`/`end` (e.g. "2025-03-01", "2025-05-01") embed a DATE RANGE instead of the
         whole of `year` — pass both or neither. Use them whenever the user names a period:
         without them a request for March-May silently becomes a full-year composite.
+
+        There is NO tile cap by default, so the sweep fetches every tile the polygons touch
+        and the answer covers all of them. Each tile is one request to the imagery provider,
+        and a large layer can need hundreds. Set `max_tiles` when a bounded, partial answer is
+        what you want -- a quick look at a big region -- and leave it unset when the answer has
+        to be complete. Whatever the cap drops is reported as `truncated`, and the zones under
+        the dropped tiles come back with `pixels == 0`.
 
         Returns a CSV of per-zone vectors ready for machine learning (use fit_zone_model),
         and puts TWO things on the map: a PCA-RGB picture of the pixels themselves, cut to the
@@ -879,7 +894,7 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
             name, "png", default=f"{model}_zone_pixels")
         res = run_zonal_worker({"polygons_path": str(read_path), "zone_id_field": zone_id_field,
                                 "model": model, "year": int(year), "tile_px": int(tile_px),
-                                "max_tiles": int(max_tiles),
+                                "max_tiles": None if max_tiles is None else int(max_tiles),
                                 "start": start, "end": end,
                                 "zone_ids": [str(z) for z in zone_ids] if zone_ids else None,
                                 "clusters": max(2, min(int(clusters), len(_CLUSTER_COLORS))),
@@ -993,8 +1008,12 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                     "a much larger one, because pooling averages away variance.",
         }
         if res.get("tiles_capped"):
-            out["truncated"] = (f"stopped after max_tiles={max_tiles} of {res['tiles_planned']} "
-                                f"tiles — zones outside those tiles have no pixels")
+            # tiles_needed, not tiles_planned: the grid counts empty cells the sweep skips for
+            # free, so "N of <grid>" read as lost coverage when nothing had been lost.
+            out["truncated"] = (f"max_tiles={max_tiles} stopped the sweep after "
+                                f"{res['tiles_fetched']} of the {res.get('tiles_needed')} tiles "
+                                f"the zones touch; {res.get('tiles_skipped_by_cap')} tile(s) were "
+                                f"never fetched — the zones under them have no pixels")
         if res.get("pixel_size_warnings"):
             out["pixel_size_warnings"] = res["pixel_size_warnings"]
         if inline:

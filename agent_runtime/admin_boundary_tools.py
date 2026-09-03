@@ -359,14 +359,14 @@ def make_admin_boundary_tools() -> List[Any]:
                                    f"(AGENT_TIGERWEB_MAX_FEATURES)")
         if zone_note and len(feats) > 8:
             # Measured, not guessed: Champaign County's 48 tracts planned 1140 tiles at the
-            # default tile_px, so embed_zones' default max_tiles=24 covers a few per cent of
-            # the county and returns a handful of zones. It does say so in `truncated`, but by
-            # then the sweep is spent — say it here, while the budget can still be chosen.
+            # default tile_px. embed_zones no longer caps itself, so that sweep now RUNS —
+            # every one of those tiles is a request to the imagery provider. Say it here,
+            # while the budget can still be chosen, rather than after the sweep is spent.
             result["coverage_hint"] = (
                 f"embedding all {len(feats)} zones sweeps the whole county: a county of tracts "
-                "planned ~1140 tiles in testing, so embed_zones' default max_tiles=24 covers "
-                "only a few per cent and most zones come back with no pixels. Raise max_tiles "
-                "for full coverage, or pass zone_ids=[...] to embed a few zones properly.")
+                "planned ~1140 tiles in testing, and embed_zones is uncapped by default, so it "
+                "will fetch every tile the zones touch. Pass max_tiles=<n> for a bounded, "
+                "partial look, or zone_ids=[...] to embed a few zones properly and cheaply.")
         if len(matched) > 1:
             result["note"] = (f"{len(matched)} areas matched {area_text!r} in this state; all "
                               "are included")
