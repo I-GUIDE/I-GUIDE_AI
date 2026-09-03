@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { LayerArtifact } from '../contracts';
 import type { FileRecord, ModelCatalogue, TraceLine } from '../agentClient';
 import { SUGGESTIONS } from '../agentBrain';
-import { groupedSources, type SourceGroup } from '../answerFormat';
+import { groupedSources, sourceHref, type SourceGroup } from '../answerFormat';
 
 export interface ChatMessage {
   role: 'user' | 'agent';
@@ -63,11 +63,16 @@ function Sources({ response }: { response: any }) {
     <div className="srcs">
       <h4>Sources used</h4>
       {order.filter((k) => groups[k].length).map((k) => (
-        <div key={k} className="grp">
-          <div className="hd">{GROUP_LABEL[k]}<span className="n">{groups[k].length} item{groups[k].length === 1 ? '' : 's'}</span></div>
+        // Collapsed by default: three groups expanded pushed the answer far up the panel, and
+        // sources are a thing you consult, not a thing you read. <details> matches the Reasoning
+        // block above and gives keyboard + screen-reader behaviour for free.
+        <details key={k} className="grp">
+          <summary className="hd">{GROUP_LABEL[k]}<span className="n">{groups[k].length} item{groups[k].length === 1 ? '' : 's'}</span><span className="chev">▾</span></summary>
           {groups[k].slice(0, 12).map((s, i) => {
             const title = String(s.title || s.doc_id || '(untitled)');
-            const url = String(s.url || '');
+            // sourceHref, not s.url: internal knowledge elements carry no url of their own and
+            // would otherwise render as plain text while external hits beside them are links.
+            const url = sourceHref(s);
             const snip = String(s.abstract || s.snippet || s.contents || '').trim();
             return (
               <div key={i} className="it">
@@ -77,7 +82,7 @@ function Sources({ response }: { response: any }) {
             );
           })}
           {groups[k].length > 12 && <div className="sn">+{groups[k].length - 12} more not shown</div>}
-        </div>
+        </details>
       ))}
     </div>
   );

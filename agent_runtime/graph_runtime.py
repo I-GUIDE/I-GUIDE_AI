@@ -46,6 +46,45 @@ from rag_pipeline.search import web_utils
 # Synchronous query execution
 # ---------------------------------------------------------------------------
 
+def _with_citation_urls(orchestration_result: Any) -> Any:
+    """Give every evidence document the link a client should cite it at.
+
+    The answer body already renders citations as links, because `default_synthesize_fn` runs the
+    documents through ``_element_url``. The structured evidence the client shows under "Sources
+    used" did not: internal knowledge elements reach it with ``url: ""`` — `_normalize_hits`
+    fills that field only for external hits — so the same element was a link in the prose and
+    plain text in the source list.
+
+    Computed HERE rather than in the client on purpose. The scheme
+    (``{FRONTEND_DOMAIN}/{type-plural}/{doc_id}``, url-first for anything that carries one) is
+    already implemented and tested once; duplicating it in TypeScript is how it drifts, and a
+    drifted copy is exactly what produced ``/osm_features/osm:node:…`` 404s in the prose.
+
+    Non-destructive: only fills a MISSING url, never overwrites one, and leaves the doc alone
+    when no link can be formed.
+    """
+    if not isinstance(orchestration_result, dict):
+        return orchestration_result
+    docs = orchestration_result.get("evidence")
+    if not isinstance(docs, list):
+        return orchestration_result
+    try:
+        from agent_runtime.supervisor.evidence_subgraph import _element_url
+    except Exception:      # noqa: BLE001 - a citation link is never worth failing a turn over
+        return orchestration_result
+    for doc in docs:
+        src = doc.get("document") if isinstance(doc, dict) and isinstance(doc.get("document"), dict) else doc
+        if not isinstance(src, dict) or str(src.get("url") or "").strip():
+            continue
+        try:
+            url = _element_url(src)
+        except Exception:  # noqa: BLE001
+            continue
+        if url:
+            src["url"] = url
+    return orchestration_result
+
+
 def run_agent_query(
     query: str,
     *,
@@ -99,7 +138,7 @@ def run_agent_query(
             "thread_id": effective_thread_id,
         }
     )
-    orchestration_result = final_state.get("orchestration_result")
+    orchestration_result = _with_citation_urls(final_state.get("orchestration_result"))
     available_agent_names = final_state.get("available_agent_names") or []
     skill_registry = SkillRegistry.discover(skill_roots)
     response: Dict[str, Any] = {
@@ -227,7 +266,11 @@ def stream_agent_query_events(
                         "thread_id": effective_thread_id,
                     }
                 )
-                orchestration_result = final_state.get("orchestration_result")
+                # Same citation links as the non-streaming path. Applied HERE as well because
+                # this path builds its own orchestration_result and never calls
+                # run_agent_query — the map UI streams, so decorating only that function left
+                # the "Sources used" list unlinked in the only client that uses it.
+                orchestration_result = _with_citation_urls(final_state.get("orchestration_result"))
                 available_agent_names_local = final_state.get("available_agent_names") or available_agent_names
                 artifacts = extract_search_artifacts(orchestration_result if isinstance(orchestration_result, dict) else {})
                 route_trace = build_orchestration_trace(

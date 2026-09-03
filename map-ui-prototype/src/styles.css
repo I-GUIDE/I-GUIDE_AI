@@ -21,18 +21,35 @@ a { color: var(--link); }
 .bar { padding: 12px 16px 6px; }
 .bar-inner { max-width: 1400px; margin: 0 auto; background: #fff; border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); display: flex; align-items: center; gap: 18px; padding: 8px 16px; }
 .brand { display: flex; align-items: center; gap: 9px; font-weight: 700; }
-.brand .caret, .top .caret { color: #9aa0a6; font-size: 11px; }
-.top { display: flex; gap: 20px; font-weight: 600; color: #2b2f36; font-size: 14px; }
-.top span { cursor: default; white-space: nowrap; }
-.grow { flex: 1; }
+/* The mark is the link home, so it gets a real affordance. Sized by HEIGHT: the official
+   asset is 208x240, so fixing width would squash it. */
+.brand .marklink { display: inline-flex; align-items: center; border-radius: 6px; }
+.brand .marklink:focus-visible { outline: 2px solid #1aa37a; outline-offset: 2px; }
+.brand .marklink:hover { opacity: .82; }
+img.iglogo { height: 26px; width: auto; display: block; }
+
+/* --- styles the ORIGINAL page needs (VITE_UI_VARIANT=platform) -------------------
+   Restored verbatim from commit 76dab0b. The rs-embed header renders none of these
+   elements, so they are inert there; without them the preserved copy is not actually
+   a copy — its search box, jpy badge and avatar would render unstyled. */
 .navsearch { display: flex; align-items: center; gap: 8px; background: #f1f2f3; border-radius: 999px; padding: 7px 14px; color: #9aa0a6; min-width: 180px; }
 .navsearch .mag { font-size: 15px; }
 .navsearch input { border: 0; background: transparent; outline: 0; color: var(--ink); width: 100%; font-size: 14px; }
-.navbtn { font-size: 12px; padding: 5px 11px; }
-.navbtn.gear { border: 0; box-shadow: none; background: none; font-size: 16px; color: var(--muted); }
 .jpy { width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--line); display: grid; place-items: center; font-size: 11px; color: #f37726; font-weight: 700; }
 .avatar { width: 34px; height: 34px; border-radius: 50%; background: linear-gradient(135deg, #7a8b3a, #c9b15a); border: 2px solid #fff; box-shadow: 0 0 0 1px var(--line); }
-@media (max-width: 900px) { .top, .navsearch { display: none; } }
+.brand .caret, .top .caret { color: #9aa0a6; font-size: 11px; }
+@media (max-width: 900px) { .top:has(> span), .navsearch { display: none; } }
+/* ---------------------------------------------------------------------------- */
+.top { display: flex; gap: 20px; font-weight: 600; color: #2b2f36; font-size: 14px; }
+.top span { cursor: default; white-space: nowrap; }
+/* The only header item that actually navigates, so unlike the placeholders it replaced it
+   gets a pointer, a hover state and a visited-proof colour. */
+.top a.platform-link { color: #2b2f36; text-decoration: none; white-space: nowrap; }
+.top a.platform-link:hover, .top a.platform-link:focus-visible { color: #1aa37a; text-decoration: underline; }
+.grow { flex: 1; }
+.navbtn { font-size: 12px; padding: 5px 11px; }
+.navbtn.gear { border: 0; box-shadow: none; background: none; font-size: 16px; color: var(--muted); }
+/* .top now holds the platform back-link, so it stays visible when narrow. */
 
 /* left panel: layer manager + feature inspector — floats over the map so it never
    steals the map's width (standard map-app pattern). */
@@ -172,8 +189,17 @@ button.active { background: var(--brand); border-color: var(--brand); color: #ff
 .srcs { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 12px; }
 .srcs h4 { margin: 0 0 4px; font-size: 12px; letter-spacing: .05em; text-transform: uppercase; color: #9aa0a6; }
 .srcs .grp { margin-top: 10px; }
-.srcs .hd { font-size: 13px; font-weight: 700; color: #5b6168; display: flex; justify-content: space-between; margin-bottom: 5px; }
-.srcs .hd .n { font-weight: 500; color: #9aa0a6; }
+/* The group header is now a <summary>: it must look and behave like a control. Mirrors the
+   Reasoning block above so the two foldables in a turn are consistent. */
+.srcs .hd { font-size: 13px; font-weight: 700; color: #5b6168; display: flex; align-items: center;
+  gap: 8px; margin-bottom: 5px; cursor: pointer; list-style: none; user-select: none; }
+.srcs .hd::-webkit-details-marker { display: none; }
+.srcs .hd:hover { color: #2f3437; }
+.srcs .grp > .hd:focus-visible { outline: 2px solid var(--link, #3f6591); outline-offset: 2px; border-radius: 4px; }
+.srcs .hd .n { font-weight: 500; color: #9aa0a6; margin-left: auto; }
+.srcs .hd .chev { color: #9aa0a6; transition: transform .15s ease; }
+.srcs .grp[open] > .hd .chev { transform: rotate(180deg); }
+.srcs .grp[open] > .hd { margin-bottom: 7px; }
 .srcs .it { padding: 6px 0; border-top: 1px dashed var(--line); }
 .srcs .it:first-of-type { border-top: 0; }
 .srcs .it .t { font-size: 14px; font-weight: 600; color: #2f3437; word-break: break-word; }
