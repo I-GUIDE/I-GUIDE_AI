@@ -85,18 +85,21 @@ export function parseIntent(text: string): Intent {
   return { kind: 'clarify', text };
 }
 
-// Starter prompts for the LIVE agent. The ordering principle is unchanged from the generic
-// set these replaced (issue #20): the first two need NOTHING set up, and the rest name their
-// prerequisite — a drawn region, an upload — so it is obvious what to do first.
+// Starter prompts for the LIVE agent (issue #20). NONE of these needs anything set up first —
+// no upload, no drawn region — because a starter prompt that fails on a fresh session teaches
+// the wrong thing about the agent.
 //
-// All four are remote sensing, and all four are reachable with the tools actually bound:
-// list_embedding_models, admin_boundary -> embed_region, segment_region, embed_zones.
-// The named-area prompt deliberately asks for `gse`, which is PRECOMPUTED and returns in
-// seconds; naming an on-the-fly model here would make the first click of a new session look
-// like a hang.
+// They are ordered as a tour: what the agent is, what it has, one thing it does with a named
+// area, one thing it does with live geodata.
+//   1. capability introspection — answered from the LIVE tool registry, not a canned blurb
+//   2. list_embedding_models
+//   3. admin_boundary -> embed_region. `gse` on purpose: it is PRECOMPUTED and returns in
+//      seconds, where an on-the-fly model would make the first click look like a hang
+//   4. overpass_search -> a clickable map layer, which shows the delivery contract (the map IS
+//      the deliverable) without needing an upload
 export const SUGGESTIONS = [
+  'What can you do?',
   'Which satellite embedding models can I use?',
-  'Embed Champaign County, Illinois with the GSE model',
-  'Segment the selected region into 5 look-alike zones',
-  'Embed every polygon in my uploaded layer and cluster them',
+  'Embed Urbana, Illinois with the GSE model',
+  'Show the popular restaurants in St. Louis',
 ];
