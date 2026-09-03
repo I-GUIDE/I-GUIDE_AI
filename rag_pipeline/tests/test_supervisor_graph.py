@@ -765,6 +765,45 @@ def test_a_document_with_its_own_url_is_never_given_a_platform_path(monkeypatch)
         "https://platform.i-guide.io/datasets/abc"
 
 
+def test_client_evidence_carries_the_same_citation_url_as_the_answer(monkeypatch):
+    """The answer body linked its citations while "Sources used" showed the same element as
+    plain text, because internal knowledge elements reach the client with url "" —
+    _normalize_hits fills that field for external hits only. The link is computed server-side so
+    the scheme is not reimplemented in TypeScript, which is how the /osm_features/ 404 happened.
+    """
+    monkeypatch.setenv("FRONTEND_DOMAIN", "https://platform.i-guide.io")
+    from agent_runtime.graph_runtime import _with_citation_urls
+
+    orch = {"evidence": [
+        {"document": {"element_type": "dataset", "doc_id": "abc"}},          # internal, no url
+        {"element_type": "osm_feature", "doc_id": "osm:node/1",
+         "url": "https://www.openstreetmap.org/node/1"},                     # keeps its own
+        {"element_type": "resource", "doc_id": "r1"},                        # unlinkable
+    ]}
+    docs = _with_citation_urls(orch)["evidence"]
+    assert docs[0]["document"]["url"] == "https://platform.i-guide.io/datasets/abc"
+    assert docs[1]["url"] == "https://www.openstreetmap.org/node/1"   # never overwritten
+    assert "url" not in docs[2]                                        # no link invented
+
+    # never raises on shapes it does not understand
+    assert _with_citation_urls(None) is None
+    assert _with_citation_urls({"a": 1}) == {"a": 1}
+
+
+def test_both_response_paths_decorate_evidence_with_citation_urls():
+    """The map UI STREAMS, and the streaming path builds its own orchestration_result rather
+    than calling run_agent_query. Decorating only the latter left "Sources used" unlinked in the
+    one client that uses it — the helper was unit-tested, the wiring was not.
+    """
+    import inspect
+    from agent_runtime import graph_runtime as gr
+
+    for fn in (gr.run_agent_query, gr.stream_agent_query_events):
+        src = inspect.getsource(fn)
+        assert "_with_citation_urls(final_state.get(\"orchestration_result\"))" in src, \
+            f"{fn.__name__} hands the client undecorated evidence"
+
+
 def test_format_documents_emits_url_line(monkeypatch):
     monkeypatch.setenv("FRONTEND_DOMAIN", "https://platform.i-guide.io")
     from agent_runtime.supervisor.evidence_subgraph import _format_documents

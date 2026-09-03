@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { LayerArtifact } from '../contracts';
 import type { FileRecord, ModelCatalogue, TraceLine } from '../agentClient';
 import { SUGGESTIONS } from '../agentBrain';
-import { groupedSources, type SourceGroup } from '../answerFormat';
+import { groupedSources, sourceHref, type SourceGroup } from '../answerFormat';
 
 export interface ChatMessage {
   role: 'user' | 'agent';
@@ -70,7 +70,9 @@ function Sources({ response }: { response: any }) {
           <summary className="hd">{GROUP_LABEL[k]}<span className="n">{groups[k].length} item{groups[k].length === 1 ? '' : 's'}</span><span className="chev">▾</span></summary>
           {groups[k].slice(0, 12).map((s, i) => {
             const title = String(s.title || s.doc_id || '(untitled)');
-            const url = String(s.url || '');
+            // sourceHref, not s.url: internal knowledge elements carry no url of their own and
+            // would otherwise render as plain text while external hits beside them are links.
+            const url = sourceHref(s);
             const snip = String(s.abstract || s.snippet || s.contents || '').trim();
             return (
               <div key={i} className="it">
