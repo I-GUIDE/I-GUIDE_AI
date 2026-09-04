@@ -1438,7 +1438,11 @@ def _resp(answer, tool_names=(), results=None):
 def test_code_peer_retries_once_when_code_was_never_run(monkeypatch):
     """Unrun code triggers ONE retry carrying the observation — not a prompt threat."""
     first = _resp("Here you go:\n```python\nprint(1)\n```")          # no execute_code
-    second = _resp("Ran it; output was 42.", tool_names=["execute_code"])
+    # WITH the payload: in production execute_code always returns one, and `executed` now
+    # means the code RAN, not that the tool was called. A call with no result is a tool that
+    # never returned, which is not a successful run.
+    second = _resp("Ran it; output was 42.", tool_names=["execute_code"],
+                   results={"execute_code": {"ok": True, "exit_code": 0, "stdout": "42"}})
     out, seen = _stub_code_peer(monkeypatch, [first, second])
 
     assert len(seen) == 2, "should re-invoke exactly once"
@@ -1449,7 +1453,8 @@ def test_code_peer_retries_once_when_code_was_never_run(monkeypatch):
 
 def test_code_peer_does_not_retry_when_it_already_ran(monkeypatch):
     out, seen = _stub_code_peer(
-        monkeypatch, [_resp("Ran it:\n```python\nprint(1)\n```", tool_names=["execute_code"])])
+        monkeypatch, [_resp("Ran it:\n```python\nprint(1)\n```", tool_names=["execute_code"],
+                             results={"execute_code": {"ok": True, "exit_code": 0}})])
     assert len(seen) == 1
     assert out["executed"] is True
 

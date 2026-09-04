@@ -30,6 +30,8 @@ from typing import Any, Callable, Dict, List, Optional, TypedDict, Tuple
 
 from langgraph.graph import END, START, StateGraph
 
+logger = logging.getLogger(__name__)
+
 from agent_runtime.evidence_quality import _extract_json_object, audit_answer_grounding, rerank_documents
 from agent_runtime.supervisor.evidence_subgraph import (
     _content_to_text,
@@ -3260,8 +3262,38 @@ _CODE_FENCE_RE = re.compile(r"^```[\w+-]*\s*$", re.M)
 
 
 def _has_execution_record(artifacts: Dict[str, Any]) -> bool:
-    """Whether this peer run actually called ``execute_code``."""
+    """Whether this peer run CALLED ``execute_code`` at all.
+
+    Gates the did-you-actually-run-it retry, which is about a peer that handed back a code
+    block without trying it. A call that ran and FAILED is not that case — telling such a peer
+    "you did not run it" would be false.
+    """
     return _called_tool(artifacts, "execute_code")
+
+
+def _execution_outcome(artifacts: Dict[str, Any]) -> Tuple[bool, str]:
+    """``(a run succeeded, the last error)`` across this turn's execute_code calls.
+
+    ``executed`` is read downstream as "the code ran", so deriving it from the CALL meant a
+    non-zero exit was reported as a success and synthesis described a failed run as a working
+    one. The sandbox reports failure as data — ``ok`` is computed from exit_code/timeout/error
+    — so the outcome has to be read out of the payload, not inferred from the call.
+    """
+    ran, error = False, ""
+    for item in artifacts.get("tool_results") or []:
+        if not isinstance(item, dict) or str(item.get("name") or "") != "execute_code":
+            continue
+        try:
+            parsed = json.loads(str(item.get("content") or ""))
+        except Exception:  # noqa: BLE001 - an unparseable result is not a successful one
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        if parsed.get("ok") is True:
+            ran = True
+        else:
+            error = str(parsed.get("error") or parsed.get("stderr") or "")[:300] or error
+    return ran, error
 
 
 def _ships_unrun_code(answer: str) -> bool:
@@ -3518,6 +3550,7 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         # chance to run the code, with the observation that it did not.
         exec_available = code_exec if code_exec is not None else is_code_exec_enabled()
         executed = _has_execution_record(artifacts)
+        extra_run = False
         if exec_available and not executed and not caps and _ships_unrun_code(result["answer"]):
             emit_trace_event(
                 "code_not_executed",
@@ -3531,8 +3564,39 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
             result["tool_calls"] = list(_session.turn_artifacts["tool_calls"])
             result["tool_results"] = list(_session.turn_artifacts["tool_results"])
             caps = list(dict.fromkeys(r["capability"] for r in requests))
-        # Carry the fact downstream so synthesis can describe the code honestly.
-        result["executed"] = bool(executed)
+            extra_run = True
+
+        turn = {"tool_calls": result["tool_calls"], "tool_results": result["tool_results"]}
+        ran, exec_error = _execution_outcome(turn)
+
+        # A tool that failed the same way twice is a dead end. The analyze peer has had this
+        # for a while; the code peer never did, even though execute_code's payload carries the
+        # very `ok` key the detector reads — so two identical sandbox failures produced no
+        # intervention at all. At most ONE extra run per turn, so a peer that already got the
+        # did-you-run-it observation is left alone rather than paying for both.
+        if not extra_run and not caps and not ran:
+            stuck = _repeatedly_failed_tools(turn)
+            if stuck:
+                emit_trace_event(
+                    "tool_dead_end",
+                    {"stage": "code", "tools": sorted(stuck),
+                     "message": f"{', '.join(sorted(stuck))} failed repeatedly; "
+                                "handing the peer the observation and an alternative route"},
+                    node="code",
+                )
+                _alt_run = _session.run(_tool_stuck_observation(stuck))
+                result["answer"] = extract_final_answer(_alt_run.resp) or result["answer"]
+                result["tool_calls"] = list(_session.turn_artifacts["tool_calls"])
+                result["tool_results"] = list(_session.turn_artifacts["tool_results"])
+                turn = {"tool_calls": result["tool_calls"], "tool_results": result["tool_results"]}
+                ran, exec_error = _execution_outcome(turn)
+                caps = list(dict.fromkeys(r["capability"] for r in requests))
+
+        # Carry the fact downstream so synthesis can describe the code honestly: a RUN, not a
+        # call, and the error when there was one.
+        result["executed"] = bool(ran)
+        if exec_error and not ran:
+            result["execution_error"] = exec_error
         if caps:
             result["needs"] = caps  # model-driven request(s)
         return result
@@ -3866,7 +3930,23 @@ def build_supervisor_graph(
     def code_node(state: SupervisorState) -> Dict[str, Any]:
         q = state.get("query", "")
         emit_trace_event("node_started", {"stage": "code", "message": "Generating code"}, node="code")
-        clean, needs = _extract_needs(do_code(q, state.get("evidence") or [], state))
+        try:
+            clean, needs = _extract_needs(do_code(q, state.get("evidence") or [], state))
+        except Exception as exc:  # noqa: BLE001 - a dead peer must not be a dead turn
+            # This node had no handler, so a peer that hit the recursion limit raised straight
+            # out of the supervisor graph and the whole turn died: the user got an SSE error
+            # and no synthesized answer, even when search and analyze had already produced
+            # something worth saying. Degrade to a code_result that states the failure and let
+            # synthesis answer from what the other peers found.
+            logger.exception("code peer failed; continuing the turn without it")
+            emit_trace_event(
+                "node_failed",
+                {"stage": "code", "message": f"code peer failed: {type(exc).__name__}"},
+                node="code",
+            )
+            return {"code_result": {"answer": "", "executed": False, "tool_calls": [],
+                                    "tool_results": [],
+                                    "error": f"{type(exc).__name__}: {exc}"[:300]}}
         emit_trace_event("node_completed", {"stage": "code", "message": "Code ready"}, node="code")
         update: Dict[str, Any] = {"code_result": clean}
         enq = _enqueue_needs(state.get("needs"), needs, "code")
