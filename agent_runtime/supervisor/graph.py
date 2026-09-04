@@ -3251,6 +3251,15 @@ def default_analyze_fn(*, llm: Optional[Any] = None, include_mcp_tools: bool = T
             on_map = on_map or _map_delivered_this_turn(retry_artifacts)
         # Carried downstream so synthesis can describe the map honestly either way.
         result["on_map"] = bool(on_map)
+        # execute_code is bound to THIS peer as well, and the router sends most code-shaped
+        # work here — so the same honesty the code peer enforces has to hold here, or a peer
+        # can hand back a code block it never ran and nothing says so.
+        if _apply_execution_honesty(
+                _session, result, prose_key="summary",
+                exec_available=(code_exec if code_exec is not None
+                                else is_code_exec_enabled()),
+                caps=caps, node="analyze"):
+            caps = list(dict.fromkeys(r["capability"] for r in requests))
         if caps:
             result["needs"] = caps  # model-driven request(s)
         return result
@@ -3294,6 +3303,54 @@ def _execution_outcome(artifacts: Dict[str, Any]) -> Tuple[bool, str]:
         else:
             error = str(parsed.get("error") or parsed.get("stderr") or "")[:300] or error
     return ran, error
+
+
+def _apply_execution_honesty(session: Any, result: Dict[str, Any], *, prose_key: str,
+                             exec_available: bool, caps: List[str], node: str) -> bool:
+    """Make a peer's result tell the truth about whether its code RAN. Returns: did we re-run.
+
+    This lives here, and takes the peer as a parameter, because the invariant is about the
+    TOOL: any peer with execute_code bound can hand back a code block it never ran, and
+    ``executed`` has to mean a run wherever that happens. It was implemented on the code peer
+    only — and the router sends this work to the ANALYZE peer, which has execute_code bound
+    too, so the guard was missing exactly where it was needed. Observed live: a turn returned
+    a Socrata loader as "the code you actually ran" with no execute_code record anywhere in it.
+
+    `caps` suppresses the re-run, not the accounting. A peer that asked for another capability
+    is stopping legitimately and cannot run what it does not have; but ``executed`` is a fact
+    about this turn either way, and reporting it as a run because a call was made is the thing
+    being fixed.
+    """
+    from agent_runtime.runtime_utils import extract_final_answer
+
+    turn = {"tool_calls": result.get("tool_calls") or [],
+            "tool_results": result.get("tool_results") or []}
+    reran = False
+    if (exec_available and not caps
+            and not _has_execution_record(turn)
+            and _ships_unrun_code(result.get(prose_key) or "")):
+        emit_trace_event(
+            "code_not_executed",
+            {"stage": node,
+             "message": "code returned without an execute_code record; retrying once"},
+            node=node,
+        )
+        _retry = session.run(_CODE_NOT_RUN_OBSERVATION)
+        result[prose_key] = extract_final_answer(_retry.resp) or result.get(prose_key)
+        result["tool_calls"] = list(session.turn_artifacts["tool_calls"])
+        result["tool_results"] = list(session.turn_artifacts["tool_results"])
+        turn = {"tool_calls": result["tool_calls"], "tool_results": result["tool_results"]}
+        reran = True
+
+    ran, error = _execution_outcome(turn)
+    result["executed"] = bool(ran)
+    # Only when a run actually failed: an absent run is already said by executed=False, and a
+    # stale error beside a later success would read as a failure that did not happen.
+    if error and not ran:
+        result["execution_error"] = error
+    elif "execution_error" in result:
+        result.pop("execution_error")
+    return reran
 
 
 def _ships_unrun_code(answer: str) -> bool:
@@ -3549,25 +3606,14 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         # capability is stopping legitimately, so it is left alone; otherwise give it one
         # chance to run the code, with the observation that it did not.
         exec_available = code_exec if code_exec is not None else is_code_exec_enabled()
-        executed = _has_execution_record(artifacts)
-        extra_run = False
-        if exec_available and not executed and not caps and _ships_unrun_code(result["answer"]):
-            emit_trace_event(
-                "code_not_executed",
-                {"stage": "code", "message": "code returned without an execute_code record; retrying once"},
-                node="code",
-            )
-            _retry_run = _session.run(_CODE_NOT_RUN_OBSERVATION)
-            resp_retry, retry_artifacts = _retry_run.resp, _retry_run.artifacts
-            executed = _has_execution_record(retry_artifacts)
-            result["answer"] = extract_final_answer(resp_retry) or result["answer"]
-            result["tool_calls"] = list(_session.turn_artifacts["tool_calls"])
-            result["tool_results"] = list(_session.turn_artifacts["tool_results"])
+        extra_run = _apply_execution_honesty(
+            _session, result, prose_key="answer", exec_available=exec_available,
+            caps=caps, node="code")
+        if extra_run:
             caps = list(dict.fromkeys(r["capability"] for r in requests))
-            extra_run = True
 
         turn = {"tool_calls": result["tool_calls"], "tool_results": result["tool_results"]}
-        ran, exec_error = _execution_outcome(turn)
+        ran = bool(result.get("executed"))
 
         # A tool that failed the same way twice is a dead end. The analyze peer has had this
         # for a while; the code peer never did, even though execute_code's payload carries the
@@ -3590,13 +3636,10 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
                 result["tool_results"] = list(_session.turn_artifacts["tool_results"])
                 turn = {"tool_calls": result["tool_calls"], "tool_results": result["tool_results"]}
                 ran, exec_error = _execution_outcome(turn)
+                result["executed"] = bool(ran)
+                if exec_error and not ran:
+                    result["execution_error"] = exec_error
                 caps = list(dict.fromkeys(r["capability"] for r in requests))
-
-        # Carry the fact downstream so synthesis can describe the code honestly: a RUN, not a
-        # call, and the error when there was one.
-        result["executed"] = bool(ran)
-        if exec_error and not ran:
-            result["execution_error"] = exec_error
         if caps:
             result["needs"] = caps  # model-driven request(s)
         return result
