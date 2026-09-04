@@ -327,6 +327,12 @@ _LEDGER_FACTS = (
     # a sweep short, and `truncated` is the tool SAYING so — losing it is how "the whole county
     # was embedded" gets asserted over a fraction of the tiles.
     "zones_total", "zones_with_pixels", "tiles_planned", "truncated", "row_count", "cells",
+    # Whether a layer was a SUBSET. The note described a sampled layer exactly as it described a
+    # complete one, and "show the rest" is a normal follow-up the peer had no way to know was
+    # needed. NOT the payload's `sampled` bool: _pick keeps False, so it would stamp ": False"
+    # onto every complete layer. The full count says it by comparison with feature_count, the
+    # count actually mapped.
+    "features_total",
     # search, after the rename at capture
     "search_method", "results_returned",
 )
@@ -648,6 +654,7 @@ _FACT_PHRASES = {
     "input_size_hw": "model input size (h, w) in px: {v} — imagery is resampled to this",
     "patch_size": "ViT patch size: {v} px, so each output token covers {v}x{v} input pixels",
     "grid_hw_tokens": "output token grid (h, w): {v}",
+    "features_total": "features in the full set: {v} — a lower shown count means the map has a SAMPLE",
     "source": "data source: {v}",
     "sensor": "sensor: {v}",
     "scale_m": "ground resolution / pixel size: {v} m per pixel (this IS the resolution it was computed at)",
@@ -716,7 +723,16 @@ def _ledger_lines(rows: List[Dict[str, Any]]) -> List[str]:
         # a failed call wearing a successful one's result.
         if not r.get("failed"):
             if r.get("outputs"):
-                bits.append(f"[produced {r['outputs']}]")
+                # The id as well as the name: it was captured and never rendered, so a peer saw
+                # "[produced champaign.geojson]" and had to hope a bare filename resolved.
+                # Gated on `outputs`, NOT on file_id: read_text_file and
+                # inspect_file_for_analysis both return the file_id of the file the USER
+                # uploaded and create nothing, so keying on file_id alone claimed they had
+                # produced it — a fabrication the grounding auditor then confirms, since it
+                # reads these same lines as evidence.
+                fid = r.get("file_id")
+                bits.append(f"[produced {r['outputs']}, file_id {fid}]" if fid
+                            else f"[produced {r['outputs']}]")
             if r.get("map_layer"):
                 bits.append(f"[on the map as {_layer_phrase(r['map_layer'])}]")
         lines.append("- " + " ".join(bits))
@@ -3442,6 +3458,12 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         _code_note = _prior_actions_note(_prior_actions(state))
         if _code_note:
             parts.append(_code_note)
+        # Same reason as the analyze peer: a re-grounding pass that does not say WHAT was
+        # ungrounded makes the peer re-run blind and most likely repeat the same unsupported
+        # answer. This node was the only one of the three that never received it.
+        _code_reground = _reground_note(state)
+        if _code_reground:
+            parts.append(_code_reground)
         # See analyze peer: continuity is owned by this peer's checkpointed thread,
         # so chat_history is not re-fed here (avoids double-replay on re-runs).
         _session = open_peer_session(
