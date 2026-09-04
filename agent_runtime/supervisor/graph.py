@@ -377,6 +377,28 @@ def _budgeted(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # `verdict` and `error` ARE the answer to "what did it find" / "why did it fail"; the default
 # 80 chars cuts both mid-sentence. Everything else stays at the default.
 _LEDGER_VALUE_CHARS_BY_KEY = {"verdict": 200, "error": 160}
+# How many layer labels one ledger row may carry. A tool that maps forty zones separately
+# must not push everything else out of the ledger; the row says how many it dropped.
+_LEDGER_LAYERS_PER_ROW = 6
+
+
+def _layer_labels(value: Any) -> List[str]:
+    """The layer labels on a ledger row, however the row spells them.
+
+    Rows carry a LIST since a single tool call can map several layers at once, but a bare
+    string is still accepted: rows are process-local and outlive no restart, yet a shape guard
+    here is cheaper than a crash in the one path that tells the model what is on the screen.
+    """
+    if value is None or value == "":
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(v) for v in value if v not in (None, "")]
+    return [str(value)]
+
+
+def _layer_phrase(value: Any) -> str:
+    """One layer reads exactly as it always did; several read as a list."""
+    return ", ".join(repr(label) for label in _layer_labels(value))
 
 
 def _ledger_value(value: Any, key: str = "") -> Any:
@@ -523,11 +545,29 @@ def _ledger_rows(*contexts: Any) -> List[Dict[str, Any]]:
             # this field), so a real delivery that carries no label must still land a row —
             # otherwise a layer from turn 2 stops counting in turn 4 and the auditor staples a
             # hallucination caveat onto a layer that is on the user's screen.
+            # A tool can put SEVERAL layers on the map in one call — embed_zones emits the
+            # pixel raster AND the zone groups, embed_region one per model — and they live
+            # under the PLURAL key, with `map_layer` holding only the first. Reading the
+            # singular alone recorded one and lost the rest, so the mechanism that exists to
+            # stop the answerer claiming "no map was produced" under-reported the map itself.
+            labels: List[Any] = []
+            for cand in (payload.get("map_layers") or []):
+                if isinstance(cand, dict) and cand.get("label"):
+                    one = _ledger_value(cand["label"])
+                    if one not in labels:
+                        labels.append(one)
             ml = payload.get("map_layer")
             if isinstance(ml, dict) and ml.get("label"):
-                part["map_layer"] = _ledger_value(ml["label"])
+                one = _ledger_value(ml["label"])
+                if one not in labels:
+                    labels.append(one)
+            if labels:
+                kept, dropped = labels[:_LEDGER_LAYERS_PER_ROW], len(labels) - _LEDGER_LAYERS_PER_ROW
+                if dropped > 0:
+                    kept = kept + [f"+{dropped} more"]
+                part["map_layer"] = kept
             elif _delivers_layer(name, payload):
-                part["map_layer"] = _ledger_value(name or "map layer")
+                part["map_layer"] = [_ledger_value(name or "map layer")]
         # `walk` visits EVERY nested dict, and some carry a `name` that is not a tool
         # (admin_boundary's `matched` entries are {"name": "Champaign County", ...}), so the
         # empty-part guard has to stay for those. But never drop something that is
@@ -678,7 +718,7 @@ def _ledger_lines(rows: List[Dict[str, Any]]) -> List[str]:
             if r.get("outputs"):
                 bits.append(f"[produced {r['outputs']}]")
             if r.get("map_layer"):
-                bits.append(f"[on the map as {r['map_layer']!r}]")
+                bits.append(f"[on the map as {_layer_phrase(r['map_layer'])}]")
         lines.append("- " + " ".join(bits))
     return lines
 
@@ -748,9 +788,9 @@ def _visible_state_lines(rows: List[Dict[str, Any]]) -> List[str]:
     for row in rows or []:
         if not isinstance(row, dict) or row.get("failed"):
             continue                       # a failed call delivered nothing to look at
-        layer = row.get("map_layer")
-        if layer and str(layer) not in layers:
-            layers.append(str(layer))
+        for label in _layer_labels(row.get("map_layer")):
+            if label not in layers:
+                layers.append(label)
         out = row.get("outputs")
         if out and str(out) not in files:
             files.append(str(out))

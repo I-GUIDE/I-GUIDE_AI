@@ -60,7 +60,8 @@ def test_a_call_and_its_result_become_one_row():
     row = rows[0]
     assert row["tool"] == "embed_region"
     assert row["args"]["model"] == "clay" and row["args"]["start"] == "2025-03-01"
-    assert row["map_layer"] == "clay embedding (PCA-RGB)"
+    # A list: one call can map several layers, and the row records all of them.
+    assert row["map_layer"] == ["clay embedding (PCA-RGB)"]
     assert row["file_id"] == "file_d0bb"
 
 
@@ -815,3 +816,91 @@ def test_the_auditor_sees_the_visible_state_too():
 def test_a_malformed_row_is_harmless():
     for junk in ([None], ["x"], [{}], [{"map_layer": None}], None):
         assert isinstance(g._visible_state_lines(junk), list)
+
+
+# --- a tool can map SEVERAL layers in one call -------------------------------------------
+#
+# embed_zones puts the pixel raster AND the zone-group choropleth on the map; embed_region
+# emits one raster per model; align_embedding_colors one per region. All three set the plural
+# `map_layers`, with `map_layer` holding only the first. The ledger read the singular, so it
+# recorded one layer and lost the rest — the mechanism whose whole purpose is to stop the
+# answerer saying "no map was produced" was itself under-reporting the map.
+
+TWO_LAYERS = {
+    "ok": True, "model": "gse",
+    "map_layer": {"url": "/f/1", "label": "gse pixel embedding in zones"},
+    "map_layers": [
+        {"url": "/f/1", "label": "gse pixel embedding in zones"},
+        {"url": "/f/2", "label": "gse zone groups (k=5)"},
+    ],
+}
+
+
+def _row(payload, tool="embed_zones", args=None):
+    rows = g._ledger_rows(_pair(tool, args or {"model": "gse"}, payload))
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
+def test_both_layers_of_one_call_reach_the_ledger():
+    assert _row(TWO_LAYERS)["map_layer"] == [
+        "gse pixel embedding in zones", "gse zone groups (k=5)"]
+
+
+def test_the_first_layer_is_not_recorded_twice():
+    """`map_layer` is layers[0] and `map_layers` contains it, so the two keys overlap."""
+    labels = _row(TWO_LAYERS)["map_layer"]
+    assert len(labels) == len(set(labels))
+
+
+def test_a_single_layer_row_is_unchanged():
+    row = _row({"ok": True, "map_layer": {"url": "/f/1", "label": "hospitals near Chicago"}})
+    assert row["map_layer"] == ["hospitals near Chicago"]
+
+
+def test_the_rendered_line_still_reads_the_same_for_one_layer():
+    """The single-layer wording is what the synthesis prompt and the auditor were tuned on."""
+    line = g._ledger_lines([_row({"ok": True, "map_layer": {"url": "/f/1", "label": "48 tracts"}})])[0]
+    assert "[on the map as '48 tracts']" in line
+
+
+def test_the_rendered_line_names_every_layer():
+    line = g._ledger_lines([_row(TWO_LAYERS)])[0]
+    assert "gse pixel embedding in zones" in line and "gse zone groups (k=5)" in line
+
+
+def test_the_note_lists_every_layer_still_on_the_map():
+    note = g._prior_actions_note([_row(TWO_LAYERS)])
+    assert "gse pixel embedding in zones" in note
+    assert "gse zone groups (k=5)" in note
+
+
+def test_the_same_layer_from_two_turns_is_listed_once():
+    """Per-label dedupe. The old check compared whole rows, so it could not see inside a
+    multi-layer one; the per-row ledger lines still mention each layer once per call, which is
+    why this asserts on the still-on-the-map projection rather than the whole note."""
+    lines = g._visible_state_lines([_row(TWO_LAYERS), _row(TWO_LAYERS)])
+    onmap = [l for l in lines if "still on the user's map" in l]
+    assert len(onmap) == 1
+    assert onmap[0].count("gse zone groups (k=5)") == 1
+    assert onmap[0].count("gse pixel embedding in zones") == 1
+
+
+def test_a_multi_layer_row_still_counts_as_a_delivered_layer():
+    assert g._map_layer_was_delivered(None, [_row(TWO_LAYERS)])
+
+
+def test_a_flood_of_layers_is_capped_and_says_how_many_it_dropped():
+    """One tool mapping forty zones separately must not push the ledger out of budget."""
+    many = {"ok": True, "map_layers": [{"url": f"/f/{i}", "label": f"zone {i}"} for i in range(40)]}
+    labels = _row(many)["map_layer"]
+    assert len(labels) == g._LEDGER_LAYERS_PER_ROW + 1
+    assert labels[-1] == f"+{40 - g._LEDGER_LAYERS_PER_ROW} more"
+
+
+def test_a_row_carrying_a_bare_string_still_renders():
+    """Rows are process-local and outlive no restart, but the one path that tells the model
+    what is on screen should not crash on an unexpected shape."""
+    legacy = {"tool": "admin_boundary", "args": {}, "map_layer": "48 tracts"}
+    assert "[on the map as '48 tracts']" in g._ledger_lines([legacy])[0]
+    assert "48 tracts" in g._prior_actions_note([legacy])
