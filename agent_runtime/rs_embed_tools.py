@@ -219,6 +219,36 @@ def _fetch_package(service_path: str, stem: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _region_tag(name: Optional[str], bbox: Optional[Any] = None) -> str:
+    """A short, stable token that tells one run's layers apart from another's.
+
+    Layer identity on the client is derived from the LABEL: the map UI builds
+    ``artifact-<slugified label>`` and its ``putLayer`` REPLACES any existing layer with a
+    matching id. A label built from the model alone therefore made a second region silently
+    overwrite the first — two ``embed_region`` calls in one turn left a single raster on the
+    map, with no error and nothing in the result to say a layer had been dropped.
+
+    The caller's ``name`` is the tag when there is one; it already distinguishes the .npz and
+    PNG artifacts, so the layer now agrees with them. Otherwise the region's centre, rounded,
+    which keeps re-embedding the SAME region a replacement (identical tag) while letting
+    different regions coexist.
+    """
+    if name and str(name).strip():
+        return str(name).strip()
+    try:
+        b = [float(v) for v in bbox]  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return ""
+    if len(b) < 4:
+        return ""
+    return f"{(b[1] + b[3]) / 2:.3f},{(b[0] + b[2]) / 2:.3f}"
+
+
+def _layer_label(base: str, tag: str) -> str:
+    """``base`` alone when there is nothing to disambiguate, so one-run labels stay clean."""
+    return f"{base} \u2014 {tag}" if tag else base
+
+
 def _slug(text: str) -> str:
     keep = [c if c.isalnum() else "_" for c in str(text).lower()]
     return "".join(keep).strip("_")[:40] or "region"
@@ -308,6 +338,7 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
             return json.dumps({"ok": False, **res})
 
         layers, summaries, failed = [], [], []
+        region_tag = _region_tag(name, box)
         for r in res.get("results") or []:
             model = str(r.get("model"))
             if not r.get("ok"):
@@ -325,7 +356,8 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                 entry["provenance"] = prov
             if rec:
                 entry.update({"image_file_id": rec["file_id"], "download_url": rec.get("download_url")})
-                layers.append(_raster_layer(rec, box, f"{model} embedding (PCA-RGB)"))
+                layers.append(_raster_layer(
+                    rec, box, _layer_label(f"{model} embedding (PCA-RGB)", region_tag)))
             summaries.append(entry)
 
         pkg = res.get("package") or {}
@@ -398,7 +430,8 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
             "ok": True, "region_bbox": box, "model": model, "k": int(k),
             "grid": res.get("grid_hw"), "legend": legend, "on_map": True,
             "image_file_id": rec["file_id"], "download_url": rec.get("download_url"),
-            "map_layer": _raster_layer(rec, box, f"{model} segments (k={k})"),
+            "map_layer": _raster_layer(
+                rec, box, _layer_label(f"{model} segments (k={k})", _region_tag(name, box))),
             "note": "Clusters are unlabelled: they group similar-looking ground, and the "
                     "same number means nothing across separate runs.",
         })
@@ -964,7 +997,9 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                              "source": "analysis", "count": 1}
                 else:
                     layer = {"url": rec.get("download_url"),
-                             "label": f"{model} zone groups (k={len(present)})",
+                             "label": _layer_label(
+                                 f"{model} zone groups (k={len(present)})",
+                                 _region_tag(name, sub.total_bounds)),
                              "render": "categories", "style_by": "look_alike_group",
                              "source": "analysis", "count": len(keep),
                              "legend": [{"label": g,
@@ -1041,8 +1076,10 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                                   "size_px": img.get("size_px"),
                                   "pixels_shown": img.get("pixels_shown"),
                                   "colour": img.get("colour")}
-            layers.append(_raster_layer(rec_png, [float(v) for v in img["bounds"]],
-                                        f"{model} pixel embedding in zones"))
+            layers.append(_raster_layer(
+                rec_png, [float(v) for v in img["bounds"]],
+                _layer_label(f"{model} pixel embedding in zones",
+                             _region_tag(name, img["bounds"]))))
         elif img.get("error"):
             # Say why there is no picture, and what would get one — the vectors are unaffected
             # either way, and an unexplained absence reads as a failed analysis.
@@ -1103,7 +1140,9 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                 "download_url": rec.get("download_url"),
                 "on_map": True,
                 "map_layer": {"url": rec.get("download_url"),
-                              "label": f"{label_column} predicted from embeddings",
+                              "label": _layer_label(
+                                  f"{label_column} predicted from embeddings",
+                                  _region_tag(name)),
                               "render": "choropleth", "style_by": "predicted",
                               "source": "analysis", "count": res.get("zones_fitted")},
                 "note": "r2/rmse are OUT-OF-FOLD under spatial block CV, so they estimate "
