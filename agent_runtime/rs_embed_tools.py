@@ -18,9 +18,11 @@ rather than by a reconstruction of it.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -196,10 +198,17 @@ def _save_png(data_uri: str, stem: str) -> Optional[Dict[str, Any]]:
 
 
 def _raster_layer(rec: Dict[str, Any], bbox: List[float], label: str,
-                  opacity: float = 0.85) -> Dict[str, Any]:
-    """A ``map_layer`` descriptor the client drapes as a georeferenced image."""
-    return {"url": rec.get("download_url"), "label": label, "render": "raster",
-            "bounds": bbox, "opacity": opacity, "source": "analysis"}
+                  layer_id: Optional[str] = None, opacity: float = 0.85) -> Dict[str, Any]:
+    """A ``map_layer`` descriptor the client drapes as a georeferenced image.
+
+    ``layer_id`` is the layer's identity and should always be given: without it the id falls
+    back to a slug of ``label``, which is a display string and moves when the wording does.
+    """
+    out = {"url": rec.get("download_url"), "label": label, "render": "raster",
+           "bounds": bbox, "opacity": opacity, "source": "analysis"}
+    if layer_id:
+        out["id"] = layer_id
+    return out
 
 
 def _fetch_package(service_path: str, stem: str) -> Optional[Dict[str, Any]]:
@@ -242,6 +251,52 @@ def _region_tag(name: Optional[str], bbox: Optional[Any] = None) -> str:
     if len(b) < 4:
         return ""
     return f"{(b[1] + b[3]) / 2:.3f},{(b[0] + b[2]) / 2:.3f}"
+
+
+# A part that is already plain text: lowercase letters, digits, spaces and
+# underscores only. Anything else loses information when slugged.
+_ID_PLAIN = re.compile(r"^[a-z0-9 _]+$")
+
+
+def _layer_id(kind: str, *parts: Any) -> str:
+    """A layer's identity, minted from what the layer IS rather than from what it is called.
+
+    Without an explicit id, build_map_layer falls back to a slug of the LABEL, which ties
+    identity to a display string. Both directions of that have now bitten: two labels that
+    slugified alike collapsed into one layer on the map, and re-wording a label to fit the
+    panel silently moved the identity of every layer it named. A label has to be free to
+    change — for width, for readability, for whatever the model decides to call a region —
+    without moving the layer underneath it.
+
+    So the parts are the semantics: what kind of layer, which model, which region, which
+    parameter. Same layer, same id, so a re-run REPLACES rather than stacking a duplicate;
+    different layer, different id, so two regions coexist.
+
+    Slugging goes through map_layers._slug_id, which is where the one truncation policy in
+    this codebase lives — a bounded prefix plus a digest of the whole, so a long region name
+    stays readable without two of them colliding past the cut.
+    """
+    from agent_runtime.map_layers import _slug_id
+
+    bits = []
+    for part in parts:
+        text = str(part).strip()
+        if not text:
+            continue
+        low = text.lower()
+        slug = re.sub(r"[^a-z0-9]+", "_", low).strip("_")
+        if slug and _ID_PLAIN.match(low):
+            bits.append(_slug_id(slug, kind))
+            continue
+        # The slug is lossy in two ways that merge distinct regions. It flattens the minus
+        # sign, so a western longitude reads exactly like its eastern mirror; and it deletes
+        # every non-ASCII character, so "北京" and "上海" both slug to nothing at all — and an
+        # empty slug used to fall back to `kind`, which made EVERY such region share one id.
+        # A digest of the original text carries the lost information back. It is still stable:
+        # the same text always digests the same, so a re-run still replaces its own layer.
+        digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
+        bits.append(f"{slug}_{digest}" if slug else digest)
+    return "-".join(["embed", kind, *bits])
 
 
 def _layer_label(base: str, tag: str) -> str:
@@ -370,7 +425,8 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
             if rec:
                 entry.update({"image_file_id": rec["file_id"], "download_url": rec.get("download_url")})
                 layers.append(_raster_layer(
-                    rec, box, _layer_label(f"{model} embedding (PCA-RGB)", region_tag)))
+                    rec, box, _layer_label(f"{model} embedding (PCA-RGB)", region_tag),
+                    _layer_id("pca", model, region_tag)))
             summaries.append(entry)
 
         pkg = res.get("package") or {}
@@ -444,7 +500,8 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
             "grid": res.get("grid_hw"), "legend": legend, "on_map": True,
             "image_file_id": rec["file_id"], "download_url": rec.get("download_url"),
             "map_layer": _raster_layer(
-                rec, box, _layer_label(f"{model} segments (k={k})", _region_tag(name, box))),
+                rec, box, _layer_label(f"{model} segments (k={k})", _region_tag(name, box)),
+                _layer_id("segments", model, f"k{int(k)}", _region_tag(name, box))),
             "note": "Clusters are unlabelled: they group similar-looking ground, and the "
                     "same number means nothing across separate runs.",
         })
@@ -663,6 +720,11 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
         from PIL import Image
 
         layers, regions = [], []
+        # Two packages of the SAME region — one place at two periods, say — carry the same
+        # bbox, so with no `names` both layers would take one tag and therefore one id, and
+        # build_map_layers' per-call dedup would drop the second before it ever left the
+        # process. Number the repeats instead.
+        used_tags: Dict[str, int] = {}
         for entry, arr, p_ in zip(loaded, arrays, proj):
             h, w = int(arr.shape[1]), int(arr.shape[2])
             img = np.clip((p_ - lo) / (hi - lo + 1e-8), 0.0, 1.0).reshape(h, w, 3)
@@ -679,12 +741,17 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
             idx = loaded.index(entry)
             if names and idx < len(names) and str(names[idx]).strip():
                 tag = str(names[idx]).strip()
+            seen_before = used_tags.get(tag, 0)
+            used_tags[tag] = seen_before + 1
+            if seen_before:
+                tag = f"{tag} ({seen_before + 1})"
             stem = f"{_slug(tag)}_{model}_shared_pca"
             out_png = Path(tempfile.mkdtemp(prefix="rsembed_shared_")) / f"{stem}.png"
             Image.fromarray((img * 255).astype(np.uint8)).save(out_png)
             rec = create_output_file_from_path(out_png, filename=out_png.name)
             layers.append(_raster_layer(
-                rec, bbox, _layer_label(f"{model} embedding (shared PCA)", tag)))
+                rec, bbox, _layer_label(f"{model} embedding (shared PCA)", tag),
+                _layer_id("sharedpca", model, tag)))
             regions.append({"file_id": entry["file_id"], "label": tag, "bbox": bbox,
                             "grid": [h, w], "image_file_id": rec["file_id"],
                             "download_url": rec.get("download_url")})
@@ -1164,12 +1231,22 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                 sub.to_file(gj, driver="GeoJSON")
                 rec = create_output_file_from_path(gj, filename=gj.name)
                 present = sorted({str(v) for v in sub["look_alike_group"]})
+                # The REQUESTED extent, not sub's. `sub` holds only the zones that came back
+                # with pixels, so a single failed tile shrinks it — and an id built on that
+                # moves when coverage changes, stacking a duplicate of a layer that should
+                # have replaced itself.
+                zone_tag = _region_tag(name, gdf.total_bounds)
                 if len(keep) == 1:
                     # "zone groups (k=1)" is a cluster analysis of one thing, and a legend with
                     # a single entry explains nothing. Say which zone it is: the model was
                     # adding a SECOND layer of the same polygon because this one did not read
                     # as the area it had asked about.
                     layer = {"url": rec.get("download_url"),
+                             # The region too: without zone_id_field the ids are row indices,
+                             # so every one-polygon layer is zone "0" and one city's outline
+                             # replaces another's.
+                             "id": _layer_id("zone", model, zone_tag,
+                                             sub["zone_id"].iloc[0]),
                              "label": f"{model} embedded zone {sub['zone_id'].iloc[0]}",
                              # Outline, not fill: this layer sits over the pixel image of the
                              # same polygon, and a filled one covers the picture it frames.
@@ -1177,9 +1254,14 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                              "source": "analysis", "count": 1}
                 else:
                     layer = {"url": rec.get("download_url"),
+                             # k belongs in the id because it is in the label: asking for 3
+                             # groups and then 6 is two analyses of the same zones, and the
+                             # second must not silently replace the first. segment_region
+                             # already keys on its k for the same reason.
+                             "id": _layer_id("zonegroups", model, zone_tag,
+                                             f"k{len(present)}"),
                              "label": _layer_label(
-                                 f"{model} zone groups (k={len(present)})",
-                                 _region_tag(name, sub.total_bounds)),
+                                 f"{model} zone groups (k={len(present)})", zone_tag),
                              "render": "categories", "style_by": "look_alike_group",
                              "source": "analysis", "count": len(keep),
                              "legend": [{"label": g,
@@ -1259,7 +1341,8 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
             layers.append(_raster_layer(
                 rec_png, [float(v) for v in img["bounds"]],
                 _layer_label(f"{model} pixel embedding in zones",
-                             _region_tag(name, img["bounds"]))))
+                             _region_tag(name, img["bounds"])),
+                _layer_id("zonepixels", model, _region_tag(name, img["bounds"]))))
         elif img.get("error"):
             # Say why there is no picture, and what would get one — the vectors are unaffected
             # either way, and an unexplained absence reads as a failed analysis.
@@ -1320,6 +1403,12 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                 "download_url": rec.get("download_url"),
                 "on_map": True,
                 "map_layer": {"url": rec.get("download_url"),
+                              # polygons_file_id as well as the name: _region_tag has no
+                              # bbox to fall back on here, so an unnamed run identified the
+                              # layer by label_column alone and the same column over two
+                              # different areas collided.
+                              "id": _layer_id("predicted", label_column, polygons_file_id,
+                                              _region_tag(name)),
                               "label": _layer_label(
                                   f"{label_column} predicted from embeddings",
                                   _region_tag(name)),
