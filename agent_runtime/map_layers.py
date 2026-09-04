@@ -8,6 +8,7 @@ findings live (the ``tool_result`` event carries only truncated text).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -18,6 +19,32 @@ logger = logging.getLogger(__name__)
 
 # Cap features per emitted layer so a single event stays a sane size.
 _MAX_FEATURES = 500
+# How much of a label's slug stays readable in a layer id. Beyond this a digest of the FULL
+# slug is appended — see _slug_id, and never simply lengthen this instead.
+_SLUG_ID_MAX = 40
+
+
+def _slug_id(slug: str, fallback: str) -> str:
+    """A readable, bounded and COLLISION-FREE id for a layer.
+
+    This was `slug[:40]`. The id IS the layer's identity — the client replaces a layer whose id
+    matches — so two labels agreeing in their first 40 characters silently collapsed into one
+    layer on the map: no error, no log, and the tool result still reported the layer delivered.
+
+    It fired the moment a region name pushed the discriminator past the cut. "Downtown
+    Champaign 1 km box - gse embedding (PCA-RGB)" and "... (shared PCA)" both truncate to
+    `downtown_champaign_1_km_box_gse_embeddin` (the stem is 41 characters), so the second
+    overwrote the first; the three-character-shorter Urbana pair kept one distinguishing
+    character and both survived. A one-character margin decided which region kept its raster.
+
+    Short slugs are returned unchanged, so existing ids do not move. Only a slug that WOULD
+    have lost information carries the digest, and it is taken over the whole slug so the id
+    stays stable across runs — the same label still replaces its own layer.
+    """
+    slug = slug or fallback
+    if len(slug) <= _SLUG_ID_MAX:
+        return slug
+    return f"{slug[:_SLUG_ID_MAX]}_{hashlib.sha1(slug.encode('utf-8')).hexdigest()[:8]}"
 
 # tool_name -> (layer source category, display-label prefix)
 _GEO_TOOLS: Dict[str, tuple] = {
@@ -166,10 +193,10 @@ def build_map_layer(tool_name: str, output: Any, *, qa: bool = True) -> Optional
         url = str(ml.get("url") or "").strip()
         if url:
             render = str(ml.get("render") or "shapes")
-            slug = re.sub(r"[^a-z0-9]+", "_", str(ml.get("label") or render).lower()).strip("_")[:40]
+            slug = re.sub(r"[^a-z0-9]+", "_", str(ml.get("label") or render).lower()).strip("_")
             out = {
                 "kind": "map_layer",
-                "id": ml.get("id") or f"agent-{slug or render}",
+                "id": ml.get("id") or f"agent-{_slug_id(slug, render)}",
                 "source": ml.get("source") or "analysis",
                 "label": ml.get("label") or render,
                 "url": url,
