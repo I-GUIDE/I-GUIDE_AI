@@ -245,8 +245,16 @@ def _region_tag(name: Optional[str], bbox: Optional[Any] = None) -> str:
 
 
 def _layer_label(base: str, tag: str) -> str:
-    """``base`` alone when there is nothing to disambiguate, so one-run labels stay clean."""
-    return f"{base} \u2014 {tag}" if tag else base
+    """The TAG LEADS, because the layer list clips names with an ellipsis.
+
+    The panel renders a name in ~158px and truncates the rest, so a tag appended after the
+    description is exactly the part thrown away: two regions both read "gse embedding (PCA-R…"
+    and were indistinguishable in the list even though their ids differed and both layers were
+    on the map. The part that VARIES has to sit where truncation cannot reach it.
+
+    ``base`` alone when there is nothing to disambiguate, so one-run labels stay clean.
+    """
+    return f"{tag} \u2014 {base}" if tag else base
 
 
 def _slug(text: str) -> str:

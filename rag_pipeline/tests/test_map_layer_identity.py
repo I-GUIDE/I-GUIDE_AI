@@ -104,3 +104,16 @@ def test_region_tag_degrades_to_nothing_rather_than_raising():
     for bad in (None, [], [1, 2], "nonsense", [None, None, None, None]):
         assert _region_tag(None, bad) == ""
     assert _layer_label("gse embedding (PCA-RGB)", "") == "gse embedding (PCA-RGB)"
+
+
+def test_the_distinguishing_part_leads_so_truncation_cannot_eat_it(monkeypatch):
+    """The layer panel clips names with an ellipsis at ~158px against ~350px of text, so a tag
+    appended AFTER the description is exactly what gets thrown away: distinct ids, but two rows
+    that both read "gse embedding (PCA-R…" and cannot be told apart."""
+    a = _label_for(monkeypatch, bbox=CHAMPAIGN, name="downtown champaign")
+    b = _label_for(monkeypatch, bbox=URBANA, name="downtown urbana")
+
+    assert a.startswith("downtown champaign"), a
+    assert b.startswith("downtown urbana"), b
+    # Roughly what survives truncation: the visible prefixes already differ.
+    assert a[:18] != b[:18]
