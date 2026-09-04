@@ -165,3 +165,13 @@ def test_packages_with_no_model_in_common_are_refused_with_the_reason(monkeypatc
     assert out["ok"] is False
     assert "share no model" in out["error"]
     assert out["per_package"][1]["models"] == ["clay"]
+
+
+def test_the_same_package_passed_twice_does_not_raise(monkeypatch, tmp_path):
+    """`loaded.index(entry)` compared dicts holding numpy arrays, so a repeated file_id raised
+    'truth value of an array is ambiguous' and took the whole tool down."""
+    pkgs = _two_regions(tmp_path)
+    pkgs["file_a_again"] = pkgs["file_a"]          # the same package, twice
+    out, saved = _run(monkeypatch, tmp_path, pkgs)
+    assert out["ok"] is True, out
+    assert len(saved) == 3

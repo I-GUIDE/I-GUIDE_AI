@@ -22,7 +22,6 @@ import hashlib
 import json
 import logging
 import os
-import re
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -253,50 +252,39 @@ def _region_tag(name: Optional[str], bbox: Optional[Any] = None) -> str:
     return f"{(b[1] + b[3]) / 2:.3f},{(b[0] + b[2]) / 2:.3f}"
 
 
-# A part that is already plain text: lowercase letters, digits, spaces and
-# underscores only. Anything else loses information when slugged.
-_ID_PLAIN = re.compile(r"^[a-z0-9 _]+$")
+def _round_bbox(bbox: Any) -> Optional[List[float]]:
+    """A bbox as a stable key. Float noise must not look like a different region."""
+    try:
+        return [round(float(v), 6) for v in bbox]
+    except (TypeError, ValueError):
+        return None
 
 
-def _layer_id(kind: str, *parts: Any) -> str:
-    """A layer's identity, minted from what the layer IS rather than from what it is called.
+def _layer_id(kind: str, hint: Any = None, /, **content: Any) -> str:
+    """A layer's identity: a digest of everything that decides what the layer SHOWS.
 
-    Without an explicit id, build_map_layer falls back to a slug of the LABEL, which ties
-    identity to a display string. Both directions of that have now bitten: two labels that
-    slugified alike collapsed into one layer on the map, and re-wording a label to fit the
-    panel silently moved the identity of every layer it named. A label has to be free to
-    change — for width, for readability, for whatever the model decides to call a region —
-    without moving the layer underneath it.
+    Different contents are different layers, so every input that changes the pixels or the
+    features goes in the digest — the region, the model, the period, the parameters, the
+    inputs it was computed from — and nothing else does.
 
-    So the parts are the semantics: what kind of layer, which model, which region, which
-    parameter. Same layer, same id, so a re-run REPLACES rather than stacking a duplicate;
-    different layer, different id, so two regions coexist.
+    In particular the caller's ``name`` is NOT in it. A name is a label: the model picks a
+    different one for the same place between turns ("Downtown Champaign - GSE" one turn,
+    "Champaign downtown 1km box" the next), and an id that moved with the wording would turn
+    one layer into two on every re-run. Keeping it out is what makes a re-run of the same
+    request REPLACE its own layer instead of stacking a copy — and what lets a layer be
+    renamed without becoming a different layer.
 
-    Slugging goes through map_layers._slug_id, which is where the one truncation policy in
-    this codebase lives — a bounded prefix plus a digest of the whole, so a long region name
-    stays readable without two of them colliding past the cut.
+    ``hint`` is legibility only, for logs and the DOM. It is itself content-derived — a
+    rounded centre, a file id — so it cannot drift while the content stands still. Uniqueness
+    never rests on it: two layers with the same hint are still told apart by the digest.
     """
-    from agent_runtime.map_layers import _slug_id
-
-    bits = []
-    for part in parts:
-        text = str(part).strip()
-        if not text:
-            continue
-        low = text.lower()
-        slug = re.sub(r"[^a-z0-9]+", "_", low).strip("_")
-        if slug and _ID_PLAIN.match(low):
-            bits.append(_slug_id(slug, kind))
-            continue
-        # The slug is lossy in two ways that merge distinct regions. It flattens the minus
-        # sign, so a western longitude reads exactly like its eastern mirror; and it deletes
-        # every non-ASCII character, so "北京" and "上海" both slug to nothing at all — and an
-        # empty slug used to fall back to `kind`, which made EVERY such region share one id.
-        # A digest of the original text carries the lost information back. It is still stable:
-        # the same text always digests the same, so a re-run still replaces its own layer.
-        digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
-        bits.append(f"{slug}_{digest}" if slug else digest)
-    return "-".join(["embed", kind, *bits])
+    blob = json.dumps(content, sort_keys=True, default=str)
+    digest = hashlib.sha1(blob.encode("utf-8")).hexdigest()[:10]
+    bits = ["embed", _slug(kind)]
+    if hint is not None and str(hint).strip():
+        bits.append(_slug(str(hint)))
+    bits.append(digest)
+    return "-".join(bits)
 
 
 def _layer_label(base: str, tag: str) -> str:
@@ -426,7 +414,8 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                 entry.update({"image_file_id": rec["file_id"], "download_url": rec.get("download_url")})
                 layers.append(_raster_layer(
                     rec, box, _layer_label(f"{model} embedding (PCA-RGB)", region_tag),
-                    _layer_id("pca", model, region_tag)))
+                    _layer_id("pca", _region_tag(None, box), bbox=_round_bbox(box),
+                              model=model, start=start, end=end)))
             summaries.append(entry)
 
         pkg = res.get("package") or {}
@@ -501,7 +490,8 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
             "image_file_id": rec["file_id"], "download_url": rec.get("download_url"),
             "map_layer": _raster_layer(
                 rec, box, _layer_label(f"{model} segments (k={k})", _region_tag(name, box)),
-                _layer_id("segments", model, f"k{int(k)}", _region_tag(name, box))),
+                _layer_id("segments", _region_tag(None, box), bbox=_round_bbox(box),
+                          model=model, k=int(k), start=start, end=end)),
             "note": "Clusters are unlabelled: they group similar-looking ground, and the "
                     "same number means nothing across separate runs.",
         })
@@ -725,7 +715,12 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
         # build_map_layers' per-call dedup would drop the second before it ever left the
         # process. Number the repeats instead.
         used_tags: Dict[str, int] = {}
-        for entry, arr, p_ in zip(loaded, arrays, proj):
+        # The basis the PCA was ACTUALLY fitted on: packages drop out of `loaded` when they
+        # cannot be read, hold no grid, or carry no bbox, and those that remain are what set
+        # every layer's colours. Digesting the requested list instead would call two different
+        # renderings the same layer.
+        fitted_basis = sorted(str(e["file_id"]) for e in loaded)
+        for idx, (entry, arr, p_) in enumerate(zip(loaded, arrays, proj)):
             h, w = int(arr.shape[1]), int(arr.shape[2])
             img = np.clip((p_ - lo) / (hi - lo + 1e-8), 0.0, 1.0).reshape(h, w, 3)
             geom = (entry["meta"].get("geometry") or {})
@@ -738,7 +733,6 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                                           "be placed on the map"})
                 continue
             tag = _region_tag(None, bbox)
-            idx = loaded.index(entry)
             if names and idx < len(names) and str(names[idx]).strip():
                 tag = str(names[idx]).strip()
             seen_before = used_tags.get(tag, 0)
@@ -751,7 +745,13 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
             rec = create_output_file_from_path(out_png, filename=out_png.name)
             layers.append(_raster_layer(
                 rec, bbox, _layer_label(f"{model} embedding (shared PCA)", tag),
-                _layer_id("sharedpca", model, tag)))
+                # `package` is what makes this raster THIS one: bbox, model and basis are
+                # identical for every layer in the call, so two packages of the same region —
+                # one place at two periods, the documented case — collided on a single id and
+                # the per-call dedup dropped the second before it left the process.
+                _layer_id("sharedpca", _region_tag(None, bbox),
+                          package=str(entry["file_id"]), bbox=_round_bbox(bbox),
+                          model=model, basis=fitted_basis)))
             regions.append({"file_id": entry["file_id"], "label": tag, "bbox": bbox,
                             "grid": [h, w], "image_file_id": rec["file_id"],
                             "download_url": rec.get("download_url")})
@@ -1202,6 +1202,25 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
         # axis, and it looks like a result.
         layer = None
         cluster_note = None
+        # What every zonal layer in this call is computed FROM. Keyed on the REQUEST, so a
+        # swallowed tile error cannot re-identify a layer, and shared by all three so they
+        # agree on what "the same run" means.
+        # The EFFECTIVE period, not the raw arguments. _zonal_service_body sends a range only
+        # when both ends are given and the service falls back to `year` otherwise, so half a
+        # range and no range are the same imagery — digesting the arguments raw split one
+        # composite across two layers, and left `year` deciding identity on runs that ignored it.
+        _period = (("range", str(start), str(end)) if start and end else ("year", int(year)))
+        zone_content = {"file": file_id, "model": model, "period": _period,
+                        "tile_px": int(tile_px), "max_tiles": max_tiles,
+                        "zone_id_field": zone_id_field,
+                        # The data actually read is assembled from these too: _stage_vector_source
+                        # reconstructs a shapefile from its siblings, so one file_id can name
+                        # different geometry depending on what came with it.
+                        "siblings": sorted(str(f) for f in sibling_file_ids) if sibling_file_ids else None,
+                        # What the caller ASKED for. len(present) is the count that came back,
+                        # which a swallowed tile error changes without changing the request.
+                        "clusters": max(2, min(int(clusters), len(_CLUSTER_COLORS))),
+                        "zone_ids": sorted(str(z) for z in zone_ids) if zone_ids else None}
         try:
             import geopandas as gpd
 
@@ -1245,8 +1264,8 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                              # The region too: without zone_id_field the ids are row indices,
                              # so every one-polygon layer is zone "0" and one city's outline
                              # replaces another's.
-                             "id": _layer_id("zone", model, zone_tag,
-                                             sub["zone_id"].iloc[0]),
+                             "id": _layer_id("zone", file_id, **zone_content,
+                                             zone=str(sub["zone_id"].iloc[0])),
                              "label": f"{model} embedded zone {sub['zone_id'].iloc[0]}",
                              # Outline, not fill: this layer sits over the pixel image of the
                              # same polygon, and a filled one covers the picture it frames.
@@ -1258,8 +1277,7 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                              # groups and then 6 is two analyses of the same zones, and the
                              # second must not silently replace the first. segment_region
                              # already keys on its k for the same reason.
-                             "id": _layer_id("zonegroups", model, zone_tag,
-                                             f"k{len(present)}"),
+                             "id": _layer_id("zonegroups", file_id, **zone_content),
                              "label": _layer_label(
                                  f"{model} zone groups (k={len(present)})", zone_tag),
                              "render": "categories", "style_by": "look_alike_group",
@@ -1342,7 +1360,7 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                 rec_png, [float(v) for v in img["bounds"]],
                 _layer_label(f"{model} pixel embedding in zones",
                              _region_tag(name, img["bounds"])),
-                _layer_id("zonepixels", model, _region_tag(name, img["bounds"]))))
+                _layer_id("zonepixels", file_id, **zone_content)))
         elif img.get("error"):
             # Say why there is no picture, and what would get one — the vectors are unaffected
             # either way, and an unexplained absence reads as a failed analysis.
@@ -1407,8 +1425,13 @@ def make_rs_embed_zonal_tools(default_input_file_ids: Optional[List[str]] = None
                               # bbox to fall back on here, so an unnamed run identified the
                               # layer by label_column alone and the same column over two
                               # different areas collided.
-                              "id": _layer_id("predicted", label_column, polygons_file_id,
-                                              _region_tag(name)),
+                              "id": _layer_id(
+                                  "predicted", polygons_file_id,
+                                  vectors=vectors_csv_file_id, polygons=polygons_file_id,
+                                  column=label_column, zone_id_field=zone_id_field,
+                                  siblings=sorted(str(f) for f in sibling_file_ids)
+                                  if sibling_file_ids else None,
+                                  blocks=int(blocks)),
                               "label": _layer_label(
                                   f"{label_column} predicted from embeddings",
                                   _region_tag(name)),
