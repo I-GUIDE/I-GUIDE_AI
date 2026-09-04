@@ -355,8 +355,26 @@ _LEDGER_MAX_CHARS = int(os.getenv("AGENT_LEDGER_MAX_CHARS") or "6000")
 _LEDGER_ROWS_PER_TOOL = 3
 
 
-def _budgeted(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """The newest rows that fit the char budget, oldest dropped first."""
+def _json_size(row: Dict[str, Any]) -> int:
+    """A row's cost to a consumer that receives the raw rows."""
+    return len(json.dumps(row, default=str))
+
+
+def _budgeted(rows: List[Dict[str, Any]],
+              *, size: Optional[Callable[[Dict[str, Any]], int]] = None) -> List[Dict[str, Any]]:
+    """The newest rows that fit the char budget, oldest dropped first.
+
+    ``size`` measures a row in THE UNIT THE CONSUMER ACTUALLY PAYS, because the two consumers
+    do not agree. The router receives the raw rows and pays for their JSON; the answering model
+    and the auditor receive _ledger_lines, where every fact goes through the phrase book and a
+    single one can expand 3.7x ("features_total": 801 costs 23 JSON chars and renders 80).
+
+    Measuring JSON for both let the RENDERED ledger run far past _LEDGER_MAX_CHARS, whose own
+    comment calls it "a hard ceiling on the rendered ledger": 25 rows carrying only ordinary
+    facts passed at 5,665 JSON chars and rendered 14,764 — a 2.6x breach of the ceiling, by the
+    one mechanism that exists BECAUSE a turn overflowed the context window.
+    """
+    measure = size or _json_size
     per_tool: Dict[str, int] = {}
     thinned: List[Dict[str, Any]] = []
     for row in reversed(rows or []):
@@ -371,11 +389,11 @@ def _budgeted(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     kept: List[Dict[str, Any]] = []
     total = 0
     for row in reversed(rows[-_LEDGER_ROWS_SHOWN:]):
-        size = len(json.dumps(row, default=str))
-        if kept and total + size > _LEDGER_MAX_CHARS:
+        row_size = measure(row)
+        if kept and total + row_size > _LEDGER_MAX_CHARS:
             break
         kept.append(row)
-        total += size
+        total += row_size
     kept.reverse()
     return kept
 
@@ -705,38 +723,43 @@ def _ledger_lines(rows: List[Dict[str, Any]]) -> List[str]:
     against evidence that never mentioned it and flagged as high-severity hallucination —
     the feature's two halves contradicting each other in front of the user.
     """
-    lines: List[str] = []
-    for r in _budgeted(rows or []):
-        bits = [("FAILED " if r.get("failed") else "") + str(r.get("tool"))]
-        if r.get("args"):
-            bits.append("(" + ", ".join(f"{k}={v}" for k, v in r["args"].items()) + ")")
-        if r.get("failed"):
-            # A failed call has no facts. Showing its ARGUMENTS and its error is the half that
-            # matters: the note tells the model not to re-derive completed work, and a failure
-            # rendered as a success is exactly how "already done" gets said about work that
-            # never happened.
-            bits.append(f"-> DID NOT RUN: {r.get('error') or 'the tool returned ok=false'}")
-        elif r.get("facts"):
-            bits.append("-> " + ", ".join(_fact_phrase(k, v) for k, v in r["facts"].items()))
-        # A failed call delivered nothing. Rendering its layer or its outputs would contradict
-        # the visible-state section built from these same rows, and it is the same bug class as
-        # a failed call wearing a successful one's result.
-        if not r.get("failed"):
-            if r.get("outputs"):
-                # The id as well as the name: it was captured and never rendered, so a peer saw
-                # "[produced champaign.geojson]" and had to hope a bare filename resolved.
-                # Gated on `outputs`, NOT on file_id: read_text_file and
-                # inspect_file_for_analysis both return the file_id of the file the USER
-                # uploaded and create nothing, so keying on file_id alone claimed they had
-                # produced it — a fabrication the grounding auditor then confirms, since it
-                # reads these same lines as evidence.
-                fid = r.get("file_id")
-                bits.append(f"[produced {r['outputs']}, file_id {fid}]" if fid
-                            else f"[produced {r['outputs']}]")
-            if r.get("map_layer"):
-                bits.append(f"[on the map as {_layer_phrase(r['map_layer'])}]")
-        lines.append("- " + " ".join(bits))
-    return lines
+    # Budgeted by RENDERED length — the unit _LEDGER_MAX_CHARS documents — plus one char per
+    # line for the newline the caller joins them with.
+    return [_ledger_line(r)
+            for r in _budgeted(rows or [], size=lambda row: len(_ledger_line(row)) + 1)]
+
+
+def _ledger_line(r: Dict[str, Any]) -> str:
+    """One row exactly as the answering model and the auditor read it."""
+    bits = [("FAILED " if r.get("failed") else "") + str(r.get("tool"))]
+    if r.get("args"):
+        bits.append("(" + ", ".join(f"{k}={v}" for k, v in r["args"].items()) + ")")
+    if r.get("failed"):
+        # A failed call has no facts. Showing its ARGUMENTS and its error is the half that
+        # matters: the note tells the model not to re-derive completed work, and a failure
+        # rendered as a success is exactly how "already done" gets said about work that
+        # never happened.
+        bits.append(f"-> DID NOT RUN: {r.get('error') or 'the tool returned ok=false'}")
+    elif r.get("facts"):
+        bits.append("-> " + ", ".join(_fact_phrase(k, v) for k, v in r["facts"].items()))
+    # A failed call delivered nothing. Rendering its layer or its outputs would contradict
+    # the visible-state section built from these same rows, and it is the same bug class as
+    # a failed call wearing a successful one's result.
+    if not r.get("failed"):
+        if r.get("outputs"):
+            # The id as well as the name: it was captured and never rendered, so a peer saw
+            # "[produced champaign.geojson]" and had to hope a bare filename resolved.
+            # Gated on `outputs`, NOT on file_id: read_text_file and
+            # inspect_file_for_analysis both return the file_id of the file the USER
+            # uploaded and create nothing, so keying on file_id alone claimed they had
+            # produced it — a fabrication the grounding auditor then confirms, since it
+            # reads these same lines as evidence.
+            fid = r.get("file_id")
+            bits.append(f"[produced {r['outputs']}, file_id {fid}]" if fid
+                        else f"[produced {r['outputs']}]")
+        if r.get("map_layer"):
+            bits.append(f"[on the map as {_layer_phrase(r['map_layer'])}]")
+    return "- " + " ".join(bits)
 
 
 # The section header the synthesizer prompt names, so the two cannot drift apart.
