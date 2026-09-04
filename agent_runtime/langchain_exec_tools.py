@@ -49,6 +49,21 @@ def _resolve_input_file(ref: str) -> Tuple[Path, Optional[Dict[str, Any]]]:
     return path, rec
 
 
+def _free_dest(filename: str, claimed: Dict[str, str]) -> str:
+    """A name in the work dir that nothing has claimed yet, derived from ``filename``.
+
+    Reached only when every name a file could use is already taken by another input. An ugly
+    name the model can open beats a file it cannot reach at all.
+    """
+    base = str(filename or "input")
+    head, dot, tail = base.rpartition(".")
+    stem, suffix = (head, "." + tail) if dot and head else (base, "")
+    n = 2
+    while f"{stem}_{n}{suffix}" in claimed:
+        n += 1
+    return f"{stem}_{n}{suffix}"
+
+
 def _build_staging(refs: List[str]) -> Tuple[List[Dict[str, str]], List[Dict[str, Any]], List[Dict[str, str]], List[Dict[str, Any]]]:
     """Resolve file references into copy specs for the sandbox work dir.
 
@@ -65,6 +80,13 @@ def _build_staging(refs: List[str]) -> Tuple[List[Dict[str, str]], List[Dict[str
     max_files = _max_input_files()
     max_bytes = _max_input_bytes()
     seen_sources: set[str] = set()
+    # Which /work name each input has claimed. The dedupe below is keyed on the SOURCE, so two
+    # different files sharing a filename both used to emit the same dest: the second copy
+    # silently overwrote the first while `available_as` went on telling the model both were
+    # there, and the peer analysed the wrong dataset under the right name. Worse when neither
+    # has a file_id — two local paths with the same basename left ONE file in /work, with the
+    # first unreachable under any name at all.
+    claimed: Dict[str, str] = {}
     total_bytes = 0
 
     for ref in refs:
@@ -92,10 +114,17 @@ def _build_staging(refs: List[str]) -> Tuple[List[Dict[str, str]], List[Dict[str
         total_bytes += size
         filename = (record or {}).get("filename") or host_path.name
         file_id = (record or {}).get("file_id")
-        names = list(dict.fromkeys(n for n in (file_id, filename) if n))
+        names = [n for n in dict.fromkeys(x for x in (file_id, filename) if x)
+                 if n not in claimed]
+        if not names:
+            names = [_free_dest(filename, claimed)]
         for dest in names:
+            claimed[dest] = str(ref)
             staging.append({"source": src, "dest": dest})
-        staged_info.append({"ref": str(ref), "file_id": file_id, "filename": filename, "available_as": names})
+        # `available_as` is what the model is told to open, so it must be the names this file
+        # ACTUALLY has — not the ones it would have had if nothing else were staged.
+        staged_info.append({"ref": str(ref), "file_id": file_id, "filename": filename,
+                            "available_as": names})
 
     return staging, staged_info, errors, skipped
 

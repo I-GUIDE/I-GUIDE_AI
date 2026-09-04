@@ -1223,7 +1223,13 @@ def make_aggregate_tools(default_input_file_ids: Optional[List[str]] = None) -> 
                 payload: Dict[str, Any] = {
                     "ok": True, "file_id": rec["file_id"], "filename": rec.get("filename"),
                     "download_url": rec.get("download_url"),
-                    "feature_count": int(len(selected)), "features_in": total_in,
+                    # The MAPPED count, like every other sampling producer (:832, :964,
+                    # langchain_geo_tools.py:750). This was the selection size, so the one
+                    # invariant the ledger's features_total phrase depends on — feature_count
+                    # is what is on the map — did not hold here, and a sampled layer read as a
+                    # complete one. `features_total` carries the selection size instead.
+                    "feature_count": int(len(mapped)), "features_in": total_in,
+                    "sampled": bool(sampled), "features_total": total_out,
                     "criterion": criterion, "column": column, "csv": _asset(csv_rec),
                     "on_map": True,
                     "map_layer": _map_layer(rec, _label_for(name, rec), mode, style_by,
