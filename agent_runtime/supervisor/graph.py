@@ -3329,11 +3329,20 @@ def default_code_fn(*, llm: Optional[Any] = None, skill_roots: Optional[List[str
         tools = [*make_skill_tools(skill_roots=skill_roots), request_tool]
         # KB read tools so the code peer can pull the FULL source of referenced blocks
         # (get_kb_block) and reuse it verbatim instead of stubbing loaders.
+        #
+        # web_search/web_fetch join them because the KB covers I-GUIDE's OWN content and not
+        # library documentation, and the failure this peer actually has is plausible code
+        # against a misremembered API — a keyword argument that moved, a function that returns
+        # a tuple now. It had no way to check: the sandbox has no network, so a lookup has to
+        # happen agent-side, before the code runs. Asking the factory for web_search also
+        # yields web_fetch by its own rule (finding a page and being unable to read it is not
+        # a capability). Four names out of the family's twenty-two.
         try:
             from agent_runtime.langchain_granular_tools import make_langchain_granular_tools
             tools.extend(t for t in make_langchain_granular_tools(
-                enabled_search_methods=["agent_kb_search", "get_kb_block"])
-                if getattr(t, "name", "") in {"agent_kb_search", "get_kb_block"})
+                enabled_search_methods=["agent_kb_search", "get_kb_block", "web_search"])
+                if getattr(t, "name", "") in {"agent_kb_search", "get_kb_block",
+                                              "web_search", "web_fetch"})
         except Exception:
             pass
         # Geocoding runs agent-side (the sandbox has NO network): lets the peer turn named
