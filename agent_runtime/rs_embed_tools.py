@@ -257,6 +257,11 @@ def _layer_label(base: str, tag: str) -> str:
     return f"{tag} \u2014 {base}" if tag else base
 
 
+# Pixels the shared PCA basis is FITTED on. Projection is never subsampled; this only
+# bounds the SVD, which is O(pixels) in memory and would otherwise grow with region count.
+_PCA_FIT_MAX_PX = 2_000_000
+
+
 def _slug(text: str) -> str:
     keep = [c if c.isalnum() else "_" for c in str(text).lower()]
     return "".join(keep).strip("_")[:40] or "region"
@@ -544,12 +549,179 @@ def make_rs_embed_tools(default_input_file_ids: Optional[List[str]] = None) -> L
                                    "quote it, because a confident number from a weak head is "
                                    "still a weak number."})
 
+    def align_embedding_colors(file_ids: List[str], model: Optional[str] = None,
+                               names: Optional[List[str]] = None) -> str:
+        """Re-colour several already-embedded regions on ONE shared PCA basis, so the colours
+        mean the same thing in every layer.
+
+        Use this whenever two or more embedding rasters are being read against each other —
+        "do these areas look alike?", "why are these maps different colours?", "put them side
+        by side". Each embed_region call fits its OWN PCA and its OWN contrast stretch, so the
+        same RGB in two layers encodes different directions in embedding space at different
+        scales: each map is meaningful alone and none of them is comparable to another. This
+        fits one basis and one stretch across all the regions at once and re-renders them,
+        after which similar colour DOES mean similar ground across the layers.
+
+        Pass the `file_id` of each region's embedding package — the .npz embed_region saves as
+        `embedding_package.file_id`. They must all carry a grid for the same model; a package
+        whose grid exceeded the export cap holds only the pooled vector and has no pixels to
+        re-colour, and this says so rather than quietly dropping it.
+
+        Costs nothing at the imagery provider: it reuses embeddings already paid for, so it is
+        always cheaper than embedding the regions again, and it works on regions embedded in
+        earlier turns. `names` labels the layers in order, one per file_id; without it a layer
+        is named by its region's centre.
+        """
+        import numpy as np
+
+        from agent_runtime.file_store import create_output_file_from_path, resolve_file_id
+
+        ids = [str(f).strip() for f in (file_ids or []) if str(f).strip()]
+        if len(ids) < 2:
+            return json.dumps({
+                "ok": False,
+                "error": "a shared basis needs at least two embedding packages, got "
+                         f"{len(ids)}",
+                "hint": "Embed each region with embed_region and pass the "
+                        "embedding_package.file_id of each."})
+
+        loaded, problems = [], []
+        for fid in ids:
+            try:
+                with np.load(resolve_file_id(fid), allow_pickle=True) as z:
+                    keys = [k for k in z.files if k.startswith("grid__")]
+                    entry = {"file_id": fid,
+                             "grids": {k[len("grid__"):]: np.asarray(z[k], dtype=np.float32)
+                                       for k in keys}}
+                    try:
+                        entry["meta"] = json.loads(str(z["meta"])) if "meta" in z.files else {}
+                    except Exception:  # noqa: BLE001 - a package without readable meta is usable
+                        entry["meta"] = {}
+            except Exception as exc:  # noqa: BLE001
+                problems.append({"file_id": fid, "error": f"{type(exc).__name__}: {exc}"[:200]})
+                continue
+            if not entry["grids"]:
+                problems.append({"file_id": fid,
+                                 "error": "this package holds the pooled vector only — its "
+                                          "grid exceeded the export cap, so there are no "
+                                          "pixels to re-colour"})
+                continue
+            loaded.append(entry)
+
+        if len(loaded) < 2:
+            return json.dumps({"ok": False,
+                               "error": "fewer than two packages could be read with a grid",
+                               "packages_rejected": problems})
+
+        shared = set(loaded[0]["grids"])
+        for e in loaded[1:]:
+            shared &= set(e["grids"])
+        if model and model not in shared:
+            return json.dumps({"ok": False,
+                               "error": f"not every package holds a grid for {model!r}",
+                               "models_in_common": sorted(shared),
+                               "per_package": [{"file_id": e["file_id"],
+                                                "models": sorted(e["grids"])} for e in loaded]})
+        if not shared:
+            return json.dumps({
+                "ok": False,
+                "error": "the packages share no model, so there is no common space to project",
+                "hint": "A basis is only shared within one model — two models' embeddings are "
+                        "different spaces and their colours were never comparable.",
+                "per_package": [{"file_id": e["file_id"], "models": sorted(e["grids"])}
+                                for e in loaded]})
+        model = model or sorted(shared)[0]
+
+        arrays = [np.nan_to_num(e["grids"][model], nan=0.0, posinf=0.0, neginf=0.0)
+                  for e in loaded]
+        dims = {int(a.shape[0]) for a in arrays}
+        if len(dims) != 1:
+            return json.dumps({"ok": False,
+                               "error": f"the {model!r} grids disagree on dimensionality: "
+                                        f"{sorted(dims)}"})
+
+        # (pixels, dims) per region, then one basis over all of them at once.
+        feats = [a.reshape(a.shape[0], -1).T.astype(np.float64) for a in arrays]
+        stacked = np.concatenate(feats, axis=0)
+        mu = stacked.mean(axis=0)
+        # Fitting is subsampled by a deterministic stride on very large mosaics; the
+        # PROJECTION always uses every pixel, so no region is rendered from a partial fit.
+        step = max(1, int(np.ceil(stacked.shape[0] / _PCA_FIT_MAX_PX)))
+        _u, sv, vt = np.linalg.svd(stacked[::step] - mu, full_matrices=False)
+        comp = vt[:3]
+
+        proj = [(f - mu) @ comp.T for f in feats]
+        allp = np.concatenate(proj, axis=0)
+        # Deterministic sign, mirroring the per-run renderer, so a rerun does not invert.
+        signs = np.where(allp.sum(axis=0) < 0, -1.0, 1.0)
+        proj = [p * signs for p in proj]
+        allp = allp * signs
+        # ONE stretch, over every region's pixels — this is what makes the colours comparable.
+        lo = np.percentile(allp, 2.0, axis=0)
+        hi = np.percentile(allp, 98.0, axis=0)
+
+        from PIL import Image
+
+        layers, regions = [], []
+        for entry, arr, p_ in zip(loaded, arrays, proj):
+            h, w = int(arr.shape[1]), int(arr.shape[2])
+            img = np.clip((p_ - lo) / (hi - lo + 1e-8), 0.0, 1.0).reshape(h, w, 3)
+            geom = (entry["meta"].get("geometry") or {})
+            try:
+                bbox = [float(geom["minlon"]), float(geom["minlat"]),
+                        float(geom["maxlon"]), float(geom["maxlat"])]
+            except (KeyError, TypeError, ValueError):
+                problems.append({"file_id": entry["file_id"],
+                                 "error": "no bbox in the package meta, so the raster cannot "
+                                          "be placed on the map"})
+                continue
+            tag = _region_tag(None, bbox)
+            idx = loaded.index(entry)
+            if names and idx < len(names) and str(names[idx]).strip():
+                tag = str(names[idx]).strip()
+            stem = f"{_slug(tag)}_{model}_shared_pca"
+            out_png = Path(tempfile.mkdtemp(prefix="rsembed_shared_")) / f"{stem}.png"
+            Image.fromarray((img * 255).astype(np.uint8)).save(out_png)
+            rec = create_output_file_from_path(out_png, filename=out_png.name)
+            layers.append(_raster_layer(
+                rec, bbox, _layer_label(f"{model} embedding (shared PCA)", tag)))
+            regions.append({"file_id": entry["file_id"], "label": tag, "bbox": bbox,
+                            "grid": [h, w], "image_file_id": rec["file_id"],
+                            "download_url": rec.get("download_url")})
+
+        if not layers:
+            return json.dumps({"ok": False,
+                               "error": "no region could be placed on the map",
+                               "packages_rejected": problems})
+
+        var = np.asarray(sv, dtype=np.float64) ** 2
+        out: Dict[str, Any] = {
+            "ok": True, "model": model, "regions": regions,
+            "pixels_used": int(stacked.shape[0]), "on_map": True,
+            "variance_explained": [round(float(v), 4) for v in (var[:3] / var.sum())],
+            "note": "These layers share ONE PCA basis and ONE contrast stretch, fitted across "
+                    "all of them together, so a colour means the same thing in every one — "
+                    "unlike the per-run rasters embed_region produces, which are each "
+                    "normalised on their own pixels and are NOT comparable to each other. "
+                    "They are still not land-cover classes.",
+        }
+        if step > 1:
+            out["basis_fitted_on"] = (f"every {step}th pixel ({_PCA_FIT_MAX_PX:,} cap); all "
+                                      "pixels were projected and rendered")
+        if problems:
+            out["packages_rejected"] = problems
+        out["map_layer"] = layers[0]
+        if len(layers) > 1:
+            out["map_layers"] = layers
+        return json.dumps(out)
+
     return [
         StructuredTool.from_function(func=list_embedding_models, name="list_embedding_models", metadata=meta),
         StructuredTool.from_function(func=embed_region, name="embed_region", metadata=meta),
         StructuredTool.from_function(func=segment_region, name="segment_region", metadata=meta),
         StructuredTool.from_function(func=embedding_change, name="embedding_change", metadata=meta),
         StructuredTool.from_function(func=compare_regions, name="compare_regions", metadata=meta),
+        StructuredTool.from_function(func=align_embedding_colors, name="align_embedding_colors", metadata=meta),
         StructuredTool.from_function(func=list_prediction_heads, name="list_prediction_heads", metadata=meta),
         StructuredTool.from_function(func=predict_for_region, name="predict_for_region", metadata=meta),
     ]
