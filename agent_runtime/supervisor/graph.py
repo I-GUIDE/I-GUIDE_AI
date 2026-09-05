@@ -3316,26 +3316,29 @@ def _apply_execution_honesty(session: Any, result: Dict[str, Any], *, prose_key:
     too, so the guard was missing exactly where it was needed. Observed live: a turn returned
     a Socrata loader as "the code you actually ran" with no execute_code record anywhere in it.
 
-    `caps` suppresses the re-run, not the accounting. A peer that asked for another capability
-    is stopping legitimately and cannot run what it does not have; but ``executed`` is a fact
-    about this turn either way, and reporting it as a run because a call was made is the thing
-    being fixed.
+    A capability request no longer suppresses the challenge, only changes it. Being blocked is
+    a reason a peer cannot RUN the code; it is not a reason to present unrun code as executed,
+    and the two were conflated — a live turn requested a capability and still returned a
+    network loader as "the code you actually ran". The blocked variant asks it to run what it
+    can and otherwise label the code UNRUN, keeping the request either way.
     """
     from agent_runtime.runtime_utils import extract_final_answer
 
     turn = {"tool_calls": result.get("tool_calls") or [],
             "tool_results": result.get("tool_results") or []}
     reran = False
-    if (exec_available and not caps
+    if (exec_available
             and not _has_execution_record(turn)
             and _ships_unrun_code(result.get(prose_key) or "")):
+        blocked = bool(caps)
         emit_trace_event(
             "code_not_executed",
-            {"stage": node,
+            {"stage": node, "blocked_on_capability": blocked,
              "message": "code returned without an execute_code record; retrying once"},
             node=node,
         )
-        _retry = session.run(_CODE_NOT_RUN_OBSERVATION)
+        _retry = session.run(_CODE_NOT_RUN_BLOCKED_OBSERVATION if blocked
+                             else _CODE_NOT_RUN_OBSERVATION)
         result[prose_key] = extract_final_answer(_retry.resp) or result.get(prose_key)
         result["tool_calls"] = list(session.turn_artifacts["tool_calls"])
         result["tool_results"] = list(session.turn_artifacts["tool_results"])
@@ -3368,6 +3371,20 @@ _CODE_NOT_RUN_OBSERVATION = (
     "not exist for the user. Run it with execute_code, read stdout/stderr, fix what the "
     "sandbox reports and re-run until it works; then report the result. If it genuinely "
     "cannot be run here, say so and why."
+)
+
+# The same challenge for a peer that has asked for another capability. It may genuinely be
+# unable to run the code yet, so demanding a run would be the wrong instruction — but shipping
+# code that READS as executed is not made acceptable by being blocked, which is the whole
+# point of challenging it here.
+_CODE_NOT_RUN_BLOCKED_OBSERVATION = (
+    "Your previous reply returned code, but this turn has no execute_code record, and you have "
+    "asked for another capability — so the code was NOT run, its output is unverified, and any "
+    "files it would have written do not exist for the user. If you can run it now with what you "
+    "already have, do that and report the real output. If you genuinely cannot until the "
+    "capability arrives, keep the request and say plainly that the code is UNRUN and its "
+    "results are not yet established — do not present it, or any numbers, as though it had "
+    "executed."
 )
 
 

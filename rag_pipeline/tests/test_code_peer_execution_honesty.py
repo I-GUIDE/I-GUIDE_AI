@@ -180,14 +180,29 @@ def test_an_answer_with_no_code_block_is_left_alone():
     assert result["executed"] is False
 
 
-def test_a_capability_request_suppresses_the_rerun_but_not_the_accounting():
-    """A peer that asked for a capability cannot run what it does not have — but `executed` is
-    a fact about this turn either way, and that is what was being reported wrongly."""
-    session = _FakeSession()
+def test_a_blocked_peer_is_still_challenged_on_shipped_code(monkeypatch):
+    """Being blocked is a reason a peer cannot RUN code. It is not a reason to present unrun
+    code as executed — a live turn requested a capability and still returned a network loader
+    as "the code you actually ran"."""
+    monkeypatch.setattr(g, "extract_final_answer", lambda *a, **k: "noted", raising=False)
+    session = _FakeSession(tool_results=[])
     result = {"answer": "```python\nprint(1)\n```", "tool_calls": [], "tool_results": []}
-    assert _apply(result, session, caps=["search"]) is False
-    assert session.runs == []
+    assert _apply(result, session, caps=["search"]) is True
+    assert session.runs, "the challenge must fire even when a capability was requested"
     assert result["executed"] is False
+
+
+def test_the_blocked_challenge_asks_for_a_label_not_a_run(monkeypatch):
+    """Demanding a run from a peer that cannot run is the wrong instruction; the remedy forks
+    while the challenge does not."""
+    monkeypatch.setattr(g, "extract_final_answer", lambda *a, **k: "noted", raising=False)
+    blocked, free = _FakeSession(), _FakeSession()
+    _apply({"answer": "```python\nx\n```", "tool_calls": [], "tool_results": []},
+           blocked, caps=["search"])
+    _apply({"answer": "```python\nx\n```", "tool_calls": [], "tool_results": []}, free)
+    assert "UNRUN" in blocked.runs[0] and "keep the request" in blocked.runs[0]
+    assert "re-run until it works" in free.runs[0]
+    assert "UNRUN" not in free.runs[0]
 
 
 def test_a_failed_run_is_reported_with_its_error():
